@@ -1,0 +1,40 @@
+{
+   "action": {
+      "default_icon": {
+         "128": "/images/app.png",
+         "16": "/images/app.png",
+         "32": "/images/app.png",
+         "48": "/images/app.png"
+      },
+      "default_popup": "index.html",
+      "default_title": "夸克网盘嗅探插件"
+   },
+   "background": {
+      "service_worker": "background.js"
+   },
+   "content_scripts": [ {
+      "all_frames": true,
+      "css": [ "content.css" ],
+      "js": [ "content.js" ],
+      "matches": [ "http://*/*", "https://*/*", "ftp://*/*" ],
+      "run_at": "document_end"
+   } ],
+   "description": "识别到网页资源时，可一键存夸克网盘",
+   "host_permissions": [ "\u003Call_urls>", "http://*/*", "https://*/*" ],
+   "icons": {
+      "128": "/images/app.png",
+      "16": "/images/app.png",
+      "32": "/images/app.png",
+      "48": "/images/app.png"
+   },
+   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmz0XEclFzABrtGS7Xn/v5eafBazMN2fJQZOXK5w0czEY8z0Eg21Tt2AheclySfuZnZpn41P+Zb65fLFwbnzQEPkVptq9d25bcnL8hJhkMf9sd0yBUJv4mcUPzVO9JRO+rawAlNn7w1OO78DgXmvuQRMI2kC1xBHW5Z0NCJlTmdqNVzRKeZyslmejCh3c33I8mmk7zOP/zNFR8aeG8py8UVSL1mFCVFpGvGzbe/STjN8b0OWAU5ZBZ8bHKn73Z9q0nBrxK0xGaZjUl+ac/i3i3fCYTIZQOrgCg5OSs2ZL3GarXJGyVBggqcopYr8GE8cfSFOodjAzXz5OH4tYgI+PKwIDAQAB",
+   "manifest_version": 3,
+   "name": "夸克网盘-网页嗅探",
+   "permissions": [ "webRequest", "nativeMessaging", "contextMenus", "storage" ],
+   "update_url": "https://clients2.google.com/service/update2/crx",
+   "version": "1.0.7",
+   "web_accessible_resources": [ {
+      "matches": [ "\u003Call_urls>" ],
+      "resources": [ "insert.js" ]
+   } ]
+}

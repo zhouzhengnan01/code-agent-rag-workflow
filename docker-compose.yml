@@ -1,0 +1,22 @@
+services:
+  codezzn:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${CODEZZN_BASE_IMAGE:-python:3.12-slim}
+    container_name: codezzn
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      CODEZZN_MILVUS_URI: /app/data/milvus.db
+      MILVUS_COLLECTION_PREFIX: codezzn_kb_
+    ports:
+      - "${CODEZZN_PORT:-8080}:8080"
+    volumes:
+      - ./data:/app/data
+      - ./workspace:/workspace
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5

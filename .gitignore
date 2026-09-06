@@ -1,0 +1,12 @@
+.env
+data/
+__pycache__/
+.pytest_cache/
+*.pyc
+.chrome-qa*/
+workbench-preview*.png
+.edge-audit*/
+audit-*.png
+redesign-*.png
+qwen-provider-preview*.png
+taste-*.png

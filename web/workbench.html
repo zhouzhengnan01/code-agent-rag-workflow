@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Codezzn Studio</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/workbench.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">跳到主要内容</a>
+  <div class="studio-shell" id="studioShell">
+    <aside class="workspace-rail" id="workspaceRail" aria-label="主导航">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">Z</div>
+        <div class="brand-name">
+          <strong>codezzn</strong>
+          <span>Agent Studio</span>
+        </div>
+        <button class="icon-button rail-close" type="button" onclick="toggleRail(false)" aria-label="关闭导航">关闭</button>
+      </div>
+
+      <div class="workspace-switcher">
+        <span class="workspace-symbol" aria-hidden="true">L</span>
+        <span><small>当前工作区</small><strong>Local workspace</strong></span>
+      </div>
+
+      <nav class="primary-nav" id="nav"></nav>
+
+      <div class="rail-footer">
+        <div class="service-state" aria-live="polite">
+          <span class="status-lamp" aria-hidden="true"></span>
+          <span><small>运行状态</small><strong id="healthText">正在连接</strong></span>
+        </div>
+        <button class="rail-action" type="button" onclick="openSettings()">
+          <span>访问密钥</span><span class="key-key">KEY</span>
+        </button>
+      </div>
+    </aside>
+
+    <button class="rail-scrim" type="button" onclick="toggleRail(false)" aria-label="关闭导航"></button>
+
+    <main class="workspace-main">
+      <header class="command-bar">
+        <div class="command-context">
+          <button class="icon-button menu-button" type="button" onclick="toggleRail(true)" aria-label="打开导航">菜单</button>
+          <div class="breadcrumb"><span>Codezzn</span><strong id="pageTitle">概览</strong></div>
+        </div>
+        <div class="command-actions">
+          <button class="button button-quiet" type="button" onclick="loadPage()">刷新</button>
+          <button class="button button-primary" type="button" onclick="quickCreate()">新建</button>
+        </div>
+      </header>
+      <section class="viewport" id="content" tabindex="-1"></section>
+    </main>
+  </div>
+
+  <div id="sessionMenuRoot"></div>
+  <div id="modalRoot"></div>
+  <div id="toastRoot" aria-live="polite"></div>
+  <script src="/assets/workbench.js"></script>
+</body>
+</html>

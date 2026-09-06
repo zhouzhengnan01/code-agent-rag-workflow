@@ -1,0 +1,13 @@
+.git
+.env
+data
+workspace
+.chrome-qa*
+workbench-preview*.png
+.edge-audit*
+audit-*.png
+redesign-*.png
+qwen-provider-preview*.png
+__pycache__
+*.pyc
+.pytest_cache
