@@ -3,7 +3,7 @@ import asyncio
 
 os.environ["CODEZZN_DATA_DIR"] = "/tmp/codezzn-test"
 
-from backend.app.knowledge import chunk_text
+from backend.app.knowledge import chunk_document, chunk_id_for, chunk_text, decode_upload, document_id_for, ingest, validate_source
 
 
 def test_chunking_has_overlap_and_keeps_text():
@@ -13,6 +13,58 @@ def test_chunking_has_overlap_and_keeps_text():
     assert all(len(chunk) <= 1000 for chunk in chunks)
 
 
+def test_structure_aware_chunk_metadata_and_deterministic_source_validation():
+    markdown = chunk_document("# Intro\n\nalpha\n\n## Details\n\nbeta", "guide.md", 32, 0)
+    assert markdown
+    assert any(item["metadata"]["section"] == "Intro" for item in markdown)
+    assert all(item["metadata"]["content_hash"] for item in markdown)
+    assert chunk_document("{\"a\": {\"b\": 1}}", "data.json", 100, 0)[0]["metadata"]["path"] == "/a/b"
+    assert chunk_document("name,value\na,1", "data.csv", 100, 0)[0]["metadata"]["path"] == "row/2"
+    assert validate_source("folder/guide.md") == "folder/guide.md"
+    assert document_id_for("kb", "guide.md") == document_id_for("kb", "guide.md")
+    assert chunk_id_for("doc", "hash", 0) == chunk_id_for("doc", "hash", 0)
+    assert decode_upload("guide.md", b"# hi", "text/markdown")[2]["mime_type"] == "text/markdown"
+
+
+def test_invalid_uploads_are_rejected():
+    import pytest
+    with pytest.raises(Exception):
+        decode_upload("../secret.txt", b"x", "text/plain")
+    with pytest.raises(Exception):
+        decode_upload("empty.txt", b"", "text/plain")
+    with pytest.raises(Exception):
+        decode_upload("wrong.json", b"{}", "text/csv")
+
+
+def test_instruction_loading_is_bounded_and_composed(tmp_path, monkeypatch):
+    from backend.app import agent
+    monkeypatch.setattr(agent, "WORKSPACE", tmp_path)
+    (tmp_path / "AGENTS.md").write_text("root", encoding="utf-8")
+    child = tmp_path / "src"
+    child.mkdir()
+    (child / "AGENTS.override.md").write_text("child", encoding="utf-8")
+    result = agent.load_instructions("src", max_bytes=100)
+    assert result["content"] == "root\n\nchild"
+    assert result["paths"] == [str(tmp_path / "AGENTS.md"), str(child / "AGENTS.override.md")]
+
+
+def test_apply_patch_requires_approval_and_exact_replacement(tmp_path, monkeypatch):
+    from backend.app import agent
+    monkeypatch.setattr(agent, "WORKSPACE", tmp_path)
+    (tmp_path / "a.txt").write_text("before", encoding="utf-8")
+    routes = {"apply_patch": ("builtin", None)}
+    denied = asyncio.run(agent.execute_tool("apply_patch", {"path": "a.txt", "old": "before", "new": "after"}, {}, routes))
+    assert denied["error"]["code"] == "approval_required"
+    result = asyncio.run(agent.execute_tool("apply_patch", {"path": "a.txt", "old": "before", "new": "after"}, {"auto_approve": True}, routes))
+    assert result["changed"] is True
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "after"
+
+
+def test_git_command_construction():
+    from backend.app.agent import _git_command
+    assert _git_command(["diff", "--cached"]) == ["git", "diff", "--cached"]
+
+
 def test_safe_path_rejects_escape():
     from backend.app.agent import safe_path
     try:
@@ -20,6 +72,13 @@ def test_safe_path_rejects_escape():
         assert False, "escape must fail"
     except ValueError:
         pass
+
+
+def test_safe_event_filters_private_fields():
+    from backend.app.agent import _event
+    event = _event("tool_completed", name="read_file", result="secret", arguments={"path": "x"}, reasoning_content="private")
+    assert "result" not in event and "arguments" not in event and "reasoning_content" not in event
+    assert event["name"] == "read_file"
 
 
 def test_bailian_provider_normalization():

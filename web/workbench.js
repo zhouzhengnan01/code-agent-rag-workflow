@@ -444,7 +444,7 @@ function choiceGroup(title, name, items, selected = []) {
 
 async function agentForm(item) {
   const [providers, skills, knowledge, mcps] = await Promise.all(['providers', 'skills', 'knowledge', 'mcp_servers'].map(load));
-  const tools = [{ id: 'knowledge_search', name: '知识检索' }, { id: 'list_files', name: '列目录' }, { id: 'read_file', name: '读文件' }, { id: 'write_file', name: '写文件' }, { id: 'run_shell', name: 'Shell' }];
+  const tools = [{ id: 'knowledge_search', name: '知识检索' }, { id: 'list_files', name: '列目录' }, { id: 'read_file', name: '读文件' }, { id: 'write_file', name: '写文件' }, { id: 'apply_patch', name: '应用补丁' }, { id: 'run_shell', name: 'Shell' }, { id: 'git_status', name: 'Git 状态' }, { id: 'git_diff', name: 'Git 差异' }, { id: 'git_log', name: 'Git 日志' }, { id: 'review', name: '代码审查' }];
   modal(item.id ? '编辑智能体' : '新建智能体', `
     <form id="editForm" class="form-layout">
       <section class="form-section control-full"><header><h3>身份与模型</h3><p>定义智能体的职责和推理模型。</p></header></section>
@@ -458,7 +458,7 @@ async function agentForm(item) {
       ${choiceGroup('知识库', 'knowledge_ids', knowledge, item.knowledge_ids)}
       ${choiceGroup('MCP 服务', 'mcp_server_ids', mcps, item.mcp_server_ids)}
       ${choiceGroup('内置工具', 'builtin_tools', tools, item.builtin_tools || [])}
-      ${toggleField('允许执行 Shell', 'allow_shell', item.allow_shell)}${toggleField('启用智能体', 'enabled', item.enabled !== false)}
+      ${toggleField('允许执行 Shell', 'allow_shell', item.allow_shell)}${toggleField('自动批准写入、Shell 和 MCP', 'auto_approve', item.auto_approve === true)}${toggleField('启用智能体', 'enabled', item.enabled !== false)}
     </form>`, () => {
       const data = formData($('#editForm'));
       for (const name of ['skill_ids', 'knowledge_ids', 'mcp_server_ids', 'builtin_tools']) {
@@ -467,6 +467,7 @@ async function agentForm(item) {
       data.temperature = Number(data.temperature);
       data.max_tool_rounds = Number(data.max_tool_rounds);
       data.allow_shell = $('#editForm [name=allow_shell]').checked;
+      data.auto_approve = $('#editForm [name=auto_approve]').checked;
       data.enabled = $('#editForm [name=enabled]').checked;
       save('agents', item.id, data);
     }, true);
@@ -750,7 +751,7 @@ function messageHtml(message) {
       <div class="turn-content">
         <header><strong>${assistant ? 'Codezzn' : '你'}</strong>${model ? `<span>${esc(model)}</span>` : ''}</header>
         <div class="message-copy">${richText(message.content)}</div>
-        ${events.filter(event => event.type.startsWith('tool_')).map(event => `<div class="tool-call"><span>${event.type === 'tool_started' ? '调用工具' : '工具完成'}</span><strong>${esc(event.name)}</strong></div>`).join('')}
+        ${events.filter(event => event.type.startsWith('tool_')).map(event => `<div class="tool-call"><span>${event.type === 'tool_started' ? '调用工具' : event.type === 'tool_failed' ? '工具失败' : '工具完成'}</span><strong>${esc(event.name)}</strong></div>`).join('')}
         ${sources.length ? `<div class="source-list"><span>知识来源</span><div>${sources.map((source, index) => `<button type="button">[${index + 1}] ${esc(source.source)} #片段${Number(source.position) + 1}</button>`).join('')}</div></div>` : ''}
       </div>
     </article>`;
@@ -810,9 +811,13 @@ async function sendMessage() {
   agentSelect.disabled = true;
   scrollMessages(true);
   try {
-    const result = await api(`/api/threads/${state.thread}/turns`, { method: 'POST', body: JSON.stringify({ content, agent_id: agent }) });
+    const response = await fetch(`/api/threads/${state.thread}/turns/stream`, { method: 'POST', headers: headers(), body: JSON.stringify({ content, agent_id: agent }) });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
+    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; const events = [];
+    const renderPending = () => { const pending = document.getElementById(pendingId); if (pending) pending.querySelector('.turn-content').innerHTML = `<header><strong>Codezzn</strong></header><div class="message-copy">${richText(answer)}</div><div class="thinking-line"><b>${esc(events.at(-1)?.status || events.at(-1)?.type || '运行中')}</b></div>`; scrollMessages(); };
+    while (true) { const { value, done } = await reader.read(); buffer += decoder.decode(value || new Uint8Array(), { stream: !done }); const parts = buffer.split(/\n\n/); buffer = parts.pop(); for (const part of parts) { const line = part.split('\n').find(item => item.startsWith('data:')); if (!line) continue; const event = JSON.parse(line.slice(5)); events.push(event); if (event.type === 'assistant_delta') answer += event.content || ''; if (event.type === 'turn_result') answer = event.content || answer; renderPending(); } if (done) break; }
     const pending = document.getElementById(pendingId);
-    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: result.content || '模型返回了空响应。', meta: { events: result.events || [], usage: result.usage || {}, runtime: result.runtime || {}, sources: result.sources || [] } });
+    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: answer || '模型返回了空响应。', meta: { events, usage: {}, runtime: {}, sources: [] } });
     scrollMessages(true);
   } catch (error) {
     const pending = document.getElementById(pendingId);

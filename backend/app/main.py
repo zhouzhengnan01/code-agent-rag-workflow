@@ -4,13 +4,15 @@ from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from datetime import datetime
+import asyncio
 from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 
 from .agent import run_agent
 from .db import connect, init_db, migrate_bailian_providers, new_id, now, resource_delete, resource_get, resource_list, resource_save, seed_defaults
-from .knowledge import drop_knowledge_index, ingest, rag_status, search
+from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, decode_upload, document_status, drop_knowledge_index, ingest, rag_status, reindex, search
 from .mcp import mcp_manager
 from .model import BAILIAN_PRESETS, normalize_provider, public_provider, test_provider
 from .workflows import create_run
@@ -150,27 +152,37 @@ async def upload_document(knowledge_id: str, file: UploadFile = File(...)):
         raise HTTPException(404, "知识库不存在")
     raw = await file.read()
     filename = file.filename or "document.txt"
-    if filename.lower().endswith(".pdf"):
-        import io
-        reader = PdfReader(io.BytesIO(raw))
-        text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
-    else:
-        text = raw.decode("utf-8", errors="replace")
-    knowledge = resource_get("knowledge", knowledge_id)
     try:
-        result = await ingest(knowledge, filename, text)
+        filename, text, upload_meta = decode_upload(filename, raw, file.content_type)
+        knowledge = resource_get("knowledge", knowledge_id)
+        result = await ingest(knowledge, filename, text, upload_meta)
+    except KnowledgeValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except KnowledgeConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except KnowledgeError as exc:
+        raise HTTPException(502, str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(502, str(exc))
-    documents = [item for item in knowledge.get("documents", []) if item.get("source") != filename]
-    documents.append({"source": filename, "chunks": result["chunks"], "characters": len(text), "indexed_at": now()})
-    resource_save("knowledge", {
-        **knowledge,
-        "documents": documents,
-        "document_count": len(documents),
-        "chunk_count": sum(item.get("chunks", 0) for item in documents),
-        "vector_backend": result["vector_backend"],
-    }, knowledge_id)
+        raise HTTPException(502, "Document indexing failed") from exc
     return {"source": filename, "characters": len(text), **result}
+
+
+@app.get("/api/knowledge/{knowledge_id}/documents/status")
+def knowledge_document_status(knowledge_id: str):
+    if not resource_get("knowledge", knowledge_id):
+        raise HTTPException(404, "知识库不存在")
+    return document_status(knowledge_id)
+
+
+@app.post("/api/knowledge/{knowledge_id}/reindex")
+async def reindex_knowledge(knowledge_id: str, payload: dict = Body(default={} )):
+    knowledge = resource_get("knowledge", knowledge_id)
+    if not knowledge:
+        raise HTTPException(404, "知识库不存在")
+    try:
+        return await reindex(knowledge, payload.get("document_id"))
+    except KnowledgeValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/knowledge/search")
@@ -178,7 +190,14 @@ async def search_knowledge(payload: dict = Body(...)):
     knowledge_ids = payload.get("knowledge_ids") or []
     if not knowledge_ids:
         raise HTTPException(400, "必须明确指定至少一个知识库")
-    return {"data": await search(payload.get("query", ""), knowledge_ids, min(int(payload.get("limit", 5)), 20))}
+    diagnostics = {}
+    try:
+        data = await search(payload.get("query", ""), knowledge_ids, min(int(payload.get("limit", 5)), 20),
+                             filters=payload.get("filters"), candidate_k=payload.get("candidate_k"), top_k=payload.get("top_k"),
+                             source_cap=payload.get("source_cap"), diagnostics=diagnostics)
+    except KnowledgeValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"data": data, "diagnostics": diagnostics}
 
 
 @app.post("/api/mcp_servers/{server_id}/test")
@@ -277,6 +296,44 @@ def delete_thread(thread_id: str):
     if not cur.rowcount:
         raise HTTPException(404, "会话不存在")
     return {"deleted": True}
+
+
+@app.post("/api/threads/{thread_id}/turns/stream")
+async def stream_turn(thread_id: str, payload: dict = Body(...)):
+    with connect() as db:
+        thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
+        history = db.execute("SELECT role,content FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
+    if not thread: raise HTTPException(404, "对话不存在")
+    agent_id, content = payload.get("agent_id") or thread["agent_id"], payload.get("content", "").strip()
+    agent = resource_get("agents", agent_id)
+    if not agent or not content: raise HTTPException(400, "请选择有效的智能体并提供消息")
+    turn_id, timestamp = new_id("turn"), now()
+    with connect() as db:
+        db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
+        db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
+    queue = asyncio.Queue()
+    async def emit(event): await queue.put(event)
+    async def produce():
+        try:
+            result = await run_agent(agent, [dict(item) for item in history], content, emit, streaming=True)
+            with connect() as db:
+                db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()))
+                db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
+            await queue.put({"type": "turn_result", "turn_id": turn_id, **{key: result[key] for key in ("content", "usage", "runtime", "sources")}})
+        except Exception as exc:
+            with connect() as db: db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), thread_id))
+            await queue.put({"type": "turn_error", "reason": type(exc).__name__})
+        finally: await queue.put(None)
+    async def body():
+        task = asyncio.create_task(produce())
+        try:
+            while True:
+                event = await queue.get()
+                if event is None: break
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            if not task.done(): task.cancel()
+    return StreamingResponse(body(), media_type="text/event-stream")
 
 
 @app.post("/api/threads/{thread_id}/turns")

@@ -1,4 +1,5 @@
 import copy
+import json
 import re
 
 import httpx
@@ -109,6 +110,59 @@ async def chat_completion(provider, model, messages, tools=None, temperature=0.2
         if not data.get("choices"):
             raise ModelError(f"模型服务响应缺少 choices: {str(data)[:800]}")
         return data["choices"][0]["message"], data.get("usage", {})
+    except httpx.HTTPError as exc:
+        raise ModelError(f"无法连接模型服务 {url}: {exc}") from exc
+
+
+async def stream_chat_completion(provider, model, messages, tools=None, temperature=0.2):
+    """Yield safe OpenAI-compatible streaming events: visible content, tool calls, usage, and errors."""
+    provider = normalize_provider(provider)
+    model = normalize_qwen_model(model) if is_bailian(provider) else model
+    api_key = provider.get("api_key") or ""
+    if not api_key:
+        raise ModelError("模型提供方尚未配置 API Key")
+    headers = {"Content-Type": "application/json", **provider.get("headers", {})}
+    headers["Authorization"] = f"Bearer {api_key}"
+    payload = {"model": model, "messages": messages, "temperature": temperature, "stream": True, "stream_options": {"include_usage": True}}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
+    url = provider.get("base_url", "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
+    tool_calls = {}
+    usage = {}
+    try:
+        async with httpx.AsyncClient(timeout=provider.get("timeout", 120)) as client:
+            async with client.stream("POST", url, headers=headers, json=payload) as response:
+                if response.status_code >= 400:
+                    detail = (await response.aread()).decode(errors="replace")[:1200]
+                    raise ModelError(f"模型服务返回 {response.status_code}: {detail}")
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    raw = line[5:].strip()
+                    if raw == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if chunk.get("usage"):
+                        usage.update(chunk["usage"])
+                        yield {"type": "usage", "usage": usage}
+                    for choice in chunk.get("choices", []):
+                        delta = choice.get("delta") or {}
+                        if delta.get("content"):
+                            yield {"type": "assistant_delta", "content": delta["content"]}
+                        for call in delta.get("tool_calls") or []:
+                            index = call.get("index", 0)
+                            item = tool_calls.setdefault(index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                            if call.get("id"): item["id"] += call["id"]
+                            if call.get("type"): item["type"] = call["type"]
+                            function = call.get("function") or {}
+                            item["function"]["name"] += function.get("name", "")
+                            item["function"]["arguments"] += function.get("arguments", "")
+                        if choice.get("finish_reason"):
+                            yield {"type": "finish", "finish_reason": choice["finish_reason"], "tool_calls": list(tool_calls.values()), "usage": usage}
     except httpx.HTTPError as exc:
         raise ModelError(f"无法连接模型服务 {url}: {exc}") from exc
 

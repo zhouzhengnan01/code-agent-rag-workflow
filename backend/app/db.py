@@ -69,6 +69,18 @@ def init_db():
             );
             """
         )
+        db.execute("""CREATE TABLE IF NOT EXISTS knowledge_documents (
+            id TEXT PRIMARY KEY, knowledge_id TEXT NOT NULL, source TEXT NOT NULL,
+            content TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',
+            revision INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL, UNIQUE(knowledge_id, source)
+        )""")
+        columns = {row["name"] for row in db.execute("PRAGMA table_info(knowledge_chunks)")}
+        if "document_id" not in columns:
+            db.execute("ALTER TABLE knowledge_chunks ADD COLUMN document_id TEXT NOT NULL DEFAULT ''")
+        if "metadata" not in columns:
+            db.execute("ALTER TABLE knowledge_chunks ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document ON knowledge_chunks(document_id)")
 
 
 def resource_list(kind):
@@ -104,6 +116,7 @@ def resource_delete(kind, item_id):
         cur = db.execute("DELETE FROM resources WHERE kind=? AND id=?", (kind, item_id))
         if kind == "knowledge":
             db.execute("DELETE FROM knowledge_chunks WHERE knowledge_id=?", (item_id,))
+            db.execute("DELETE FROM knowledge_documents WHERE knowledge_id=?", (item_id,))
     return cur.rowcount > 0
 
 
@@ -127,8 +140,8 @@ def seed_defaults():
         "system_prompt": "你是 Codezzn 智能体。准确、务实地完成任务；调用工具前确认参数，清晰报告结果。",
         "provider_id": provider["id"], "model": "gpt-4.1-mini", "temperature": 0.2,
         "skill_ids": [], "knowledge_ids": [], "mcp_server_ids": [],
-        "builtin_tools": ["knowledge_search", "list_files", "read_file", "write_file", "run_shell"],
-        "max_tool_rounds": 6
+        "builtin_tools": ["knowledge_search", "list_files", "read_file", "write_file", "apply_patch", "run_shell", "git_status", "git_diff", "git_log", "review"],
+        "max_tool_rounds": 6, "auto_approve": False
     })
 
 
