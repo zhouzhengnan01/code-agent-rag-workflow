@@ -62,7 +62,11 @@ def test_apply_patch_requires_approval_and_exact_replacement(tmp_path, monkeypat
 
 def test_git_command_construction():
     from backend.app.agent import _git_command
-    assert _git_command(["diff", "--cached"]) == ["git", "diff", "--cached"]
+    command = _git_command(["diff", "--cached"])
+    assert command[0] == "git"
+    assert command[-2:] == ["diff", "--cached"]
+    assert "core.hooksPath=/dev/null" in command
+    assert "core.fsmonitor=false" in command
 
 
 def test_safe_path_rejects_escape():

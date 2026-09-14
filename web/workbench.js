@@ -443,6 +443,14 @@ function choiceGroup(title, name, items, selected = []) {
 }
 
 async function agentForm(item) {
+  const sandboxModes = [
+    { value: 'read-only', label: '只读（read-only）' },
+    { value: 'workspace-write', label: '工作区可写（workspace-write）' },
+  ];
+  const selectedSandbox = item.sandbox_mode ?? 'read-only';
+  const unsupportedSandbox = !sandboxModes.some(mode => mode.value === selectedSandbox);
+  const sandboxOptions = (unsupportedSandbox ? '<option value="" selected disabled>旧配置不受支持，请重新选择</option>' : '')
+    + sandboxModes.map(mode => `<option value="${mode.value}" ${selectedSandbox === mode.value ? 'selected' : ''}>${mode.label}</option>`).join('');
   const [providers, skills, knowledge, mcps] = await Promise.all(['providers', 'skills', 'knowledge', 'mcp_servers'].map(load));
   const tools = [{ id: 'knowledge_search', name: '知识检索' }, { id: 'list_files', name: '列目录' }, { id: 'read_file', name: '读文件' }, { id: 'write_file', name: '写文件' }, { id: 'apply_patch', name: '应用补丁' }, { id: 'run_shell', name: 'Shell' }, { id: 'git_status', name: 'Git 状态' }, { id: 'git_diff', name: 'Git 差异' }, { id: 'git_log', name: 'Git 日志' }, { id: 'review', name: '代码审查' }];
   modal(item.id ? '编辑智能体' : '新建智能体', `
@@ -458,9 +466,15 @@ async function agentForm(item) {
       ${choiceGroup('知识库', 'knowledge_ids', knowledge, item.knowledge_ids)}
       ${choiceGroup('MCP 服务', 'mcp_server_ids', mcps, item.mcp_server_ids)}
       ${choiceGroup('内置工具', 'builtin_tools', tools, item.builtin_tools || [])}
-      ${toggleField('允许执行 Shell', 'allow_shell', item.allow_shell)}${toggleField('自动批准写入、Shell 和 MCP', 'auto_approve', item.auto_approve === true)}${toggleField('启用智能体', 'enabled', item.enabled !== false)}
+      <section class="form-section control-full"><header><h3>执行权限与沙箱</h3><p>沙箱模式不会自动开启 Shell、自动批准或启动沙箱服务。</p></header></section>
+      ${selectField('沙箱模式', 'sandbox_mode', sandboxOptions, true, '只读：容器不能写入工作区；工作区可写：容器可修改工作区文件。两种模式均禁止联网，Git 查询始终只读。MCP 不受此沙箱模式隔离。旧配置未指定模式时，保存会设为只读；不支持 danger-full-access。')}
+      ${toggleField('允许执行 Shell', 'allow_shell', item.allow_shell === true)}${toggleField('自动批准写入、Shell 和 MCP', 'auto_approve', item.auto_approve === true)}${toggleField('启用智能体', 'enabled', item.enabled !== false)}
     </form>`, () => {
       const data = formData($('#editForm'));
+      if (!sandboxModes.some(mode => mode.value === data.sandbox_mode)) {
+        toast('请选择有效的沙箱模式：只读或工作区可写', true);
+        return;
+      }
       for (const name of ['skill_ids', 'knowledge_ids', 'mcp_server_ids', 'builtin_tools']) {
         data[name] = $$(`#editForm [name=${name}]:checked`).map(input => input.value);
       }

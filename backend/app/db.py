@@ -57,6 +57,24 @@ def init_db():
               FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, created_at);
+            CREATE TABLE IF NOT EXISTS approvals (
+              id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+              tool_name TEXT NOT NULL, arguments TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+              created_at INTEGER NOT NULL, resolved_at INTEGER, resolution TEXT,
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_approvals_thread ON approvals(thread_id, status, created_at);
+            CREATE TABLE IF NOT EXISTS turn_events (
+              id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+              sequence INTEGER NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL,
+              UNIQUE(turn_id, sequence), FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_turn_events_turn ON turn_events(turn_id, sequence);
+            CREATE TABLE IF NOT EXISTS thread_artifacts (
+              id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+              kind TEXT NOT NULL, path TEXT NOT NULL, backup_path TEXT, created_at INTEGER NOT NULL,
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS knowledge_chunks (
               id TEXT PRIMARY KEY, knowledge_id TEXT NOT NULL, source TEXT NOT NULL,
               position INTEGER NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL
@@ -102,8 +120,13 @@ def resource_save(kind, payload, item_id=None):
     enabled = 1 if payload.get("enabled", True) else 0
     data = {k: v for k, v in payload.items() if k not in ("id", "kind", "name", "enabled", "created_at", "updated_at")}
     with connect() as db:
-        old = db.execute("SELECT created_at FROM resources WHERE id=? AND kind=?", (item_id, kind)).fetchone()
-        created = old["created_at"] if old else timestamp
+        old_row = db.execute("SELECT * FROM resources WHERE id=? AND kind=?", (item_id, kind)).fetchone()
+        old = _resource(old_row) if old_row else {}
+        created = old_row["created_at"] if old_row else timestamp
+        if old_row:
+            merged = {k: v for k, v in old.items() if k not in ("id", "kind", "name", "enabled", "created_at", "updated_at")}
+            merged.update(data)
+            data = merged
         db.execute(
             "INSERT OR REPLACE INTO resources(id,kind,name,enabled,data,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
             (item_id, kind, name, enabled, json.dumps(data, ensure_ascii=False), created, timestamp),
@@ -141,7 +164,7 @@ def seed_defaults():
         "provider_id": provider["id"], "model": "gpt-4.1-mini", "temperature": 0.2,
         "skill_ids": [], "knowledge_ids": [], "mcp_server_ids": [],
         "builtin_tools": ["knowledge_search", "list_files", "read_file", "write_file", "apply_patch", "run_shell", "git_status", "git_diff", "git_log", "review"],
-        "max_tool_rounds": 6, "auto_approve": False
+        "max_tool_rounds": 6, "auto_approve": False, "sandbox_mode": "read-only", "allow_shell": False
     })
 
 

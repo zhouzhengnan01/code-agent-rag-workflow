@@ -10,12 +10,22 @@ import asyncio
 from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 
-from .agent import run_agent
+from .agent import persist_event, run_agent
 from .db import connect, init_db, migrate_bailian_providers, new_id, now, resource_delete, resource_get, resource_list, resource_save, seed_defaults
 from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, decode_upload, document_status, drop_knowledge_index, ingest, rag_status, reindex, search
 from .mcp import mcp_manager
 from .model import BAILIAN_PRESETS, normalize_provider, public_provider, test_provider
+from .sandbox import sandbox_status
 from .workflows import create_run
+
+
+THREAD_LOCKS = {}
+THREAD_LOCKS_GUARD = asyncio.Lock()
+
+
+async def thread_lock(thread_id):
+    async with THREAD_LOCKS_GUARD:
+        return THREAD_LOCKS.setdefault(thread_id, asyncio.Lock())
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -41,7 +51,7 @@ async def shutdown():
 @app.middleware("http")
 async def auth(request: Request, call_next):
     key = os.getenv("CODEZZN_ADMIN_KEY")
-    if key and request.url.path not in ("/healthz", "/", "/workbench.html"):
+    if key and request.url.path not in ("/healthz", "/", "/workbench.html") and not request.url.path.startswith("/assets/"):
         supplied = request.headers.get("X-Codezzn-Key") or request.query_params.get("api_key")
         if supplied != key:
             from fastapi.responses import JSONResponse
@@ -116,6 +126,16 @@ def delete_resource(kind: str, item_id: str):
 @app.get("/api/rag/status")
 def get_rag_status():
     return rag_status()
+
+
+@app.get("/api/sandbox/status")
+async def get_sandbox_status():
+    if not os.getenv("CODEZZN_ADMIN_KEY"):
+        raise HTTPException(503, "Set CODEZZN_ADMIN_KEY to enable authenticated sandbox status")
+    try:
+        return await sandbox_status()
+    except RuntimeError as exc:
+        raise HTTPException(503, "Sandbox backend unavailable") from exc
 
 
 @app.get("/api/provider-presets")
@@ -212,6 +232,18 @@ async def test_mcp(server_id: str):
         raise HTTPException(400, str(exc))
 
 
+@app.get("/api/threads/{thread_id}/events")
+def list_turn_events(thread_id: str, turn_id: str = "", since: int = 0):
+    with connect() as db:
+        query = "SELECT * FROM turn_events WHERE thread_id=? AND sequence>?"
+        params = [thread_id, since]
+        if turn_id:
+            query += " AND turn_id=?"
+            params.append(turn_id)
+        rows = db.execute(query + " ORDER BY created_at, sequence", params).fetchall()
+    return {"data": [{**dict(row), "data": json.loads(row["data"])} for row in rows]}
+
+
 @app.post("/api/workflows/{workflow_id}/run")
 async def run_workflow_endpoint(workflow_id: str, payload: dict = Body(...)):
     workflow = resource_get("workflows", workflow_id)
@@ -246,6 +278,21 @@ def list_threads(archived: bool = False):
     with connect() as db:
         rows = db.execute("SELECT * FROM threads WHERE archived=? ORDER BY updated_at DESC", (1 if archived else 0,)).fetchall()
     return {"data": [dict(row) for row in rows]}
+
+
+@app.post("/api/threads/{thread_id}/fork")
+def fork_thread(thread_id: str, payload: dict = Body(default={} )):
+    with connect() as db:
+        source = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
+        messages = db.execute("SELECT * FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
+    if not source:
+        raise HTTPException(404, "对话不存在")
+    new_thread, timestamp = new_id("thr"), now()
+    with connect() as db:
+        db.execute("INSERT INTO threads(id,name,agent_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (new_thread, payload.get("name") or f"{source['name']} (fork)", source["agent_id"], "idle", timestamp, timestamp))
+        for message in messages:
+            db.execute("INSERT INTO messages(id,thread_id,turn_id,role,type,content,meta,created_at) VALUES(?,?,?,?,?,?,?,?)", (new_id("msg"), new_thread, message["turn_id"], message["role"], message["type"], message["content"], message["meta"], message["created_at"]))
+    return {"id": new_thread, "name": payload.get("name") or f"{source['name']} (fork)", "agent_id": source["agent_id"], "status": "idle"}
 
 
 @app.get("/api/threads/{thread_id}")
@@ -289,6 +336,38 @@ def update_thread(thread_id: str, payload: dict = Body(...)):
     return dict(thread)
 
 
+@app.get("/api/threads/{thread_id}/approvals")
+def list_approvals(thread_id: str, status: str = "pending"):
+    with connect() as db:
+        rows = db.execute("SELECT * FROM approvals WHERE thread_id=? AND status=? ORDER BY created_at", (thread_id, status)).fetchall()
+    return {"data": [{**dict(row), "arguments": json.loads(row["arguments"])} for row in rows]}
+
+
+@app.get("/api/threads/{thread_id}/approvals/inbox")
+def approval_inbox(thread_id: str):
+    return list_approvals(thread_id, "pending")
+
+
+@app.post("/api/approvals/{approval_id}")
+def resolve_approval(approval_id: str, payload: dict = Body(...)):
+    decision = payload.get("decision")
+    if decision not in ("approved", "denied"):
+        raise HTTPException(400, "decision 必须是 approved 或 denied")
+    with connect() as db:
+        cur = db.execute("UPDATE approvals SET status=?,resolution=?,resolved_at=? WHERE id=? AND status='pending'", (decision, payload.get("reason", decision), now(), approval_id))
+        row = db.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "审批不存在")
+    if not cur.rowcount:
+        raise HTTPException(409, "审批已处理")
+    return {**dict(row), "arguments": json.loads(row["arguments"])}
+
+
+@app.post("/api/threads/{thread_id}/resume")
+async def resume_thread(thread_id: str, payload: dict = Body(...)):
+    return await start_turn(thread_id, payload)
+
+
 @app.delete("/api/threads/{thread_id}")
 def delete_thread(thread_id: str):
     with connect() as db:
@@ -299,7 +378,8 @@ def delete_thread(thread_id: str):
 
 
 @app.post("/api/threads/{thread_id}/turns/stream")
-async def stream_turn(thread_id: str, payload: dict = Body(...)):
+async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...)):
+    last_event_id = request.headers.get("Last-Event-ID")
     with connect() as db:
         thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
         history = db.execute("SELECT role,content FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
@@ -307,15 +387,24 @@ async def stream_turn(thread_id: str, payload: dict = Body(...)):
     agent_id, content = payload.get("agent_id") or thread["agent_id"], payload.get("content", "").strip()
     agent = resource_get("agents", agent_id)
     if not agent or not content: raise HTTPException(400, "请选择有效的智能体并提供消息")
+    lock = await thread_lock(thread_id)
+    if lock.locked():
+        raise HTTPException(409, "该会话已有任务正在运行")
+    await lock.acquire()
     turn_id, timestamp = new_id("turn"), now()
     with connect() as db:
         db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
         db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
     queue = asyncio.Queue()
-    async def emit(event): await queue.put(event)
+    event_sequence = 0
+    async def emit(event):
+        nonlocal event_sequence
+        event_sequence += 1
+        persist_event(event, thread_id, turn_id, event_sequence)
+        await queue.put({**event, "sequence": event_sequence})
     async def produce():
         try:
-            result = await run_agent(agent, [dict(item) for item in history], content, emit, streaming=True)
+            result = await run_agent(agent, [dict(item) for item in history], content, emit, streaming=True, thread_id=thread_id, turn_id=turn_id)
             with connect() as db:
                 db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()))
                 db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
@@ -323,17 +412,25 @@ async def stream_turn(thread_id: str, payload: dict = Body(...)):
         except Exception as exc:
             with connect() as db: db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), thread_id))
             await queue.put({"type": "turn_error", "reason": type(exc).__name__})
-        finally: await queue.put(None)
+        finally:
+            with connect() as db:
+                db.execute("UPDATE threads SET status=CASE WHEN status='running' THEN 'error' ELSE status END,updated_at=? WHERE id=?", (now(), thread_id))
+            lock.release()
+            await queue.put(None)
     async def body():
         task = asyncio.create_task(produce())
         try:
             while True:
+                if await request.is_disconnected():
+                    if not task.done():
+                        task.cancel()
+                    break
                 event = await queue.get()
                 if event is None: break
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
             if not task.done(): task.cancel()
-    return StreamingResponse(body(), media_type="text/event-stream")
+    return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/threads/{thread_id}/turns")
@@ -347,14 +444,19 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
     agent = resource_get("agents", agent_id)
     if not agent:
         raise HTTPException(400, "请选择有效的智能体")
-    content, turn_id, timestamp = payload.get("content", "").strip(), new_id("turn"), now()
+    content = payload.get("content", "").strip()
     if not content:
         raise HTTPException(400, "消息不能为空")
+    lock = await thread_lock(thread_id)
+    if lock.locked():
+        raise HTTPException(409, "该会话已有任务正在运行")
+    await lock.acquire()
+    turn_id, timestamp = new_id("turn"), now()
     with connect() as db:
         db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
         db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
     try:
-        result = await run_agent(agent, [dict(item) for item in history], content)
+        result = await run_agent(agent, [dict(item) for item in history], content, thread_id=thread_id, turn_id=turn_id)
         with connect() as db:
             db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()))
             db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
@@ -363,3 +465,5 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
         with connect() as db:
             db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), thread_id))
         raise HTTPException(502, str(exc))
+    finally:
+        lock.release()

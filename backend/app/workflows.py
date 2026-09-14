@@ -6,6 +6,24 @@ from .knowledge import search
 from .mcp import mcp_manager
 
 
+SUPPORTED_NODE_TYPES = {"input", "prompt", "agent", "knowledge", "mcp", "output", "condition", "parallel"}
+
+
+def validate_workflow(workflow):
+    nodes = {node["id"]: node for node in workflow.get("nodes", [])}
+    if not nodes:
+        raise ValueError("工作流至少需要一个节点")
+    if len(nodes) != len(workflow.get("nodes", [])):
+        raise ValueError("工作流节点 ID 必须唯一")
+    for node in nodes.values():
+        if node.get("type", "prompt") not in SUPPORTED_NODE_TYPES:
+            raise ValueError(f"不支持的节点类型: {node.get('type')}")
+    for edge in workflow.get("edges", []):
+        if edge.get("source") not in nodes or edge.get("target") not in nodes:
+            raise ValueError("工作流边引用了不存在的节点")
+    return nodes
+
+
 def render(value, context):
     text = str(value or "")
     for key, item in context.items():
@@ -14,7 +32,7 @@ def render(value, context):
 
 
 async def run_workflow(workflow, input_value):
-    nodes = {node["id"]: node for node in workflow.get("nodes", [])}
+    nodes = validate_workflow(workflow)
     incoming = {node_id: [] for node_id in nodes}
     outgoing = {node_id: [] for node_id in nodes}
     for edge in workflow.get("edges", []):
@@ -46,6 +64,12 @@ async def run_workflow(workflow, input_value):
             output = await mcp_manager.call_tool(server, node["tool"], args)
         elif kind == "output":
             output = render(node.get("template", "{{input}}"), context)
+        elif kind == "condition":
+            left = render(node.get("value", "{{input}}"), context)
+            expected = render(node.get("equals", "true"), context)
+            output = {"value": left, "matched": str(left) == str(expected)}
+        elif kind == "parallel":
+            output = [context.get(dep) for dep in incoming[node_id]]
         else:
             raise ValueError(f"不支持的节点类型: {kind}")
         context[node_id] = output
@@ -68,7 +92,7 @@ async def create_run(workflow, input_value):
         output, trace = await run_workflow(workflow, input_value)
         status = "completed"
     except Exception as exc:
-        output, trace, status = {"error": str(exc)}, [], "failed"
+        output, trace, status = {"error": str(exc)}, [{"status": "failed", "error": str(exc)}], "failed"
     with connect() as db:
         db.execute("UPDATE workflow_runs SET status=?,output=?,trace=?,updated_at=? WHERE id=?", (status, json.dumps(output, ensure_ascii=False), json.dumps(trace, ensure_ascii=False), now(), run_id))
     return {"id": run_id, "workflow_id": workflow["id"], "status": status, "input": input_value, "output": output, "trace": trace, "created_at": timestamp, "updated_at": now()}

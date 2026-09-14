@@ -1,0 +1,58 @@
+services:
+  codezzn:
+    image: codezzn-app:local
+    environment:
+      CODEZZN_SANDBOX_URL: http://sandbox-broker:8090
+      CODEZZN_SANDBOX_TOKEN: ${CODEZZN_SANDBOX_TOKEN:?set CODEZZN_SANDBOX_TOKEN in .env}
+    networks:
+      - default
+      - sandbox-control
+
+  sandbox-broker:
+    image: codezzn-app:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: ${CODEZZN_BASE_IMAGE:-python:3.12-slim}
+    command: ["python", "-m", "backend.app.sandbox_broker"]
+    user: "0:0"
+    restart: unless-stopped
+    stop_grace_period: 180s
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      codezzn:
+        condition: service_started
+    environment:
+      CODEZZN_SANDBOX_TOKEN: ${CODEZZN_SANDBOX_TOKEN:?set CODEZZN_SANDBOX_TOKEN in .env}
+      CODEZZN_SANDBOX_IMAGE: ${CODEZZN_SANDBOX_IMAGE:-codezzn-sandbox:local}
+      CODEZZN_SANDBOX_WORKSPACE_CONTAINER: codezzn
+      CODEZZN_SANDBOX_INSTANCE: ${CODEZZN_SANDBOX_INSTANCE:-codezzn-local}
+      CODEZZN_SANDBOX_STATE: /state/tasks.db
+      CODEZZN_SANDBOX_CPUS: ${CODEZZN_SANDBOX_CPUS:-1}
+      CODEZZN_SANDBOX_MEMORY_MB: ${CODEZZN_SANDBOX_MEMORY_MB:-512}
+      CODEZZN_SANDBOX_PIDS: ${CODEZZN_SANDBOX_PIDS:-64}
+      CODEZZN_SANDBOX_TIMEOUT: ${CODEZZN_SANDBOX_TIMEOUT:-60}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - sandbox-state:/state
+    networks:
+      - sandbox-control
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8090/health', headers={'Authorization': 'Bearer ' + os.environ['CODEZZN_SANDBOX_TOKEN']}), timeout=4)"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+networks:
+  sandbox-control:
+    internal: true
+
+volumes:
+  sandbox-state:

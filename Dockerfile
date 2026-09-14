@@ -6,6 +6,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     VIRTUAL_ENV=
 USER root
 WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git patch ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --timeout 300 --retries 10 -r requirements.txt
@@ -13,7 +16,12 @@ COPY backend ./backend
 COPY web ./web
 COPY tests ./tests
 COPY samples ./samples
-RUN mkdir -p /app/data /workspace
+RUN mkdir -p /app/data /workspace \
+    && useradd --create-home --uid 10001 codezzn \
+    && chown -R codezzn:codezzn /app /workspace
+# The main service selects its user for bind-mount compatibility and never mounts Docker's socket.
+# The sandbox overlay reuses this image for the trusted root broker; execution uses Dockerfile.sandbox.
+USER codezzn
 EXPOSE 8080
 ENTRYPOINT []
 CMD ["/usr/local/bin/python", "-m", "uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8080"]

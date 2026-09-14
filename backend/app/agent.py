@@ -1,15 +1,17 @@
-import asyncio
 import json
 import os
 import difflib
 import shlex
+import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .db import new_id, resource_get
+from .db import connect, new_id, now, resource_get
 from .knowledge import format_retrieval_context, search
 from .mcp import mcp_manager
 from .model import chat_completion, stream_chat_completion
+from .sandbox import run_command
 
 
 WORKSPACE = Path(os.getenv("CODEZZN_WORKSPACE", os.path.join(os.getcwd(), "workspace"))).resolve()
@@ -20,17 +22,23 @@ BUILTIN_SCHEMAS = {
     "list_files": {"description": "列出工作区文件", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}},
     "read_file": {"description": "读取工作区内的文本文件", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
     "write_file": {"description": "写入工作区内的文本文件", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    "apply_patch": {"description": "应用 unified diff 或精确 old/new 文件替换", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "patch": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}, "required": ["path"]}},
+    "apply_patch": {"description": "Apply an exact old/new file replacement; unified diffs are not supported", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "patch": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}}, "required": ["path"]}},
     "run_shell": {"description": "在工作区执行命令；仅在智能体允许 shell 时使用", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
     "git_status": {"description": "读取工作区 Git 状态", "parameters": {"type": "object", "properties": {}}},
     "git_diff": {"description": "读取工作区未提交差异", "parameters": {"type": "object", "properties": {"staged": {"type": "boolean"}}}},
     "git_log": {"description": "读取最近 Git 提交记录", "parameters": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
-    "review": {"description": "只读检查未提交差异并返回审查材料", "parameters": {"type": "object", "properties": {"staged": {"type": "boolean"}}}},
+    "review": {"description": "只读检查 Git 变更并返回结构化审查材料", "parameters": {"type": "object", "properties": {"staged": {"type": "boolean"}, "base": {"type": "string"}, "range": {"type": "string"}}}},
 }
 
-MAX_OUTPUT = 20000
 MAX_INSTRUCTIONS = 50000
-MAX_COMMAND_TIMEOUT = 60
+SANDBOX_MODES = {"read-only", "workspace-write", "danger-full-access"}
+
+
+def sandbox_mode(agent):
+    mode = str(agent.get("sandbox_mode", "workspace-write"))
+    if mode not in SANDBOX_MODES:
+        raise ValueError(f"不支持的沙箱模式: {mode}")
+    return mode
 
 
 def _event(event_type, **data):
@@ -46,19 +54,32 @@ async def _emit(events, callback, event_type, **data):
         await callback(event)
 
 
+def persist_event(event, thread_id=None, turn_id=None, sequence=None):
+    if not thread_id or not turn_id:
+        return
+    with connect() as db:
+        db.execute("INSERT OR IGNORE INTO turn_events(id,thread_id,turn_id,sequence,type,data,created_at) VALUES(?,?,?,?,?,?,?)", (event["id"], thread_id, turn_id, sequence or len(event.get("content", "")), event["type"], json.dumps(event, ensure_ascii=False), now()))
+
+
 def load_instructions(cwd=None, workspace=None, max_bytes=MAX_INSTRUCTIONS):
     root = (workspace or WORKSPACE).resolve()
     target = (root / (cwd or ".")).resolve()
     if target != root and root not in target.parents:
         raise ValueError("路径超出工作区")
-    directories = list(reversed([root, *target.relative_to(root).parents])) if target != root else [root]
-    directories = list(dict.fromkeys(directories + [target]))
+    relative_parts = target.relative_to(root).parts
+    directories = [root]
+    for index in range(1, len(relative_parts) + 1):
+        directories.append(root.joinpath(*relative_parts[:index]))
     loaded, paths, total = [], [], 0
     for directory in directories:
-        for filename in ("AGENTS.md", "AGENTS.override.md"):
+        filenames = ("AGENTS.override.md",) if (directory / "AGENTS.override.md").is_file() else ("AGENTS.md",)
+        for filename in filenames:
             path = directory / filename
             if not path.is_file():
                 continue
+            resolved = path.resolve()
+            if path.is_symlink() or (resolved != root and root not in resolved.parents):
+                raise PermissionError("Workspace instructions must not follow external paths or symlinks")
             remaining = max_bytes - total
             if remaining <= 0:
                 return {"content": "\n\n".join(loaded), "paths": paths, "truncated": True}
@@ -74,6 +95,33 @@ def safe_path(value="."):
     if target != WORKSPACE and WORKSPACE not in target.parents:
         raise ValueError("路径超出工作区")
     return target
+
+
+def snapshot_file(target):
+    backup_root = WORKSPACE / ".codezzn-backups"
+    backup_root.mkdir(parents=True, exist_ok=True)
+    backup = backup_root / f"{new_id('file')}.bak"
+    if target.exists():
+        backup.write_bytes(target.read_bytes())
+        return backup
+    backup.write_text("", encoding="utf-8")
+    return backup
+
+
+def atomic_write(target, content):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    snapshot = snapshot_file(target)
+    fd, temp_name = tempfile.mkstemp(prefix=".codezzn-", dir=str(target.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, target)
+    except Exception:
+        Path(temp_name).unlink(missing_ok=True)
+        raise
+    return snapshot
 
 
 async def build_context(agent, provider=None, model=None):
@@ -137,25 +185,33 @@ def approval_required(operation):
 
 
 def _git_command(args):
-    return ["git", *args]
+    return ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+            "-c", "diff.external=", "-c", "safe.directory=/workspace", *args]
 
 
 async def _run_git(args):
-    process = await asyncio.create_subprocess_exec(*_git_command(args), cwd=str(WORKSPACE), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-    try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=MAX_COMMAND_TIMEOUT)
-    except asyncio.TimeoutError:
-        process.kill()
-        raise TimeoutError("Git command timed out")
-    return {"command": _git_command(args), "exit_code": process.returncode, "output": stdout.decode(errors="replace")[-MAX_OUTPUT:]}
+    if args[0] == "diff":
+        args = ["diff", "--no-ext-diff", "--no-textconv", *args[1:]]
+    command = _git_command(args)
+    result = await run_command(shlex.join(command), "read-only")
+    return {**result, "command": command}
+
+
+def _git_revision(value):
+    if not isinstance(value, str) or value.startswith("-") or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_./~^@-]*", value):
+        raise ValueError("Invalid Git revision; use a ref, commit, or revision range without options or special characters")
+    return value
 
 
 async def execute_tool(name, arguments, agent, routes):
     route = routes.get(name)
     if not route:
         raise ValueError(f"未知工具: {name}")
+    mode = sandbox_mode(agent)
     auto_approve = agent.get("auto_approve") is True
     if route[0] == "mcp":
+        if mode == "read-only" and not auto_approve:
+            return approval_required("mcp")
         if not auto_approve:
             return approval_required("mcp")
         server, actual_name = route[1]
@@ -167,14 +223,18 @@ async def execute_tool(name, arguments, agent, routes):
         return [{"name": p.name, "path": str(p.relative_to(WORKSPACE)), "directory": p.is_dir()} for p in list(target.iterdir())[:200]]
     if name == "read_file":
         return {"content": safe_path(arguments["path"]).read_text(encoding="utf-8")[:100000]}
-    if name in ("write_file", "apply_patch") and not auto_approve:
-        return approval_required(name)
+    if name in ("write_file", "apply_patch"):
+        if mode == "read-only":
+            return approval_required(name)
+        if not auto_approve:
+            return approval_required(name)
     if name == "write_file":
         target = safe_path(arguments["path"])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(arguments["content"], encoding="utf-8")
-        return {"written": str(target.relative_to(WORKSPACE)), "bytes": len(arguments["content"].encode())}
+        backup = atomic_write(target, arguments["content"])
+        return {"written": str(target.relative_to(WORKSPACE)), "bytes": len(arguments["content"].encode()), "backup": str(backup.relative_to(WORKSPACE))}
     if name == "apply_patch":
+        if "patch" in arguments:
+            raise ValueError("Unified diff patches are not supported; use exact old/new replacements")
         target = safe_path(arguments["path"])
         original = target.read_text(encoding="utf-8") if target.exists() else ""
         if "old" in arguments:
@@ -183,32 +243,18 @@ async def execute_tool(name, arguments, agent, routes):
                 raise ValueError("old replacement must match exactly once")
             updated = original.replace(old, new, 1)
         else:
-            patch = arguments.get("patch")
-            if not patch:
-                raise ValueError("patch or old/new is required")
-            import tempfile
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
-                handle.write(original)
-                source = handle.name
-            try:
-                result = await asyncio.create_subprocess_exec("patch", "--batch", "--forward", source, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-                output, _ = await asyncio.wait_for(result.communicate(patch.encode()), timeout=MAX_COMMAND_TIMEOUT)
-                if result.returncode != 0:
-                    raise ValueError(output.decode(errors="replace")[-MAX_OUTPUT:])
-                updated = Path(source).read_text(encoding="utf-8")
-            finally:
-                Path(source).unlink(missing_ok=True)
+            raise ValueError("Unified diff patches are not supported; use exact old/new replacements")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(updated, encoding="utf-8")
-        return {"path": str(target.relative_to(WORKSPACE)), "changed": original != updated, "diff": "".join(difflib.unified_diff(original.splitlines(True), updated.splitlines(True), fromfile=str(target), tofile=str(target)))}
+        backup = atomic_write(target, updated)
+        return {"path": str(target.relative_to(WORKSPACE)), "changed": original != updated, "backup": str(backup.relative_to(WORKSPACE)), "diff": "".join(difflib.unified_diff(original.splitlines(True), updated.splitlines(True), fromfile=str(target), tofile=str(target)))}
     if name == "run_shell":
         if not agent.get("allow_shell", False):
             raise PermissionError("此智能体未启用 shell 权限")
+        if mode == "danger-full-access":
+            raise PermissionError("danger-full-access is not supported; use read-only or workspace-write")
         if not auto_approve:
             return approval_required(name)
-        process = await asyncio.create_subprocess_shell(arguments["command"], cwd=str(WORKSPACE), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=MAX_COMMAND_TIMEOUT)
-        return {"exit_code": process.returncode, "output": stdout.decode(errors="replace")[-MAX_OUTPUT:]}
+        return await run_command(arguments["command"], mode)
     if name == "git_status":
         return await _run_git(["status", "--short"])
     if name == "git_diff":
@@ -216,11 +262,18 @@ async def execute_tool(name, arguments, agent, routes):
     if name == "git_log":
         return await _run_git(["log", f"-n{min(int(arguments.get('limit', 10)), 50)}", "--oneline", "--decorate"])
     if name == "review":
-        return {"status": await _run_git(["status", "--short"]), "diff": await _run_git(["diff", *( ["--cached"] if arguments.get("staged") else [])])}
+        if arguments.get("range"):
+            diff_args = ["diff", _git_revision(arguments["range"]), "--"]
+        elif arguments.get("base"):
+            diff_args = ["diff", f"{_git_revision(arguments['base'])}...HEAD", "--"]
+        else:
+            diff_args = ["diff", *( ["--cached"] if arguments.get("staged") else [])]
+        diff = await _run_git(diff_args)
+        return {"status": await _run_git(["status", "--short"]), "diff": diff, "findings": [], "schema_version": "1"}
     raise ValueError(name)
 
 
-async def run_agent(agent, history, user_message, on_event=None, streaming=False):
+async def run_agent(agent, history, user_message, on_event=None, streaming=False, thread_id=None, turn_id=None):
     provider = resource_get("providers", agent.get("provider_id"))
     if not provider:
         raise ValueError("智能体没有有效的模型提供方")
@@ -287,7 +340,14 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
                 await _emit(events, on_event, "tool_started", name=name)
                 result = await execute_tool(name, arguments, agent, routes)
                 output = json.dumps(result, ensure_ascii=False, default=str)
-                await _emit(events, on_event, "tool_completed", name=name, status="completed")
+                if isinstance(result, dict) and isinstance(result.get("error"), dict) and result["error"].get("code") == "approval_required":
+                    approval_id = new_id("approval")
+                    if thread_id and turn_id:
+                        with connect() as db:
+                            db.execute("INSERT INTO approvals(id,thread_id,turn_id,tool_name,arguments,created_at) VALUES(?,?,?,?,?,?)", (approval_id, thread_id, turn_id, name, json.dumps(arguments, ensure_ascii=False), now()))
+                    await _emit(events, on_event, "approval_required", name=name, status=approval_id)
+                else:
+                    await _emit(events, on_event, "tool_completed", name=name, status="completed")
             except Exception as exc:
                 output = json.dumps({"error": str(exc)}, ensure_ascii=False)
                 await _emit(events, on_event, "tool_failed", name=name, reason=type(exc).__name__)

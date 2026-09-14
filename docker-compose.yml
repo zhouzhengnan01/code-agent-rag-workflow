@@ -6,12 +6,15 @@ services:
         BASE_IMAGE: ${CODEZZN_BASE_IMAGE:-python:3.12-slim}
     container_name: codezzn
     restart: unless-stopped
+    # Bind mounts on Windows retain host ACLs; root is the compatible local-dev default.
+    # For a Linux host, set CODEZZN_UID/CODEZZN_GID to a writable non-root user in .env.
+    user: "${CODEZZN_UID:-0}:${CODEZZN_GID:-0}"
     env_file: [.env]
     environment:
       CODEZZN_MILVUS_URI: /app/data/milvus.db
       MILVUS_COLLECTION_PREFIX: codezzn_kb_
     ports:
-      - "${CODEZZN_PORT:-8080}:8080"
+      - "127.0.0.1:${CODEZZN_PORT:-8080}:8080"
     volumes:
       - ./data:/app/data
       - ./workspace:/workspace
