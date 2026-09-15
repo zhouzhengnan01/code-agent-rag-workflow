@@ -64,6 +64,13 @@ def init_db():
               FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_approvals_thread ON approvals(thread_id, status, created_at);
+            CREATE TABLE IF NOT EXISTS turn_checkpoints (
+              id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL UNIQUE,
+              agent_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', state TEXT NOT NULL,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_turn_checkpoints_thread ON turn_checkpoints(thread_id, status, updated_at);
             CREATE TABLE IF NOT EXISTS turn_events (
               id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
               sequence INTEGER NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL,
@@ -98,6 +105,11 @@ def init_db():
             db.execute("ALTER TABLE knowledge_chunks ADD COLUMN document_id TEXT NOT NULL DEFAULT ''")
         if "metadata" not in columns:
             db.execute("ALTER TABLE knowledge_chunks ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
+        approval_columns = {row["name"] for row in db.execute("PRAGMA table_info(approvals)")}
+        if "tool_call_id" not in approval_columns:
+            db.execute("ALTER TABLE approvals ADD COLUMN tool_call_id TEXT")
+        if "resumable" not in approval_columns:
+            db.execute("ALTER TABLE approvals ADD COLUMN resumable INTEGER NOT NULL DEFAULT 0")
         db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document ON knowledge_chunks(document_id)")
 
 
@@ -114,8 +126,11 @@ def resource_get(kind, item_id):
 
 
 def resource_save(kind, payload, item_id=None):
+    creating = item_id is None
     item_id = item_id or new_id(kind[:3])
     timestamp = now()
+    if kind == "knowledge" and creating and "backend" not in payload:
+        payload = {"backend": os.getenv("CODEZZN_KNOWLEDGE_BACKEND", "local"), **payload}
     name = str(payload.get("name") or "Untitled").strip()
     enabled = 1 if payload.get("enabled", True) else 0
     data = {k: v for k, v in payload.items() if k not in ("id", "kind", "name", "enabled", "created_at", "updated_at")}

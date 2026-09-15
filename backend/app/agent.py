@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .db import connect, new_id, now, resource_get
-from .knowledge import format_retrieval_context, search
+from .knowledge import format_retrieval_context
+from .knowledge_service import search
 from .mcp import mcp_manager
 from .model import chat_completion, stream_chat_completion
 from .sandbox import run_command
@@ -42,7 +43,7 @@ def sandbox_mode(agent):
 
 
 def _event(event_type, **data):
-    allowed = {"count", "name", "status", "content", "usage", "sources", "reason", "provider", "model", "round"}
+    allowed = {"count", "name", "status", "content", "usage", "sources", "reason", "provider", "model", "round", "approval_id", "turn_id"}
     return {"id": new_id("evt"), "timestamp": datetime.now(timezone.utc).isoformat(), "type": event_type,
             **{key: value for key, value in data.items() if key in allowed}}
 
@@ -203,12 +204,12 @@ def _git_revision(value):
     return value
 
 
-async def execute_tool(name, arguments, agent, routes):
+async def execute_tool(name, arguments, agent, routes, approved=False):
     route = routes.get(name)
     if not route:
         raise ValueError(f"未知工具: {name}")
     mode = sandbox_mode(agent)
-    auto_approve = agent.get("auto_approve") is True
+    auto_approve = agent.get("auto_approve") is True or approved
     if route[0] == "mcp":
         if mode == "read-only" and not auto_approve:
             return approval_required("mcp")
@@ -273,83 +274,131 @@ async def execute_tool(name, arguments, agent, routes):
     raise ValueError(name)
 
 
-async def run_agent(agent, history, user_message, on_event=None, streaming=False, thread_id=None, turn_id=None):
+def _public_sources(sources):
+    return [
+        {"source": item.get("source"), "position": item.get("position"), "score": item.get("score"), "retrieval": item.get("retrieval")}
+        for item in sources
+    ]
+
+
+def _save_checkpoint(thread_id, turn_id, agent_id, state):
+    if not thread_id or not turn_id:
+        return
+    timestamp = now()
+    with connect() as db:
+        db.execute(
+            "INSERT INTO turn_checkpoints(id,thread_id,turn_id,agent_id,status,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(turn_id) DO UPDATE SET agent_id=excluded.agent_id,status='waiting',state=excluded.state,updated_at=excluded.updated_at",
+            (new_id("checkpoint"), thread_id, turn_id, agent_id, "waiting", json.dumps(state, ensure_ascii=False), timestamp, timestamp),
+        )
+        db.execute("UPDATE threads SET status='waiting_for_approval',updated_at=? WHERE id=?", (timestamp, thread_id))
+
+
+async def run_agent(agent, history, user_message, on_event=None, streaming=False, thread_id=None, turn_id=None, resume_state=None, approval_decision=None):
     provider = resource_get("providers", agent.get("provider_id"))
     if not provider:
         raise ValueError("智能体没有有效的模型提供方")
     selected_model = agent.get("model") or provider.get("default_model")
-    messages = [{"role": "system", "content": await build_context(agent, provider, selected_model)}]
-    messages.extend({"role": item["role"], "content": item["content"]} for item in history if item["role"] in ("user", "assistant"))
-    events, sources = [], []
-    await _emit(events, on_event, "turn_started")
-    if agent.get("knowledge_ids"):
-        await _emit(events, on_event, "knowledge_started")
-        try:
-            sources = await search(user_message, agent.get("knowledge_ids"), limit=6)
-            context = format_retrieval_context(sources)
-            if context:
-                messages.append({"role": "system", "content": context})
-                await _emit(events, on_event, "knowledge_completed", count=len(sources), sources=[
-                    {"source": item.get("source"), "position": item.get("position"), "score": item.get("score"), "retrieval": item.get("retrieval")}
-                    for item in sources
-                ])
-        except Exception as exc:
-            await _emit(events, on_event, "knowledge_failed", reason=type(exc).__name__)
-    messages.append({"role": "user", "content": user_message})
     tools, routes = await tool_specs(agent)
-    total_usage = {}
-    for round_number in range(int(agent.get("max_tool_rounds", 6)) + 1):
-        if streaming:
-            response, usage, content_parts, call_map = {"role": "assistant"}, {}, [], {}
-            async for item in stream_chat_completion(provider, selected_model, messages, tools, agent.get("temperature", 0.2)):
-                if item["type"] == "assistant_delta":
-                    content_parts.append(item["content"])
-                    await _emit(events, on_event, "assistant_delta", content=item["content"])
-                elif item["type"] == "usage":
-                    usage = item["usage"]
-                elif item["type"] == "finish":
-                    response["tool_calls"] = item.get("tool_calls") or []
-            response["content"] = "".join(content_parts)
-        else:
-            response, usage = await chat_completion(provider, selected_model, messages, tools, agent.get("temperature", 0.2))
-        total_usage = {key: total_usage.get(key, 0) + value for key, value in usage.items() if isinstance(value, (int, float))}
-        tool_calls = response.get("tool_calls") or []
-        if not tool_calls:
-            content = response.get("content") or ""
-            await _emit(events, on_event, "assistant_status", status="completed")
-            await _emit(events, on_event, "turn_completed", usage=total_usage)
-            return {
-                "content": content,
-                "events": events,
-                "usage": total_usage,
-                "sources": [
-                    {"source": item.get("source"), "position": item.get("position"), "score": item.get("score"), "retrieval": item.get("retrieval")}
-                    for item in sources
-                ],
-                "runtime": {
-                    "provider": provider.get("name", provider.get("type", "unknown")),
-                    "provider_type": provider.get("type", "openai-compatible"),
-                    "model": selected_model,
-                },
-            }
-        messages.append(response)
-        for call in tool_calls:
-            name = call["function"]["name"]
+    pending_tool_calls = None
+    if resume_state:
+        messages = resume_state["messages"]
+        events = resume_state.get("events", [])
+        sources = resume_state.get("sources", [])
+        total_usage = resume_state.get("usage", {})
+        round_number = int(resume_state.get("round", 0))
+        pending_tool_calls = resume_state.get("pending_tool_calls") or []
+        await _emit(events, on_event, "turn_resumed", turn_id=turn_id)
+    else:
+        messages = [{"role": "system", "content": await build_context(agent, provider, selected_model)}]
+        messages.extend({"role": item["role"], "content": item["content"]} for item in history if item["role"] in ("user", "assistant"))
+        events, sources, total_usage, round_number = [], [], {}, 0
+        await _emit(events, on_event, "turn_started", turn_id=turn_id)
+        if agent.get("knowledge_ids"):
+            await _emit(events, on_event, "knowledge_started")
             try:
-                arguments = json.loads(call["function"].get("arguments") or "{}")
+                sources = await search(user_message, agent.get("knowledge_ids"), limit=6)
+                context = format_retrieval_context(sources)
+                if context:
+                    messages.append({"role": "system", "content": context})
+                    await _emit(events, on_event, "knowledge_completed", count=len(sources), sources=_public_sources(sources))
+            except Exception as exc:
+                await _emit(events, on_event, "knowledge_failed", reason=type(exc).__name__)
+        messages.append({"role": "user", "content": user_message})
+
+    max_rounds = int(agent.get("max_tool_rounds", 6))
+    while round_number <= max_rounds:
+        if pending_tool_calls is None:
+            if streaming:
+                response, usage, content_parts = {"role": "assistant"}, {}, []
+                async for item in stream_chat_completion(provider, selected_model, messages, tools, agent.get("temperature", 0.2)):
+                    if item["type"] == "assistant_delta":
+                        content_parts.append(item["content"])
+                        await _emit(events, on_event, "assistant_delta", content=item["content"])
+                    elif item["type"] == "usage":
+                        usage = item["usage"]
+                    elif item["type"] == "finish":
+                        response["tool_calls"] = item.get("tool_calls") or []
+                response["content"] = "".join(content_parts)
+            else:
+                response, usage = await chat_completion(provider, selected_model, messages, tools, agent.get("temperature", 0.2))
+            total_usage = {key: total_usage.get(key, 0) + value for key, value in usage.items() if isinstance(value, (int, float))}
+            pending_tool_calls = response.get("tool_calls") or []
+            if not pending_tool_calls:
+                content = response.get("content") or ""
+                await _emit(events, on_event, "assistant_status", status="completed")
+                await _emit(events, on_event, "turn_completed", usage=total_usage)
+                return {
+                    "status": "completed", "content": content, "events": events, "usage": total_usage,
+                    "sources": _public_sources(sources),
+                    "runtime": {"provider": provider.get("name", provider.get("type", "unknown")), "provider_type": provider.get("type", "openai-compatible"), "model": selected_model},
+                }
+            messages.append(response)
+
+        while pending_tool_calls:
+            call = pending_tool_calls[0]
+            name = call["function"]["name"]
+            arguments = json.loads(call["function"].get("arguments") or "{}")
+            try:
                 await _emit(events, on_event, "tool_started", name=name)
-                result = await execute_tool(name, arguments, agent, routes)
-                output = json.dumps(result, ensure_ascii=False, default=str)
-                if isinstance(result, dict) and isinstance(result.get("error"), dict) and result["error"].get("code") == "approval_required":
-                    approval_id = new_id("approval")
-                    if thread_id and turn_id:
-                        with connect() as db:
-                            db.execute("INSERT INTO approvals(id,thread_id,turn_id,tool_name,arguments,created_at) VALUES(?,?,?,?,?,?)", (approval_id, thread_id, turn_id, name, json.dumps(arguments, ensure_ascii=False), now()))
-                    await _emit(events, on_event, "approval_required", name=name, status=approval_id)
+                approved = bool(approval_decision and approval_decision.get("tool_call_id") == call["id"] and approval_decision.get("decision") == "approved")
+                denied = bool(approval_decision and approval_decision.get("tool_call_id") == call["id"] and approval_decision.get("decision") == "denied")
+                if denied:
+                    result = {"error": {"code": "approval_denied", "message": approval_decision.get("reason") or "Approval denied"}}
+                    approval_decision = None
+                    await _emit(events, on_event, "tool_failed", name=name, reason="approval_denied")
                 else:
+                    result = await execute_tool(name, arguments, agent, routes, approved=approved)
+                    if approved:
+                        approval_decision = None
+                    if isinstance(result, dict) and isinstance(result.get("error"), dict) and result["error"].get("code") == "approval_required":
+                        if not thread_id or not turn_id:
+                            output = json.dumps(result, ensure_ascii=False, default=str)
+                            messages.append({"role": "tool", "tool_call_id": call["id"], "content": output[:50000]})
+                            pending_tool_calls.pop(0)
+                            await _emit(events, on_event, "tool_failed", name=name, reason="approval_unavailable")
+                            continue
+                        approval_id = new_id("approval")
+                        state = {"messages": messages, "pending_tool_calls": pending_tool_calls, "events": events, "usage": total_usage, "sources": sources, "round": round_number}
+                        with connect() as db:
+                            db.execute(
+                                "INSERT INTO approvals(id,thread_id,turn_id,tool_name,arguments,status,created_at,tool_call_id,resumable) VALUES(?,?,?,?,?,'pending',?,?,1)",
+                                (approval_id, thread_id, turn_id, name, json.dumps(arguments, ensure_ascii=False), now(), call["id"]),
+                            )
+                        _save_checkpoint(thread_id, turn_id, agent["id"], state)
+                        await _emit(events, on_event, "approval_required", name=name, status="pending", approval_id=approval_id, turn_id=turn_id)
+                        return {
+                            "status": "waiting_for_approval", "content": response.get("content", "") if 'response' in locals() else "",
+                            "events": events, "usage": total_usage, "sources": _public_sources(sources), "approval_id": approval_id,
+                            "runtime": {"provider": provider.get("name", provider.get("type", "unknown")), "provider_type": provider.get("type", "openai-compatible"), "model": selected_model},
+                        }
                     await _emit(events, on_event, "tool_completed", name=name, status="completed")
+                output = json.dumps(result, ensure_ascii=False, default=str)
             except Exception as exc:
                 output = json.dumps({"error": str(exc)}, ensure_ascii=False)
                 await _emit(events, on_event, "tool_failed", name=name, reason=type(exc).__name__)
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": output[:50000]})
+            pending_tool_calls.pop(0)
+        pending_tool_calls = None
+        round_number += 1
     raise RuntimeError("达到最大工具调用轮次")

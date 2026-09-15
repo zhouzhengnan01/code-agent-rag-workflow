@@ -2,7 +2,7 @@ import json
 
 from .agent import run_agent
 from .db import connect, new_id, now, resource_get
-from .knowledge import search
+from .knowledge_service import search
 from .mcp import mcp_manager
 
 

@@ -1,5 +1,6 @@
 import json
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
@@ -12,7 +13,10 @@ from pypdf import PdfReader
 
 from .agent import persist_event, run_agent
 from .db import connect, init_db, migrate_bailian_providers, new_id, now, resource_delete, resource_get, resource_list, resource_save, seed_defaults
-from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, decode_upload, document_status, drop_knowledge_index, ingest, rag_status, reindex, search
+from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, drop_knowledge_index, rag_status
+from .knowledge_eval import evaluate as evaluate_knowledge_backends
+from .knowledge_service import delete_document as delete_knowledge_document, ensure_remote_dataset, health as knowledge_health, reindex as reindex_knowledge_service, search as search_knowledge_service, status as knowledge_status, upload as upload_knowledge_document
+from .ragflow import RAGFlowError
 from .mcp import mcp_manager
 from .model import BAILIAN_PRESETS, normalize_provider, public_provider, test_provider
 from .sandbox import sandbox_status
@@ -31,21 +35,22 @@ async def thread_lock(thread_id):
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "web"
 RESOURCE_KINDS = {"agents", "skills", "providers", "mcp_servers", "knowledge", "workflows"}
-app = FastAPI(title="Codezzn", version="0.1.0", description="可部署的智能体开发与运行平台")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     init_db()
     seed_defaults()
     migrate_bailian_providers()
+    try:
+        yield
+    finally:
+        await mcp_manager.close()
 
 
-@app.on_event("shutdown")
-async def shutdown():
-    await mcp_manager.close()
+app = FastAPI(title="Codezzn", version="0.1.0", description="可部署的智能体开发与运行平台", lifespan=lifespan)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 
 
 @app.middleware("http")
@@ -166,43 +171,88 @@ async def import_skill(file: UploadFile = File(...)):
     return resource_save("skills", {"name": name, "description": "Imported SKILL.md", "content": content, "enabled": True})
 
 
+@app.post("/api/knowledge/{knowledge_id}/ragflow/provision")
+async def provision_ragflow_dataset(knowledge_id: str):
+    knowledge = resource_get("knowledge", knowledge_id)
+    if not knowledge:
+        raise HTTPException(404, "知识库不存在")
+    if knowledge.get("backend") != "ragflow":
+        raise HTTPException(400, "只有 RAGFlow 知识库可以创建远程数据集")
+    if knowledge.get("ragflow_dataset_id"):
+        return {"created": False, "ragflow_dataset_id": knowledge["ragflow_dataset_id"]}
+    try:
+        dataset_id = await ensure_remote_dataset(knowledge)
+        updated = resource_save("knowledge", {**knowledge, "ragflow_dataset_id": dataset_id}, knowledge_id)
+        return {"created": True, "ragflow_dataset_id": dataset_id, "knowledge": updated}
+    except (KnowledgeError, RAGFlowError) as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
 @app.post("/api/knowledge/{knowledge_id}/documents")
 async def upload_document(knowledge_id: str, file: UploadFile = File(...)):
-    if not resource_get("knowledge", knowledge_id):
+    knowledge = resource_get("knowledge", knowledge_id)
+    if not knowledge:
         raise HTTPException(404, "知识库不存在")
     raw = await file.read()
     filename = file.filename or "document.txt"
     try:
-        filename, text, upload_meta = decode_upload(filename, raw, file.content_type)
-        knowledge = resource_get("knowledge", knowledge_id)
-        result = await ingest(knowledge, filename, text, upload_meta)
+        return await upload_knowledge_document(knowledge, filename, raw, file.content_type)
     except KnowledgeValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
     except KnowledgeConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
-    except KnowledgeError as exc:
+    except (KnowledgeError, RAGFlowError) as exc:
         raise HTTPException(502, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(502, "Document indexing failed") from exc
-    return {"source": filename, "characters": len(text), **result}
 
 
 @app.get("/api/knowledge/{knowledge_id}/documents/status")
-def knowledge_document_status(knowledge_id: str):
-    if not resource_get("knowledge", knowledge_id):
-        raise HTTPException(404, "知识库不存在")
-    return document_status(knowledge_id)
-
-
-@app.post("/api/knowledge/{knowledge_id}/reindex")
-async def reindex_knowledge(knowledge_id: str, payload: dict = Body(default={} )):
+async def knowledge_document_status(knowledge_id: str, document_id: str = ""):
     knowledge = resource_get("knowledge", knowledge_id)
     if not knowledge:
         raise HTTPException(404, "知识库不存在")
     try:
-        return await reindex(knowledge, payload.get("document_id"))
+        return await knowledge_status(knowledge, document_id or None)
+    except (KnowledgeError, RAGFlowError) as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.delete("/api/knowledge/{knowledge_id}/documents/{document_id}")
+async def remove_knowledge_document(knowledge_id: str, document_id: str):
+    knowledge = resource_get("knowledge", knowledge_id)
+    if not knowledge:
+        raise HTTPException(404, "知识库不存在")
+    try:
+        return await delete_knowledge_document(knowledge, document_id)
     except KnowledgeValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except (KnowledgeError, RAGFlowError) as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/knowledge/{knowledge_id}/reindex")
+async def reindex_knowledge(knowledge_id: str, payload: dict = Body(default={})):
+    knowledge = resource_get("knowledge", knowledge_id)
+    if not knowledge:
+        raise HTTPException(404, "知识库不存在")
+    try:
+        return await reindex_knowledge_service(knowledge, payload.get("document_id"))
+    except KnowledgeValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except (KnowledgeError, RAGFlowError) as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/api/knowledge/{knowledge_id}/health")
+async def get_knowledge_health(knowledge_id: str):
+    knowledge = resource_get("knowledge", knowledge_id)
+    if not knowledge:
+        raise HTTPException(404, "知识库不存在")
+    try:
+        return await knowledge_health(knowledge)
+    except (KnowledgeError, RAGFlowError) as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 @app.post("/api/knowledge/search")
@@ -212,12 +262,20 @@ async def search_knowledge(payload: dict = Body(...)):
         raise HTTPException(400, "必须明确指定至少一个知识库")
     diagnostics = {}
     try:
-        data = await search(payload.get("query", ""), knowledge_ids, min(int(payload.get("limit", 5)), 20),
-                             filters=payload.get("filters"), candidate_k=payload.get("candidate_k"), top_k=payload.get("top_k"),
-                             source_cap=payload.get("source_cap"), diagnostics=diagnostics)
+        data = await search_knowledge_service(payload.get("query", ""), knowledge_ids, min(int(payload.get("limit", 5)), 20),
+                                               filters=payload.get("filters"), candidate_k=payload.get("candidate_k"), top_k=payload.get("top_k"),
+                                               source_cap=payload.get("source_cap"), diagnostics=diagnostics)
     except KnowledgeValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"data": data, "diagnostics": diagnostics}
+
+
+@app.post("/api/knowledge/evaluate")
+async def evaluate_knowledge(payload: dict = Body(...)):
+    try:
+        return await evaluate_knowledge_backends(payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/mcp_servers/{server_id}/test")
@@ -348,23 +406,100 @@ def approval_inbox(thread_id: str):
     return list_approvals(thread_id, "pending")
 
 
+async def continue_approval(approval_id: str, decision: str, reason: str):
+    with connect() as db:
+        approval = db.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
+    if not approval:
+        raise HTTPException(404, "审批不存在")
+    if approval["status"] != "pending":
+        raise HTTPException(409, "审批已处理")
+    if not approval["resumable"] or not approval["tool_call_id"]:
+        raise HTTPException(409, "该审批由旧版本创建，无法自动续跑")
+    thread_id, turn_id = approval["thread_id"], approval["turn_id"]
+    lock = await thread_lock(thread_id)
+    if lock.locked():
+        raise HTTPException(409, "该会话已有任务正在运行")
+    await lock.acquire()
+    try:
+        timestamp = now()
+        with connect() as db:
+            cur = db.execute(
+                "UPDATE approvals SET status=?,resolution=?,resolved_at=? WHERE id=? AND status='pending'",
+                (decision, reason, timestamp, approval_id),
+            )
+            checkpoint = db.execute(
+                "SELECT * FROM turn_checkpoints WHERE turn_id=? AND status='waiting'", (turn_id,)
+            ).fetchone()
+            if not cur.rowcount:
+                raise HTTPException(409, "审批已处理")
+            if not checkpoint:
+                raise HTTPException(409, "审批检查点不存在或已被续跑")
+            claimed = db.execute(
+                "UPDATE turn_checkpoints SET status='resuming',updated_at=? WHERE id=? AND status='waiting'",
+                (timestamp, checkpoint["id"]),
+            )
+            if not claimed.rowcount:
+                raise HTTPException(409, "审批检查点已被其他请求续跑")
+            db.execute("UPDATE threads SET status='running',updated_at=? WHERE id=?", (timestamp, thread_id))
+        agent = resource_get("agents", checkpoint["agent_id"])
+        if not agent:
+            raise ValueError("审批对应的智能体不存在")
+        state = json.loads(checkpoint["state"])
+        with connect() as db:
+            row = db.execute("SELECT COALESCE(MAX(sequence),0) AS value FROM turn_events WHERE turn_id=?", (turn_id,)).fetchone()
+        event_sequence = int(row["value"])
+
+        async def emit(event):
+            nonlocal event_sequence
+            event_sequence += 1
+            persist_event(event, thread_id, turn_id, event_sequence)
+
+        result = await run_agent(
+            agent, [], "", emit, streaming=False, thread_id=thread_id, turn_id=turn_id,
+            resume_state=state,
+            approval_decision={"tool_call_id": approval["tool_call_id"], "decision": decision, "reason": reason},
+        )
+        if result["status"] == "waiting_for_approval":
+            return {"approval": {**dict(approval), "status": decision, "resolution": reason, "arguments": json.loads(approval["arguments"])}, "turn_id": turn_id, **result}
+        with connect() as db:
+            db.execute(
+                "INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)",
+                (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()),
+            )
+            db.execute("UPDATE turn_checkpoints SET status='completed',updated_at=? WHERE turn_id=?", (now(), turn_id))
+            db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
+        return {"approval": {**dict(approval), "status": decision, "resolution": reason, "arguments": json.loads(approval["arguments"])}, "turn_id": turn_id, **result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        with connect() as db:
+            db.execute("UPDATE turn_checkpoints SET status='failed',updated_at=? WHERE turn_id=?", (now(), turn_id))
+            db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), thread_id))
+        raise HTTPException(502, str(exc))
+    finally:
+        lock.release()
+
+
 @app.post("/api/approvals/{approval_id}")
-def resolve_approval(approval_id: str, payload: dict = Body(...)):
+async def resolve_approval(approval_id: str, payload: dict = Body(...)):
     decision = payload.get("decision")
     if decision not in ("approved", "denied"):
         raise HTTPException(400, "decision 必须是 approved 或 denied")
-    with connect() as db:
-        cur = db.execute("UPDATE approvals SET status=?,resolution=?,resolved_at=? WHERE id=? AND status='pending'", (decision, payload.get("reason", decision), now(), approval_id))
-        row = db.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "审批不存在")
-    if not cur.rowcount:
-        raise HTTPException(409, "审批已处理")
-    return {**dict(row), "arguments": json.loads(row["arguments"])}
+    return await continue_approval(approval_id, decision, str(payload.get("reason") or decision))
 
 
 @app.post("/api/threads/{thread_id}/resume")
 async def resume_thread(thread_id: str, payload: dict = Body(...)):
+    approval_id = str(payload.get("approval_id") or "")
+    decision = payload.get("decision")
+    if approval_id:
+        with connect() as db:
+            approval = db.execute("SELECT thread_id FROM approvals WHERE id=?", (approval_id,)).fetchone()
+        if not approval or approval["thread_id"] != thread_id:
+            raise HTTPException(404, "该会话中不存在此审批")
+        if decision not in ("approved", "denied"):
+            raise HTTPException(400, "decision 必须是 approved 或 denied")
+        return await continue_approval(approval_id, decision, str(payload.get("reason") or decision))
     return await start_turn(thread_id, payload)
 
 

@@ -8,7 +8,7 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 - 模型接入：任意 OpenAI-compatible `chat/completions` 服务，可配置 Base URL、API Key、模型列表和自定义 Header
 - 技能：在线创建、启停、编辑、删除，以及导入 `SKILL.md`
 - MCP：stdio 与 Streamable HTTP JSON-RPC transport（含初始化、Session ID、JSON/SSE 响应），服务测试、工具发现、智能体工具调用
-- RAG 知识库：TXT/Markdown/JSON/CSV/PDF 上传、自动分块、百炼 Embedding、Milvus 向量检索、词法混合召回、Qwen 重排序与来源引用
+- RAG 知识库：可选择本地 SQLite + Milvus 混合检索，或通过独立 RAGFlow 服务使用复杂文档解析、全文/向量混合召回、重排与来源引用；旧知识库保持本地后端，不会被默认配置自动迁移
 - 工作流：input、prompt、agent、knowledge、mcp、output 节点，DAG 校验、运行记录与节点 trace
 - Workbench：仪表盘、对话、各资源管理、工作流 JSON 设计器、设置
 - 工具执行：知识检索、目录读取、文件读写、Patch、Git 状态/Diff/Log/Review、受沙箱与审批策略控制的 Shell
@@ -28,6 +28,27 @@ docker compose up -d --build
 打开 <http://127.0.0.1:8080/workbench.html>。首次启动会生成一个默认 OpenAI-compatible 提供方和默认智能体；请先在“模型接入”中填入有效 API Key，或将 Base URL 改为你的 Ollama、vLLM、LM Studio、OneAPI 等兼容端点。
 
 Windows Docker Desktop 使用 bind mount 时，宿主机文件权限可能与容器内非 root UID 不一致。Compose 默认使用 `CODEZZN_UID=0`、`CODEZZN_GID=0` 保证本地启动可写；Linux 主机可在 `.env` 中改为 `./data` 和 `./workspace` 所属用户的 UID/GID。
+
+### 可选 RAGFlow 检索后端
+
+RAGFlow 必须作为独立服务部署，不要把其源码或 Compose 服务直接合并到 Codezzn 主容器。Codezzn 通过 RAGFlow `/api/v1` REST API 接入。将以下设置添加到现有 `.env`；`CODEZZN_RAGFLOW_URL` 可以是服务根地址或已经带 `/api/v1` 的地址：
+
+```env
+CODEZZN_KNOWLEDGE_BACKEND=local
+CODEZZN_RAGFLOW_URL=http://host.docker.internal:9380
+CODEZZN_RAGFLOW_API_KEY=replace-with-ragflow-api-key
+CODEZZN_RAGFLOW_TIMEOUT=120
+```
+
+`CODEZZN_KNOWLEDGE_BACKEND` 只决定新建知识库的默认值。已有且未保存 `backend` 字段的知识库始终按 `local` 处理，避免环境变量导致静默迁移。Workbench 新建 RAGFlow 知识库后，可以填写现有数据集 ID，也可以先保存，再点击“创建数据集”。上传到 RAGFlow 后返回 `processing`；在“文档状态”中等待 `DONE` 再测试检索。
+
+对照评测端点：
+
+```http
+POST /api/knowledge/evaluate
+```
+
+请求中提供 `local_knowledge_ids`、`ragflow_knowledge_ids`、`top_k` 和带 `query`/`expected_sources` 的 `cases`。结果包含 Hit@K、MRR、来源 Recall@K 与平均延迟。它是迁移验收指标，不等同于生成回答的 Faithfulness 或 Chunk 级完整评测。
 
 查看状态：
 

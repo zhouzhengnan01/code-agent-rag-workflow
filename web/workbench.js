@@ -287,7 +287,7 @@ function resourceCard(kind, item) {
   let facts = [];
   if (kind === 'agents') facts = [item.model || '未选择模型', `${(item.skill_ids || []).length} 个技能`, `${(item.knowledge_ids || []).length} 个知识库`];
   if (kind === 'providers') facts = [item.type === 'bailian' ? '阿里云百炼' : 'OpenAI compatible', `${(item.models || []).length} 个模型`, item.api_key_configured ? '密钥已配置' : '等待密钥'];
-  if (kind === 'knowledge') facts = [`${item.document_count || 0} 个文档`, `${item.chunk_count || 0} 个片段`, item.embedding_model || 'qwen3.7-text-embedding'];
+  if (kind === 'knowledge') facts = [`${item.document_count || 0} 个文档`, `${item.chunk_count || 0} 个片段`, item.backend === 'ragflow' ? 'RAGFlow' : (item.embedding_model || '本地 Milvus')];
   if (kind === 'mcp_servers') facts = [(item.transport || 'stdio').toUpperCase()];
   if (kind === 'workflows') facts = [`${(item.nodes || []).length} 个节点`];
   if (kind === 'skills') facts = ['SKILL.md'];
@@ -303,7 +303,7 @@ function resourceCard(kind, item) {
       <div class="record-actions">
         <button class="button button-quiet button-small" type="button" onclick="editResource('${kind}','${item.id}')">编辑</button>
         ${kind === 'providers' ? `<button class="button button-quiet button-small" type="button" onclick="testProvider('${item.id}')">测试连接</button>` : ''}
-        ${kind === 'knowledge' ? `<button class="button button-quiet button-small" type="button" onclick="uploadDoc('${item.id}')">上传文档</button><button class="button button-quiet button-small" type="button" onclick="testKnowledge('${item.id}')">测试检索</button>` : ''}
+        ${kind === 'knowledge' ? `${item.backend === 'ragflow' && !item.ragflow_dataset_id ? `<button class="button button-quiet button-small" type="button" onclick="provisionRagflow('${item.id}')">创建数据集</button>` : ''}<button class="button button-quiet button-small" type="button" onclick="uploadDoc('${item.id}')">上传文档</button><button class="button button-quiet button-small" type="button" onclick="showKnowledgeStatus('${item.id}')">文档状态</button><button class="button button-quiet button-small" type="button" onclick="testKnowledge('${item.id}')">测试检索</button>` : ''}
         ${kind === 'mcp_servers' ? `<button class="button button-quiet button-small" type="button" onclick="testMcp('${item.id}')">测试服务</button>` : ''}
         ${kind === 'workflows' ? `<button class="button button-quiet button-small" type="button" onclick="runWorkflow('${item.id}')">运行</button>` : ''}
         <button class="button button-danger button-small" type="button" onclick="removeResource('${kind}','${item.id}')">删除</button>
@@ -414,18 +414,37 @@ function mcpForm(item) {
 async function knowledgeForm(item) {
   const providers = await load('providers');
   const provider = item.embedding_provider_id || providers.find(value => value.type === 'bailian')?.id || providers[0]?.id || '';
+  const selectedBackend = item.backend || 'local';
   modal(item.id ? '编辑知识库' : '新建知识库', `
     <form id="editForm" class="form-layout">
       ${field('名称', 'name', item.name)}${field('描述', 'description', item.description)}
-      <section class="form-section control-full"><header><h3>向量索引</h3><p>修改模型或维度后，需要重新上传文档。</p></header></section>
+      <section class="form-section control-full"><header><h3>检索后端</h3><p>已有知识库默认保持本地；RAGFlow 通过独立服务 API 接入。</p></header></section>
+      ${selectField('后端类型', 'backend', `<option value="local" ${selectedBackend === 'local' ? 'selected' : ''}>本地 Milvus</option><option value="ragflow" ${selectedBackend === 'ragflow' ? 'selected' : ''}>RAGFlow</option>`)}
+      ${field('RAGFlow 数据集 ID', 'ragflow_dataset_id', item.ragflow_dataset_id || '', 'text', false, 'RAGFlow 后端必填。先在 RAGFlow 创建数据集，再复制数据集 ID；连接地址和 API Key 由环境变量统一提供。')}
+      ${selectField('RAGFlow 切片方法', 'chunk_method', ['naive','book','email','laws','manual','one','paper','picture','presentation','qa','table','tag'].map(value => `<option value="${value}" ${(item.chunk_method || 'naive') === value ? 'selected' : ''}>${value}</option>`).join(''))}
+      <section class="form-section control-full"><header><h3>本地向量索引</h3><p>仅本地 Milvus 后端使用；修改模型或维度后需要重建索引。</p></header></section>
       ${selectField('Embedding 提供方', 'embedding_provider_id', providers.map(value => `<option value="${value.id}" ${provider === value.id ? 'selected' : ''}>${esc(value.name)}</option>`).join(''))}
       ${field('Embedding 模型', 'embedding_model', item.embedding_model || 'qwen3.7-text-embedding')}
       ${field('向量维度', 'embedding_dimension', item.embedding_dimension || 1024, 'number')}
       ${field('重排序模型', 'rerank_model', item.rerank_model || 'qwen3-rerank')}
+      <section class="form-section control-full"><header><h3>RAGFlow 检索参数</h3><p>控制混合召回、候选池和重排窗口。</p></header></section>
+      ${field('相似度阈值', 'similarity_threshold', item.similarity_threshold ?? 0.2, 'number')}
+      ${field('向量权重', 'vector_similarity_weight', item.vector_similarity_weight ?? 0.3, 'number')}
+      ${field('KNN Top K', 'knn_top_k', item.knn_top_k || 1024, 'number')}
+      ${field('KNN 候选数', 'knn_num_candidates', item.knn_num_candidates || 2048, 'number')}
+      ${field('重排候选数', 'rerank_candidates_count', item.rerank_candidates_count || 64, 'number')}
+      ${field('RAGFlow Reranker ID', 'rerank_id', item.rerank_id || '')}
+      ${toggleField('TOC 增强', 'toc_enhance', item.toc_enhance === true)}${toggleField('知识图谱增强', 'use_kg', item.use_kg === true)}
       ${toggleField('启用知识库', 'enabled', item.enabled !== false, true)}
     </form>`, () => {
       const data = formData($('#editForm'));
+      if (!['local', 'ragflow'].includes(data.backend)) { toast('请选择有效的知识库后端', true); return; }
+      if (data.backend === 'ragflow' && !data.ragflow_dataset_id.trim()) { toast('RAGFlow 后端需要数据集 ID', true); return; }
       data.embedding_dimension = Number(data.embedding_dimension);
+      for (const key of ['similarity_threshold', 'vector_similarity_weight']) data[key] = Number(data[key]);
+      for (const key of ['knn_top_k', 'knn_num_candidates', 'rerank_candidates_count']) data[key] = Number(data[key]);
+      data.toc_enhance = $('#editForm [name=toc_enhance]').checked;
+      data.use_kg = $('#editForm [name=use_kg]').checked;
       data.enabled = $('#editForm [name=enabled]').checked;
       save('knowledge', item.id, data);
     });
@@ -527,16 +546,40 @@ function importSkill() {
     }, false, '导入');
 }
 
+async function provisionRagflow(id) {
+  try {
+    toast('正在创建 RAGFlow 数据集');
+    const result = await api(`/api/knowledge/${id}/ragflow/provision`, { method: 'POST', body: '{}' });
+    toast(result.created ? 'RAGFlow 数据集已创建并绑定' : '该知识库已绑定数据集');
+    loadPage();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function showKnowledgeStatus(id) {
+  try {
+    const result = await api(`/api/knowledge/${id}/documents/status`);
+    const documents = result.documents || [];
+    modal('文档解析状态', documents.length ? `<div class="search-results">${documents.map(item => `
+      <article class="search-hit"><header><span>${esc(item.name || item.source || item.id)}</span><strong>${esc(String(item.run || 'UNKNOWN'))}</strong></header>
+      <div class="search-source">片段 ${Number(item.chunk_count || item.chunks || 0)} · Token ${Number(item.token_count || 0)}</div>
+      <p>${esc(item.progress_msg || (result.backend === 'ragflow' ? 'RAGFlow 异步处理状态' : '本地索引已提交'))}</p></article>`).join('')}</div>` : '<div class="state-inline"><p>暂无文档状态。</p></div>', null, true);
+  } catch (error) { toast(error.message, true); }
+}
+
 function uploadDoc(id) {
+  const knowledge = cache.knowledge?.find(item => item.id === id) || {};
+  const isRagflow = knowledge.backend === 'ragflow';
   modal('上传知识文档', `
-    <form id="uploadForm"><label class="drop-field"><input type="file" name="file" required><span class="drop-title">选择 TXT、MD、JSON、CSV 或 PDF</span><span>文档会被分块、向量化并写入 Milvus。</span></label></form>`, async () => {
-      const button = $('#modalSave');
-      try {
-        button.disabled = true; button.textContent = '向量化中';
-        const result = await api(`/api/knowledge/${id}/documents`, { method: 'POST', body: new FormData($('#uploadForm')) });
-        closeModal(); toast(`已写入 ${result.chunks} 个 ${result.embedding_dimension} 维片段`); loadPage();
-      } catch (error) { button.disabled = false; button.textContent = '上传'; toast(error.message, true); }
-    }, false, '上传');
+    <form id="uploadForm"><label class="drop-field"><input type="file" name="file" required><span class="drop-title">选择知识文档</span><span>${isRagflow ? '文件将转发到 RAGFlow，并异步解析和建立索引。' : '文档会被分块、向量化并写入本地 Milvus。'}</span></label></form>`, async () => {
+    const button = $('#modalSave');
+    try {
+      button.disabled = true; button.textContent = isRagflow ? '提交解析中' : '向量化中';
+      const result = await api(`/api/knowledge/${id}/documents`, { method: 'POST', body: new FormData($('#uploadForm')) });
+      closeModal();
+      toast(result.status === 'processing' ? `文档已提交，解析状态：${result.run || 'UNSTART'}` : `已写入 ${result.chunks} 个片段`);
+      loadPage();
+    } catch (error) { button.disabled = false; button.textContent = '上传'; toast(error.message, true); }
+  }, false, '上传');
 }
 
 function testKnowledge(id) {
