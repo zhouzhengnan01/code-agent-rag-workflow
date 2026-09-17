@@ -12,19 +12,23 @@ from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 
 from .agent import persist_event, run_agent
+from .capabilities import ROLE_TEMPLATES
 from .db import connect, init_db, migrate_bailian_providers, new_id, now, resource_delete, resource_get, resource_list, resource_save, seed_defaults
 from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, drop_knowledge_index, rag_status
 from .knowledge_eval import evaluate as evaluate_knowledge_backends
 from .knowledge_service import delete_document as delete_knowledge_document, ensure_remote_dataset, health as knowledge_health, reindex as reindex_knowledge_service, search as search_knowledge_service, status as knowledge_status, upload as upload_knowledge_document
 from .ragflow import RAGFlowError
 from .mcp import mcp_manager
+from .memory import delete_memory, get_memory, list_memories, save_memory, search_memories
 from .model import BAILIAN_PRESETS, normalize_provider, public_provider, test_provider
 from .sandbox import sandbox_status
+from .tasks import cancel_task, enqueue_task, get_task, list_tasks, task_events, task_queue
 from .workflows import create_run
 
 
 THREAD_LOCKS = {}
 THREAD_LOCKS_GUARD = asyncio.Lock()
+ACTIVE_TURNS = {}
 
 
 async def thread_lock(thread_id):
@@ -32,9 +36,79 @@ async def thread_lock(thread_id):
         return THREAD_LOCKS.setdefault(thread_id, asyncio.Lock())
 
 
+def _thread_payload(row):
+    value = dict(row)
+    raw = value.pop("capability_overrides", "{}") or "{}"
+    try:
+        value["capability_overrides"] = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        value["capability_overrides"] = {}
+    return value
+
+
+def _capability_ids(value, kind):
+    if not isinstance(value, list) or len(value) > 100 or any(not isinstance(item, str) for item in value):
+        raise HTTPException(400, f"{kind} 必须是最多 100 个 ID 的数组")
+    result = list(dict.fromkeys(value))
+    available = {item["id"] for item in resource_list(kind) if item.get("enabled")}
+    if any(item not in available for item in result):
+        raise HTTPException(400, f"包含不可用的 {kind} ID")
+    return result
+
+
+def _agent_for_thread(agent, thread):
+    scoped = dict(agent)
+    raw = thread["capability_overrides"] if "capability_overrides" in thread.keys() else "{}"
+    try:
+        overrides = json.loads(raw or "{}") if isinstance(raw, str) else (raw or {})
+    except (TypeError, json.JSONDecodeError):
+        overrides = {}
+    for key in ("skill_ids", "mcp_server_ids"):
+        if isinstance(overrides.get(key), list):
+            scoped[key] = list(dict.fromkeys(overrides[key]))
+    return scoped
+
+
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "web"
-RESOURCE_KINDS = {"agents", "skills", "providers", "mcp_servers", "knowledge", "workflows"}
+RESOURCE_KINDS = {"agents", "agent_teams", "skills", "providers", "mcp_servers", "knowledge", "workflows"}
+
+
+async def execute_persistent_task(task):
+    payload = task.get("payload") or {}
+    if task["kind"] in {"agent", "subagent"}:
+        agent = resource_get("agents", payload.get("agent_id"))
+        if not agent:
+            raise ValueError("后台任务引用的智能体不存在")
+        subagent_run_id = payload.get("subagent_run_id")
+        if subagent_run_id:
+            with connect() as db:
+                db.execute("UPDATE subagent_runs SET status='running',updated_at=? WHERE id=?", (now(), subagent_run_id))
+        try:
+            result = await run_agent(
+                agent,
+                payload.get("history") or [],
+                str(payload.get("task") or payload.get("prompt") or ""),
+                thread_id=payload.get("thread_id"),
+                turn_id=payload.get("turn_id"),
+                depth=int(payload.get("depth", 0)),
+                current_task_id=task["id"],
+            )
+            if subagent_run_id:
+                with connect() as db:
+                    db.execute("UPDATE subagent_runs SET status='completed',result=?,error=NULL,updated_at=? WHERE id=?", (json.dumps(result, ensure_ascii=False, default=str), now(), subagent_run_id))
+            return result
+        except Exception as exc:
+            if subagent_run_id:
+                with connect() as db:
+                    db.execute("UPDATE subagent_runs SET status='failed',error=?,updated_at=? WHERE id=?", (str(exc)[:4000], now(), subagent_run_id))
+            raise
+    if task["kind"] == "workflow":
+        workflow = resource_get("workflows", payload.get("workflow_id"))
+        if not workflow:
+            raise ValueError("后台任务引用的工作流不存在")
+        return await create_run(workflow, payload.get("input"), run_id=payload.get("run_id"), task_id=task["id"], raise_errors=True)
+    raise ValueError(f"未知后台任务类型: {task['kind']}")
 
 
 @asynccontextmanager
@@ -42,13 +116,15 @@ async def lifespan(_app: FastAPI):
     init_db()
     seed_defaults()
     migrate_bailian_providers()
+    await task_queue.start(execute_persistent_task, int(os.getenv("CODEZZN_TASK_WORKERS", "4")))
     try:
         yield
     finally:
+        await task_queue.close()
         await mcp_manager.close()
 
 
-app = FastAPI(title="Codezzn", version="0.1.0", description="可部署的智能体开发与运行平台", lifespan=lifespan)
+app = FastAPI(title="Codezzn", version="0.2.0", description="可部署的智能体开发与运行平台", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 
@@ -146,6 +222,11 @@ async def get_sandbox_status():
 @app.get("/api/provider-presets")
 def provider_presets():
     return {"data": BAILIAN_PRESETS}
+
+
+@app.get("/api/agent-templates")
+def agent_templates():
+    return {"data": [{"id": key, **value} for key, value in ROLE_TEMPLATES.items()]}
 
 
 @app.post("/api/providers/{provider_id}/test")
@@ -285,9 +366,89 @@ async def test_mcp(server_id: str):
         raise HTTPException(404, "MCP 服务不存在")
     try:
         tools = await mcp_manager.list_tools(server)
-        return {"ok": True, "tools": tools}
+        info = mcp_manager.initialized.get(server_id, {})
+        return {"ok": True, "tools": tools, "server": info.get("serverInfo"), "protocol_version": info.get("protocolVersion"), "capabilities": info.get("capabilities", {})}
     except Exception as exc:
         raise HTTPException(400, str(exc))
+
+
+def _mcp_server(server_id):
+    server = resource_get("mcp_servers", server_id)
+    if not server:
+        raise HTTPException(404, "MCP 服务不存在")
+    return server
+
+
+@app.get("/api/mcp_servers/{server_id}/resources")
+async def list_mcp_resources(server_id: str):
+    try:
+        return {"data": await mcp_manager.list_resources(_mcp_server(server_id))}
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/mcp_servers/{server_id}/resource-templates")
+async def list_mcp_resource_templates(server_id: str):
+    try:
+        return {"data": await mcp_manager.list_resource_templates(_mcp_server(server_id))}
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/mcp_servers/{server_id}/resources/read")
+async def read_mcp_resource(server_id: str, payload: dict = Body(...)):
+    try:
+        return await mcp_manager.read_resource(_mcp_server(server_id), str(payload.get("uri") or ""))
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/mcp_servers/{server_id}/resources/subscribe")
+async def subscribe_mcp_resource(server_id: str, payload: dict = Body(...)):
+    try:
+        return await mcp_manager.subscribe_resource(_mcp_server(server_id), str(payload.get("uri") or ""))
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/mcp_servers/{server_id}/resources/unsubscribe")
+async def unsubscribe_mcp_resource(server_id: str, payload: dict = Body(...)):
+    try:
+        return await mcp_manager.unsubscribe_resource(_mcp_server(server_id), str(payload.get("uri") or ""))
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/mcp_servers/{server_id}/prompts")
+async def list_mcp_prompts(server_id: str):
+    try:
+        return {"data": await mcp_manager.list_prompts(_mcp_server(server_id))}
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/mcp_servers/{server_id}/prompts/get")
+async def get_mcp_prompt(server_id: str, payload: dict = Body(...)):
+    try:
+        return await mcp_manager.get_prompt(_mcp_server(server_id), str(payload.get("name") or ""), payload.get("arguments"))
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/mcp_servers/{server_id}/complete")
+async def complete_mcp_argument(server_id: str, payload: dict = Body(...)):
+    try:
+        return await mcp_manager.complete(_mcp_server(server_id), payload.get("ref") or {}, payload.get("argument") or {})
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/mcp_servers/{server_id}/logging")
+async def set_mcp_logging(server_id: str, payload: dict = Body(default={})):
+    try:
+        return await mcp_manager.set_log_level(_mcp_server(server_id), str(payload.get("level") or "info"))
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/threads/{thread_id}/events")
@@ -310,6 +471,19 @@ async def run_workflow_endpoint(workflow_id: str, payload: dict = Body(...)):
     return await create_run(workflow, payload.get("input", ""))
 
 
+@app.post("/api/workflows/{workflow_id}/enqueue")
+def enqueue_workflow_endpoint(workflow_id: str, payload: dict = Body(default={})):
+    workflow = resource_get("workflows", workflow_id)
+    if not workflow:
+        raise HTTPException(404, "工作流不存在")
+    run_id, timestamp = new_id("run"), now()
+    input_value = payload.get("input", "")
+    with connect() as db:
+        db.execute("INSERT INTO workflow_runs(id,workflow_id,status,input,state,created_at,updated_at) VALUES(?,?, 'queued',?,?,?,?)", (run_id, workflow_id, json.dumps(input_value, ensure_ascii=False), "{}", timestamp, timestamp))
+    task = enqueue_task("workflow", payload.get("name") or workflow.get("name") or "工作流任务", {"workflow_id": workflow_id, "run_id": run_id, "input": input_value}, payload.get("max_attempts", 3))
+    return {"task": task, "run_id": run_id}
+
+
 @app.get("/api/workflow-runs")
 def workflow_runs():
     with connect() as db:
@@ -317,10 +491,86 @@ def workflow_runs():
     data = []
     for row in rows:
         item = dict(row)
-        for key in ("input", "output", "trace"):
+        for key in ("input", "output", "trace", "state"):
             item[key] = json.loads(item[key]) if item[key] is not None else None
         data.append(item)
     return {"data": data}
+
+
+@app.post("/api/agent-tasks")
+def enqueue_agent_task(payload: dict = Body(...)):
+    agent = resource_get("agents", payload.get("agent_id"))
+    if not agent:
+        raise HTTPException(400, "请选择有效的智能体")
+    prompt = str(payload.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(400, "任务内容不能为空")
+    return enqueue_task("agent", payload.get("name") or prompt[:80], {"agent_id": agent["id"], "prompt": prompt}, payload.get("max_attempts", 3))
+
+
+@app.get("/api/tasks")
+def get_tasks(status: str = "", limit: int = 100):
+    return {"data": list_tasks(status or None, limit)}
+
+
+@app.get("/api/tasks/{task_id}")
+def read_task(task_id: str):
+    task = get_task(task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return {**task, "events": task_events(task_id)}
+
+
+@app.delete("/api/tasks/{task_id}")
+async def stop_task(task_id: str):
+    if not get_task(task_id):
+        raise HTTPException(404, "任务不存在")
+    return {"cancelled": await task_queue.cancel(task_id)}
+
+
+@app.get("/api/subagents")
+def get_subagents(thread_id: str = "", turn_id: str = ""):
+    where, params = [], []
+    if thread_id:
+        where.append("parent_thread_id=?"); params.append(thread_id)
+    if turn_id:
+        where.append("parent_turn_id=?"); params.append(turn_id)
+    sql = "SELECT * FROM subagent_runs" + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY created_at DESC LIMIT 200"
+    with connect() as db:
+        rows = db.execute(sql, params).fetchall()
+    data = []
+    for row in rows:
+        item = dict(row)
+        if item.get("result"):
+            item["result"] = json.loads(item["result"])
+        data.append(item)
+    return {"data": data}
+
+
+@app.get("/api/memories")
+def get_memories(scope: str = "", scope_id: str = "", limit: int = 100):
+    return {"data": list_memories(scope or None, scope_id or None, limit)}
+
+
+@app.post("/api/memories")
+def create_memory(payload: dict = Body(...)):
+    try:
+        return save_memory(payload.get("scope", "project"), payload.get("scope_id", "default"), payload.get("content", ""), payload.get("kind", "experience"), payload.get("importance", 0.5), payload.get("metadata"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/memories/search")
+def find_memories(payload: dict = Body(...)):
+    scopes = payload.get("scopes") or [["project", "default"], ["user", "default"]]
+    return {"data": search_memories(str(payload.get("query") or ""), [(str(item[0]), str(item[1])) for item in scopes if isinstance(item, list) and len(item) == 2], payload.get("limit", 10))}
+
+
+@app.delete("/api/memories/{memory_id}")
+def remove_memory(memory_id: str):
+    if not get_memory(memory_id):
+        raise HTTPException(404, "记忆不存在")
+    return {"deleted": delete_memory(memory_id)}
 
 
 @app.post("/api/threads")
@@ -328,14 +578,14 @@ def create_thread(payload: dict = Body(default={})):
     thread_id, timestamp = new_id("thr"), now()
     with connect() as db:
         db.execute("INSERT INTO threads(id,name,agent_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (thread_id, payload.get("name", "新对话"), payload.get("agent_id"), "idle", timestamp, timestamp))
-    return {"id": thread_id, "name": payload.get("name", "新对话"), "agent_id": payload.get("agent_id"), "status": "idle", "created_at": timestamp, "updated_at": timestamp}
+    return {"id": thread_id, "name": payload.get("name", "新对话"), "agent_id": payload.get("agent_id"), "status": "idle", "capability_overrides": {}, "created_at": timestamp, "updated_at": timestamp}
 
 
 @app.get("/api/threads")
 def list_threads(archived: bool = False):
     with connect() as db:
         rows = db.execute("SELECT * FROM threads WHERE archived=? ORDER BY updated_at DESC", (1 if archived else 0,)).fetchall()
-    return {"data": [dict(row) for row in rows]}
+    return {"data": [_thread_payload(row) for row in rows]}
 
 
 @app.post("/api/threads/{thread_id}/fork")
@@ -347,10 +597,10 @@ def fork_thread(thread_id: str, payload: dict = Body(default={} )):
         raise HTTPException(404, "对话不存在")
     new_thread, timestamp = new_id("thr"), now()
     with connect() as db:
-        db.execute("INSERT INTO threads(id,name,agent_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (new_thread, payload.get("name") or f"{source['name']} (fork)", source["agent_id"], "idle", timestamp, timestamp))
+        db.execute("INSERT INTO threads(id,name,agent_id,status,capability_overrides,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (new_thread, payload.get("name") or f"{source['name']} (fork)", source["agent_id"], "idle", source["capability_overrides"], timestamp, timestamp))
         for message in messages:
             db.execute("INSERT INTO messages(id,thread_id,turn_id,role,type,content,meta,created_at) VALUES(?,?,?,?,?,?,?,?)", (new_id("msg"), new_thread, message["turn_id"], message["role"], message["type"], message["content"], message["meta"], message["created_at"]))
-    return {"id": new_thread, "name": payload.get("name") or f"{source['name']} (fork)", "agent_id": source["agent_id"], "status": "idle"}
+    return {"id": new_thread, "name": payload.get("name") or f"{source['name']} (fork)", "agent_id": source["agent_id"], "status": "idle", "capability_overrides": json.loads(source["capability_overrides"] or "{}")}
 
 
 @app.get("/api/threads/{thread_id}")
@@ -360,7 +610,7 @@ def read_thread(thread_id: str):
         messages = db.execute("SELECT * FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
     if not thread:
         raise HTTPException(404, "对话不存在")
-    result = dict(thread)
+    result = _thread_payload(thread)
     result["messages"] = [{**dict(row), "meta": json.loads(row["meta"])} for row in messages]
     return result
 
@@ -381,6 +631,26 @@ def update_thread(thread_id: str, payload: dict = Body(...)):
             raise HTTPException(400, "archived 必须是布尔值")
         updates.append("archived=?")
         values.append(1 if payload["archived"] else 0)
+    if "agent_id" in payload:
+        agent_id = str(payload.get("agent_id") or "")
+        if not resource_get("agents", agent_id):
+            raise HTTPException(400, "智能体不存在")
+        updates.append("agent_id=?")
+        values.append(agent_id)
+        if "capability_overrides" not in payload:
+            updates.append("capability_overrides=?")
+            values.append("{}")
+    if "capability_overrides" in payload:
+        overrides = payload.get("capability_overrides")
+        if not isinstance(overrides, dict) or any(key not in ("skill_ids", "mcp_server_ids") for key in overrides):
+            raise HTTPException(400, "capability_overrides 格式无效")
+        cleaned = {}
+        if "skill_ids" in overrides:
+            cleaned["skill_ids"] = _capability_ids(overrides["skill_ids"], "skills")
+        if "mcp_server_ids" in overrides:
+            cleaned["mcp_server_ids"] = _capability_ids(overrides["mcp_server_ids"], "mcp_servers")
+        updates.append("capability_overrides=?")
+        values.append(json.dumps(cleaned, ensure_ascii=False))
     if not updates:
         raise HTTPException(400, "没有可更新的会话字段")
     updates.append("updated_at=?")
@@ -391,7 +661,7 @@ def update_thread(thread_id: str, payload: dict = Body(...)):
         thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
     if not cur.rowcount or not thread:
         raise HTTPException(404, "会话不存在")
-    return dict(thread)
+    return _thread_payload(thread)
 
 
 @app.get("/api/threads/{thread_id}/approvals")
@@ -522,6 +792,7 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
     agent_id, content = payload.get("agent_id") or thread["agent_id"], payload.get("content", "").strip()
     agent = resource_get("agents", agent_id)
     if not agent or not content: raise HTTPException(400, "请选择有效的智能体并提供消息")
+    agent = _agent_for_thread(agent, thread)
     lock = await thread_lock(thread_id)
     if lock.locked():
         raise HTTPException(409, "该会话已有任务正在运行")
@@ -544,16 +815,25 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
                 db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()))
                 db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
             await queue.put({"type": "turn_result", "turn_id": turn_id, **{key: result[key] for key in ("content", "usage", "runtime", "sources")}})
+        except asyncio.CancelledError:
+            event = {"id": new_id("evt"), "timestamp": datetime.utcnow().isoformat() + "Z", "type": "turn_cancelled", "turn_id": turn_id}
+            persist_event(event, thread_id, turn_id, event_sequence + 1)
+            with connect() as db: db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
+            await queue.put(event)
         except Exception as exc:
             with connect() as db: db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), thread_id))
-            await queue.put({"type": "turn_error", "reason": type(exc).__name__})
+            await queue.put({"type": "turn_error", "reason": type(exc).__name__, "message": str(exc)[:1200]})
         finally:
             with connect() as db:
                 db.execute("UPDATE threads SET status=CASE WHEN status='running' THEN 'error' ELSE status END,updated_at=? WHERE id=?", (now(), thread_id))
+            active = ACTIVE_TURNS.get(thread_id)
+            if active and active.get("turn_id") == turn_id:
+                ACTIVE_TURNS.pop(thread_id, None)
             lock.release()
             await queue.put(None)
     async def body():
         task = asyncio.create_task(produce())
+        ACTIVE_TURNS[thread_id] = {"task": task, "turn_id": turn_id}
         try:
             while True:
                 if await request.is_disconnected():
@@ -565,7 +845,20 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
             if not task.done(): task.cancel()
-    return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+    return StreamingResponse(body(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    })
+
+
+@app.delete("/api/threads/{thread_id}/turns/active")
+async def cancel_active_turn(thread_id: str):
+    active = ACTIVE_TURNS.get(thread_id)
+    if not active or active["task"].done():
+        return {"cancelled": False}
+    active["task"].cancel()
+    return {"cancelled": True, "turn_id": active["turn_id"]}
 
 
 @app.post("/api/threads/{thread_id}/turns")
@@ -579,6 +872,7 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
     agent = resource_get("agents", agent_id)
     if not agent:
         raise HTTPException(400, "请选择有效的智能体")
+    agent = _agent_for_thread(agent, thread)
     content = payload.get("content", "").strip()
     if not content:
         raise HTTPException(400, "消息不能为空")

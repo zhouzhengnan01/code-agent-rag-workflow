@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 os.environ["CODEZZN_DATA_DIR"] = "/tmp/codezzn-ragflow-api-test"
@@ -59,3 +60,44 @@ def test_evaluation_endpoint_rejects_missing_backend_ids():
     with TestClient(main.app) as client:
         response = client.post("/api/knowledge/evaluate", json={"cases": [{"query": "q"}]})
         assert response.status_code == 400
+
+
+def test_thread_capabilities_can_override_and_reset_with_agent_change():
+    skill = resource_save("skills", {"name": "Thread skill", "content": "instructions", "enabled": True})
+    mcp = resource_save("mcp_servers", {"name": "Thread MCP", "transport": "http", "url": "https://example.invalid/mcp", "enabled": True})
+    provider = resource_save("providers", {"name": "Thread provider", "api_key": "test", "default_model": "test"})
+    first_agent = resource_save("agents", {
+        "name": "First thread agent", "provider_id": provider["id"], "model": "test",
+        "skill_ids": [skill["id"]], "mcp_server_ids": [mcp["id"]],
+    })
+    second_agent = resource_save("agents", {
+        "name": "Second thread agent", "provider_id": provider["id"], "model": "test",
+        "skill_ids": [], "mcp_server_ids": [],
+    })
+
+    with TestClient(main.app) as client:
+        thread = client.post("/api/threads", json={"agent_id": first_agent["id"]}).json()
+        response = client.patch(f"/api/threads/{thread['id']}", json={
+            "capability_overrides": {"skill_ids": [], "mcp_server_ids": [mcp["id"]]},
+        })
+        assert response.status_code == 200
+        assert response.json()["capability_overrides"] == {"skill_ids": [], "mcp_server_ids": [mcp["id"]]}
+
+        response = client.patch(f"/api/threads/{thread['id']}", json={"agent_id": second_agent["id"]})
+        assert response.status_code == 200
+        assert response.json()["capability_overrides"] == {}
+
+
+def test_cancel_active_turn_cancels_registered_task():
+    async def scenario():
+        task = asyncio.create_task(asyncio.sleep(60))
+        main.ACTIVE_TURNS["thread-cancel-test"] = {"task": task, "turn_id": "turn-cancel-test"}
+        try:
+            result = await main.cancel_active_turn("thread-cancel-test")
+            await asyncio.sleep(0)
+            assert result == {"cancelled": True, "turn_id": "turn-cancel-test"}
+            assert task.cancelled()
+        finally:
+            main.ACTIVE_TURNS.pop("thread-cancel-test", None)
+
+    asyncio.run(scenario())

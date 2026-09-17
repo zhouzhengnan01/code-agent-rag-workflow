@@ -1,22 +1,26 @@
 const pages = [
   { id: 'dashboard', label: '概览', short: 'HOME' },
   { id: 'chat', label: '对话调试', short: 'CHAT' },
+  { id: 'tasks', label: '任务', short: 'TASK' },
   { id: 'agents', label: '智能体', short: 'AGENT' },
+  { id: 'agent_teams', label: '智能体团队', short: 'TEAM' },
   { id: 'providers', label: '模型接入', short: 'MODEL' },
   { id: 'skills', label: '技能', short: 'SKILL' },
   { id: 'mcp_servers', label: 'MCP 服务', short: 'MCP' },
   { id: 'knowledge', label: '知识库', short: 'RAG' },
+  { id: 'memories', label: '记忆', short: 'MEM' },
   { id: 'workflows', label: '工作流', short: 'FLOW' },
 ];
 
 const navGroups = [
-  ['工作区', ['dashboard', 'chat']],
-  ['构建', ['agents', 'providers', 'skills', 'mcp_servers', 'knowledge']],
+  ['工作区', ['dashboard', 'chat', 'tasks']],
+  ['构建', ['agents', 'agent_teams', 'providers', 'skills', 'mcp_servers', 'knowledge', 'memories']],
   ['编排', ['workflows']],
 ];
 
 const labels = {
   agents: ['智能体', '将模型、提示词、知识与工具组合成可运行的智能体。'],
+  agent_teams: ['智能体团队', '配置协调智能体、团队成员和并行委派边界。'],
   providers: ['模型接入', '管理 OpenAI-compatible 推理端点和模型凭据。'],
   skills: ['技能', '维护可插拔的 SKILL.md 指令包。'],
   mcp_servers: ['MCP 服务', '连接外部工具、服务和数据源。'],
@@ -25,7 +29,10 @@ const labels = {
 };
 
 const resourceKinds = Object.keys(labels);
-let state = { page: 'dashboard', cache: {}, thread: null, threadScope: 'active', chatThreads: [] };
+let state = {
+  page: 'dashboard', cache: {}, thread: null, threadScope: 'active', chatThreads: [],
+  chatCapabilities: { skill_ids: [], mcp_server_ids: [] }, activeTurn: null,
+};
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -142,6 +149,8 @@ function go(page) {
 
 function quickCreate() {
   if (state.page === 'chat') return newThread();
+  if (state.page === 'tasks') return createAgentTask();
+  if (state.page === 'memories') return createMemory();
   if (resourceKinds.includes(state.page)) return editResource(state.page);
   go('agents');
   window.setTimeout(() => editResource('agents'), 120);
@@ -169,6 +178,8 @@ async function loadPage() {
   try {
     if (state.page === 'dashboard') return dashboard();
     if (state.page === 'chat') return chat();
+    if (state.page === 'tasks') return tasksPage();
+    if (state.page === 'memories') return memoriesPage();
     return resources(state.page);
   } catch (error) {
     toast(error.message, true);
@@ -258,6 +269,89 @@ async function dashboard() {
     </div>`;
 }
 
+function timeText(value) {
+  return value ? new Date(Number(value) * 1000).toLocaleString() : '—';
+}
+
+async function tasksPage() {
+  const [tasks, subagents] = await Promise.all([api('/api/tasks'), api('/api/subagents')]);
+  const running = tasks.data.filter(task => ['queued', 'running'].includes(task.status)).length;
+  $('#content').innerHTML = `
+    <div class="collection-page page-enter">
+      <header class="collection-header"><div><span class="overline">持久执行队列</span><h1>任务</h1><p>后台运行智能体与工作流；服务重启后自动恢复未完成任务。</p></div><div class="header-actions"><button class="button button-quiet" type="button" onclick="loadPage()">刷新</button><button class="button button-primary" type="button" onclick="createAgentTask()">新建任务</button></div></header>
+      <div class="collection-toolbar"><div class="collection-count"><strong>${tasks.data.length}</strong><span>最近任务</span><span class="count-divider"></span><strong>${running}</strong><span>等待/运行</span><span class="count-divider"></span><strong>${subagents.data.length}</strong><span>子智能体记录</span></div></div>
+      ${tasks.data.length ? `<div class="resource-list">${tasks.data.map(task => `
+        <article class="resource-record">
+          <div class="record-identity"><span class="state-badge ${['failed','cancelled'].includes(task.status) ? 'is-off' : ''}">${esc(task.status)}</span><div><h2>${esc(task.name)}</h2><p>${esc(task.kind)} · 尝试 ${task.attempts}/${task.max_attempts} · ${timeText(task.created_at)}</p></div></div>
+          <div class="record-facts"><span>${esc(task.id)}</span>${task.error ? `<span>${esc(task.error.slice(0, 100))}</span>` : ''}</div>
+          <div class="record-actions"><button class="button button-quiet button-small" type="button" onclick="showTask('${task.id}')">详情</button>${['queued','running'].includes(task.status) ? `<button class="button button-danger button-small" type="button" onclick="cancelPersistentTask('${task.id}')">取消</button>` : ''}</div>
+        </article>`).join('')}</div>` : '<div class="state-page"><span class="state-code">后台队列</span><h2>还没有任务</h2><p>创建一个智能体任务，或从工作流页面选择后台运行。</p></div>'}
+    </div>`;
+}
+
+async function createAgentTask() {
+  const agents = await load('agents');
+  modal('新建后台任务', `<form id="taskForm" class="form-layout">
+    ${field('任务名称', 'name', '')}
+    ${selectField('智能体', 'agent_id', agents.map(agent => `<option value="${agent.id}">${esc(agent.name)}</option>`).join(''))}
+    ${field('任务内容', 'prompt', '', 'textarea', true)}
+    ${field('最大尝试次数', 'max_attempts', 3, 'number')}
+  </form>`, async () => {
+    const data = formData($('#taskForm'));
+    data.max_attempts = Number(data.max_attempts);
+    try { await api('/api/agent-tasks', { method: 'POST', body: JSON.stringify(data) }); closeModal(); toast('任务已进入持久队列'); if (state.page === 'tasks') loadPage(); }
+    catch (error) { toast(error.message, true); }
+  }, false, '创建任务');
+}
+
+async function showTask(id) {
+  try {
+    const task = await api(`/api/tasks/${id}`);
+    modal('任务详情', `<div class="result-grid"><div><span>状态</span><strong>${esc(task.status)}</strong></div><div><span>尝试次数</span><strong>${task.attempts}/${task.max_attempts}</strong></div></div>
+      ${task.error ? `<div class="result-block"><span>错误</span><pre class="code-output">${esc(task.error)}</pre></div>` : ''}
+      <div class="result-block"><span>结果</span><pre class="code-output">${esc(JSON.stringify(task.result, null, 2))}</pre></div>
+      <div class="result-block"><span>事件</span><pre class="code-output">${esc(JSON.stringify(task.events, null, 2))}</pre></div>`, null, true);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function cancelPersistentTask(id) {
+  try { await api(`/api/tasks/${id}`, { method: 'DELETE' }); toast('任务已取消'); loadPage(); }
+  catch (error) { toast(error.message, true); }
+}
+
+async function memoriesPage() {
+  const result = await api('/api/memories');
+  $('#content').innerHTML = `
+    <div class="collection-page page-enter">
+      <header class="collection-header"><div><span class="overline">长期上下文</span><h1>记忆</h1><p>管理跨会话的用户偏好、项目事实和任务经验。</p></div><button class="button button-primary" type="button" onclick="createMemory()">新增记忆</button></header>
+      <div class="collection-toolbar"><div class="collection-count"><strong>${result.data.length}</strong><span>记忆条目</span></div><label class="filter-control"><span>筛选</span><input type="search" oninput="filterResources(this.value)" placeholder="搜索内容或范围"></label></div>
+      ${result.data.length ? `<div class="resource-list" id="resourceList">${result.data.map(memory => `
+        <article class="resource-record" data-search="${esc(`${memory.scope} ${memory.scope_id} ${memory.kind} ${memory.content}`.toLowerCase())}">
+          <div class="record-identity"><span class="state-badge">${esc(memory.scope)}</span><div><h2>${esc(memory.kind)}</h2><p>${esc(memory.content)}</p></div></div>
+          <div class="record-facts"><span>${esc(memory.scope_id)}</span><span>重要度 ${Number(memory.importance).toFixed(2)}</span><span>${timeText(memory.updated_at)}</span></div>
+          <div class="record-actions"><button class="button button-danger button-small" type="button" onclick="removeMemory('${memory.id}')">删除</button></div>
+        </article>`).join('')}</div>` : '<div class="state-page"><span class="state-code">长期记忆</span><h2>还没有记忆</h2><p>可以手动新增，也可以在智能体中启用自动经验沉淀。</p></div>'}
+    </div>`;
+}
+
+function createMemory() {
+  modal('新增长期记忆', `<form id="memoryForm" class="form-layout">
+    ${selectField('范围', 'scope', '<option value="project">项目</option><option value="user">用户</option><option value="thread">会话</option>')}
+    ${field('范围 ID', 'scope_id', 'default')}${field('类型', 'kind', 'fact')}
+    ${field('重要度（0-1）', 'importance', 0.6, 'number')}${field('内容', 'content', '', 'textarea', true)}
+  </form>`, async () => {
+    const data = formData($('#memoryForm')); data.importance = Number(data.importance);
+    try { await api('/api/memories', { method: 'POST', body: JSON.stringify(data) }); closeModal(); toast('记忆已保存'); if (state.page === 'memories') loadPage(); }
+    catch (error) { toast(error.message, true); }
+  }, false, '保存记忆');
+}
+
+async function removeMemory(id) {
+  if (!confirm('确定删除这条记忆？')) return;
+  try { await api(`/api/memories/${id}`, { method: 'DELETE' }); toast('记忆已删除'); loadPage(); }
+  catch (error) { toast(error.message, true); }
+}
+
 async function resources(kind) {
   const list = await load(kind);
   const enabled = list.filter(item => item.enabled !== false).length;
@@ -286,6 +380,7 @@ function resourceCard(kind, item) {
   const description = item.description || item.base_url || item.transport || `${(item.nodes || []).length} 个节点` || '暂无描述';
   let facts = [];
   if (kind === 'agents') facts = [item.model || '未选择模型', `${(item.skill_ids || []).length} 个技能`, `${(item.knowledge_ids || []).length} 个知识库`];
+  if (kind === 'agent_teams') facts = [`${(item.member_ids || []).length} 个成员`, `并行 ${item.max_concurrency || 4}`, `深度 ${item.max_depth || 2}`];
   if (kind === 'providers') facts = [item.type === 'bailian' ? '阿里云百炼' : 'OpenAI compatible', `${(item.models || []).length} 个模型`, item.api_key_configured ? '密钥已配置' : '等待密钥'];
   if (kind === 'knowledge') facts = [`${item.document_count || 0} 个文档`, `${item.chunk_count || 0} 个片段`, item.backend === 'ragflow' ? 'RAGFlow' : (item.embedding_model || '本地 Milvus')];
   if (kind === 'mcp_servers') facts = [(item.transport || 'stdio').toUpperCase()];
@@ -305,7 +400,7 @@ function resourceCard(kind, item) {
         ${kind === 'providers' ? `<button class="button button-quiet button-small" type="button" onclick="testProvider('${item.id}')">测试连接</button>` : ''}
         ${kind === 'knowledge' ? `${item.backend === 'ragflow' && !item.ragflow_dataset_id ? `<button class="button button-quiet button-small" type="button" onclick="provisionRagflow('${item.id}')">创建数据集</button>` : ''}<button class="button button-quiet button-small" type="button" onclick="uploadDoc('${item.id}')">上传文档</button><button class="button button-quiet button-small" type="button" onclick="showKnowledgeStatus('${item.id}')">文档状态</button><button class="button button-quiet button-small" type="button" onclick="testKnowledge('${item.id}')">测试检索</button>` : ''}
         ${kind === 'mcp_servers' ? `<button class="button button-quiet button-small" type="button" onclick="testMcp('${item.id}')">测试服务</button>` : ''}
-        ${kind === 'workflows' ? `<button class="button button-quiet button-small" type="button" onclick="runWorkflow('${item.id}')">运行</button>` : ''}
+        ${kind === 'workflows' ? `<button class="button button-quiet button-small" type="button" onclick="runWorkflow('${item.id}')">前台运行</button><button class="button button-quiet button-small" type="button" onclick="enqueueWorkflow('${item.id}')">后台运行</button>` : ''}
         <button class="button button-danger button-small" type="button" onclick="removeResource('${kind}','${item.id}')">删除</button>
       </div>
     </article>`;
@@ -323,6 +418,7 @@ async function editResource(kind, id) {
   if (kind === 'mcp_servers') return mcpForm(item || {});
   if (kind === 'knowledge') return knowledgeForm(item || {});
   if (kind === 'agents') return agentForm(item || {});
+  if (kind === 'agent_teams') return agentTeamForm(item || {});
   if (kind === 'workflows') return workflowForm(item || {});
 }
 
@@ -461,6 +557,25 @@ function choiceGroup(title, name, items, selected = []) {
     </div>`;
 }
 
+async function agentTeamForm(item) {
+  const agents = await load('agents');
+  modal(item.id ? '编辑智能体团队' : '新建智能体团队', `
+    <form id="editForm" class="form-layout">
+      ${field('名称', 'name', item.name)}${field('描述', 'description', item.description)}
+      ${selectField('协调智能体', 'coordinator_agent_id', agents.map(agent => `<option value="${agent.id}" ${item.coordinator_agent_id === agent.id ? 'selected' : ''}>${esc(agent.name)}</option>`).join(''), true, '协调智能体负责拆解任务并通过 delegate_task 委派。')}
+      ${choiceGroup('团队成员', 'member_ids', agents, item.member_ids || [])}
+      ${field('最大并行数', 'max_concurrency', item.max_concurrency || 4, 'number')}${field('最大委派深度', 'max_depth', item.max_depth || 2, 'number')}
+      ${selectField('委派策略', 'strategy', `<option value="model" ${item.strategy !== 'round_robin' ? 'selected' : ''}>由模型选择</option><option value="round_robin" ${item.strategy === 'round_robin' ? 'selected' : ''}>轮询</option>`)}
+      ${toggleField('启用团队', 'enabled', item.enabled !== false, true)}
+    </form>`, () => {
+      const data = formData($('#editForm'));
+      data.member_ids = $$('#editForm [name=member_ids]:checked').map(input => input.value).filter(id => id !== data.coordinator_agent_id);
+      data.max_concurrency = Number(data.max_concurrency); data.max_depth = Number(data.max_depth);
+      data.enabled = $('#editForm [name=enabled]').checked;
+      save('agent_teams', item.id, data);
+    }, true);
+}
+
 async function agentForm(item) {
   const sandboxModes = [
     { value: 'read-only', label: '只读（read-only）' },
@@ -470,14 +585,29 @@ async function agentForm(item) {
   const unsupportedSandbox = !sandboxModes.some(mode => mode.value === selectedSandbox);
   const sandboxOptions = (unsupportedSandbox ? '<option value="" selected disabled>旧配置不受支持，请重新选择</option>' : '')
     + sandboxModes.map(mode => `<option value="${mode.value}" ${selectedSandbox === mode.value ? 'selected' : ''}>${mode.label}</option>`).join('');
-  const [providers, skills, knowledge, mcps] = await Promise.all(['providers', 'skills', 'knowledge', 'mcp_servers'].map(load));
-  const tools = [{ id: 'knowledge_search', name: '知识检索' }, { id: 'list_files', name: '列目录' }, { id: 'read_file', name: '读文件' }, { id: 'write_file', name: '写文件' }, { id: 'apply_patch', name: '应用补丁' }, { id: 'run_shell', name: 'Shell' }, { id: 'git_status', name: 'Git 状态' }, { id: 'git_diff', name: 'Git 差异' }, { id: 'git_log', name: 'Git 日志' }, { id: 'review', name: '代码审查' }];
+  const [providers, skills, knowledge, mcps, agents, teams, templateResult] = await Promise.all([
+    ...['providers', 'skills', 'knowledge', 'mcp_servers', 'agents', 'agent_teams'].map(load),
+    api('/api/agent-templates'),
+  ]);
+  const templates = templateResult.data;
+  const tools = [
+    { id: 'knowledge_search', name: '知识检索' }, { id: 'list_files', name: '列目录' }, { id: 'read_file', name: '读文件' },
+    { id: 'search_code', name: '代码搜索' }, { id: 'write_file', name: '写文件' }, { id: 'apply_patch', name: '应用补丁' },
+    { id: 'restore_file', name: '恢复文件' }, { id: 'run_shell', name: 'Shell' }, { id: 'run_tests', name: '运行测试' },
+    { id: 'git_status', name: 'Git 状态' }, { id: 'git_diff', name: 'Git 差异' }, { id: 'git_log', name: 'Git 日志' },
+    { id: 'git_branch', name: 'Git 分支' }, { id: 'git_stage', name: 'Git 暂存' }, { id: 'git_commit', name: 'Git 提交' }, { id: 'review', name: '代码审查' },
+  ];
+  const defaultPolicy = { default: 'inherit', tools: { write_file: 'ask', apply_patch: 'ask', restore_file: 'ask', run_shell: 'ask', run_tests: 'ask', git_branch: 'ask', git_stage: 'ask', git_commit: 'ask', 'mcp:*': 'ask' } };
   modal(item.id ? '编辑智能体' : '新建智能体', `
     <form id="editForm" class="form-layout">
       <section class="form-section control-full"><header><h3>身份与模型</h3><p>定义智能体的职责和推理模型。</p></header></section>
       ${field('名称', 'name', item.name)}${field('描述', 'description', item.description)}
+      ${selectField('角色模板', 'role_template', templates.map(template => `<option value="${template.id}" ${(item.role_template || 'general') === template.id ? 'selected' : ''}>${esc(template.name)} · ${esc(template.description)}</option>`).join(''), true, '角色模板作为系统提示词的受控补充，不会覆盖你的自定义提示词。')}
+      ${selectField('所属智能体团队', 'team_id', `<option value="">不使用团队</option>${teams.map(team => `<option value="${team.id}" ${item.team_id === team.id ? 'selected' : ''}>${esc(team.name)}</option>`).join('')}`, true, '启用团队后，会合并团队成员作为可委派子智能体。')}
       ${selectField('模型提供方', 'provider_id', providers.map(value => `<option value="${value.id}" ${item.provider_id === value.id ? 'selected' : ''}>${esc(value.name)}</option>`).join(''))}
       ${field('模型名称', 'model', item.model || providers[0]?.default_model || '')}
+      ${field('动态模型路由 JSON', 'model_routes', JSON.stringify(item.model_routes || [], null, 2), 'textarea', true, '按 priority 从高到低匹配 pattern 或 keywords；每项可指定 provider_id 和 model。')}
+      ${field('故障回退模型 JSON', 'fallback_models', JSON.stringify(item.fallback_models || [], null, 2), 'textarea', true, '格式：[ { "provider_id": "...", "model": "..." } ]')}
       ${field('系统提示词', 'system_prompt', item.system_prompt || '你是一个可靠的智能体。', 'textarea', true)}
       ${field('Temperature', 'temperature', item.temperature ?? 0.2, 'number')}${field('最大工具轮次', 'max_tool_rounds', item.max_tool_rounds || 6, 'number')}
       <section class="form-section control-full"><header><h3>能力装配</h3><p>选择这个智能体可以访问的能力。</p></header></section>
@@ -485,6 +615,12 @@ async function agentForm(item) {
       ${choiceGroup('知识库', 'knowledge_ids', knowledge, item.knowledge_ids)}
       ${choiceGroup('MCP 服务', 'mcp_server_ids', mcps, item.mcp_server_ids)}
       ${choiceGroup('内置工具', 'builtin_tools', tools, item.builtin_tools || [])}
+      ${choiceGroup('可委派子智能体', 'subagent_ids', agents.filter(agent => agent.id !== item.id), item.subagent_ids || [])}
+      ${field('最大并行子智能体', 'max_concurrent_subagents', item.max_concurrent_subagents || 4, 'number')}${field('最大委派深度', 'max_subagent_depth', item.max_subagent_depth || 2, 'number')}
+      <section class="form-section control-full"><header><h3>记忆与工具策略</h3><p>长期记忆按用户、项目和会话分层；工具策略支持 allow / ask / deny / inherit。</p></header></section>
+      ${field('记忆项目 ID', 'memory_project_id', item.memory_project_id || 'default')}${field('记忆用户 ID', 'memory_user_id', item.memory_user_id || 'default')}
+      ${field('工具策略 JSON', 'tool_policy', JSON.stringify(item.tool_policy || defaultPolicy, null, 2), 'textarea', true)}
+      ${toggleField('启用长期记忆', 'memory_enabled', item.memory_enabled === true)}${toggleField('自动沉淀任务经验', 'auto_memory', item.auto_memory === true)}
       <section class="form-section control-full"><header><h3>执行权限与沙箱</h3><p>沙箱模式不会自动开启 Shell、自动批准或启动沙箱服务。</p></header></section>
       ${selectField('沙箱模式', 'sandbox_mode', sandboxOptions, true, '只读：容器不能写入工作区；工作区可写：容器可修改工作区文件。两种模式均禁止联网，Git 查询始终只读。MCP 不受此沙箱模式隔离。旧配置未指定模式时，保存会设为只读；不支持 danger-full-access。')}
       ${toggleField('允许执行 Shell', 'allow_shell', item.allow_shell === true)}${toggleField('自动批准写入、Shell 和 MCP', 'auto_approve', item.auto_approve === true)}${toggleField('启用智能体', 'enabled', item.enabled !== false)}
@@ -494,15 +630,24 @@ async function agentForm(item) {
         toast('请选择有效的沙箱模式：只读或工作区可写', true);
         return;
       }
-      for (const name of ['skill_ids', 'knowledge_ids', 'mcp_server_ids', 'builtin_tools']) {
-        data[name] = $$(`#editForm [name=${name}]:checked`).map(input => input.value);
-      }
-      data.temperature = Number(data.temperature);
-      data.max_tool_rounds = Number(data.max_tool_rounds);
-      data.allow_shell = $('#editForm [name=allow_shell]').checked;
-      data.auto_approve = $('#editForm [name=auto_approve]').checked;
-      data.enabled = $('#editForm [name=enabled]').checked;
-      save('agents', item.id, data);
+      try {
+        for (const name of ['skill_ids', 'knowledge_ids', 'mcp_server_ids', 'builtin_tools', 'subagent_ids']) {
+          data[name] = $$(`#editForm [name=${name}]:checked`).map(input => input.value);
+        }
+        data.model_routes = JSON.parse(data.model_routes || '[]');
+        data.fallback_models = JSON.parse(data.fallback_models || '[]');
+        data.tool_policy = JSON.parse(data.tool_policy || '{}');
+        data.temperature = Number(data.temperature);
+        data.max_tool_rounds = Number(data.max_tool_rounds);
+        data.max_concurrent_subagents = Number(data.max_concurrent_subagents);
+        data.max_subagent_depth = Number(data.max_subagent_depth);
+        data.allow_shell = $('#editForm [name=allow_shell]').checked;
+        data.auto_approve = $('#editForm [name=auto_approve]').checked;
+        data.memory_enabled = $('#editForm [name=memory_enabled]').checked;
+        data.auto_memory = $('#editForm [name=auto_memory]').checked;
+        data.enabled = $('#editForm [name=enabled]').checked;
+        save('agents', item.id, data);
+      } catch (error) { toast(`JSON 格式错误：${error.message}`, true); }
     }, true);
 }
 
@@ -515,13 +660,13 @@ function workflowForm(item) {
   modal(item.id ? '编辑工作流' : '新建工作流', `
     <form id="editForm" class="form-layout">
       ${field('名称', 'name', sample.name)}${field('描述', 'description', sample.description)}
-      ${field('工作流 JSON', 'definition', JSON.stringify({ nodes: sample.nodes, edges: sample.edges }, null, 2), 'textarea', true, '节点类型：input / prompt / agent / knowledge / mcp / output')}
+      ${field('工作流 JSON', 'definition', JSON.stringify({ max_parallel: item.max_parallel || 4, nodes: sample.nodes, edges: sample.edges }, null, 2), 'textarea', true, '节点支持 retries、timeout；条件边使用 when: true/false；同一批就绪节点会真实并行执行。')}
       ${toggleField('启用工作流', 'enabled', sample.enabled, true)}
     </form>`, () => {
       try {
         const data = formData($('#editForm'));
         const definition = JSON.parse(data.definition);
-        save('workflows', item.id, { name: data.name, description: data.description, enabled: $('#editForm [name=enabled]').checked, nodes: definition.nodes || [], edges: definition.edges || [] });
+        save('workflows', item.id, { name: data.name, description: data.description, enabled: $('#editForm [name=enabled]').checked, max_parallel: Number(definition.max_parallel || 4), nodes: definition.nodes || [], edges: definition.edges || [] });
       } catch (error) { toast(`JSON 格式错误：${error.message}`, true); }
     }, true);
   $('#editForm [name=definition]').classList.add('code-editor');
@@ -601,7 +746,7 @@ async function testMcp(id) {
   toast('正在连接 MCP');
   try {
     const result = await api(`/api/mcp_servers/${id}/test`, { method: 'POST' });
-    modal('MCP 连接成功', `<div class="result-summary"><strong>${result.tools.length}</strong><span>个可用工具</span></div><pre class="code-output">${esc(JSON.stringify(result.tools, null, 2))}</pre>`);
+    modal('MCP 连接成功', `<div class="result-summary"><strong>${result.tools.length}</strong><span>个可用工具 · 协议 ${esc(result.protocol_version || '未知')}</span></div><div class="result-block"><span>服务能力</span><pre class="code-output">${esc(JSON.stringify(result.capabilities || {}, null, 2))}</pre></div><div class="result-block"><span>工具</span><pre class="code-output">${esc(JSON.stringify(result.tools, null, 2))}</pre></div>`, null, true);
   } catch (error) { toast(error.message, true); }
 }
 
@@ -752,12 +897,21 @@ function deleteThread(threadId) {
 
 async function chat() {
   const archived = state.threadScope === 'archived';
-  const [agents, threadResult] = await Promise.all([load('agents'), api(`/api/threads?archived=${archived}`)]);
+  const [agents, skills, mcps, threadResult] = await Promise.all([
+    load('agents'), load('skills'), load('mcp_servers'), api(`/api/threads?archived=${archived}`),
+  ]);
   const threads = threadResult.data;
   state.chatThreads = threads;
   if (!threads.some(thread => thread.id === state.thread)) state.thread = threads[0]?.id || null;
   const current = state.thread ? await api(`/api/threads/${state.thread}`).catch(() => null) : null;
   const selectedAgent = current?.agent_id || agents[0]?.id || '';
+  const selectedAgentConfig = agents.find(item => item.id === selectedAgent) || {};
+  const overrides = current?.capability_overrides || {};
+  state.chatCapabilities = {
+    skill_ids: Array.isArray(overrides.skill_ids) ? overrides.skill_ids : (selectedAgentConfig.skill_ids || []),
+    mcp_server_ids: Array.isArray(overrides.mcp_server_ids) ? overrides.mcp_server_ids : (selectedAgentConfig.mcp_server_ids || []),
+  };
+  state.currentThread = current;
   $('#content').innerHTML = `
     <div class="chat-studio page-enter">
       <aside class="session-browser">
@@ -780,10 +934,13 @@ async function chat() {
         </div>
       </aside>
       <section class="conversation">
-        <header class="conversation-bar">
-          <div class="conversation-title"><span>当前会话</span><strong>${esc(current?.name || '新对话')}</strong></div>
-          <label class="agent-selector"><span>运行智能体</span><select id="chatAgent" aria-label="选择智能体">${agents.map(agent => `<option value="${agent.id}" ${selectedAgent === agent.id ? 'selected' : ''}>${esc(agent.name)}</option>`).join('')}</select></label>
-        </header>
+        <div class="conversation-top">
+          <header class="conversation-bar">
+            <div class="conversation-title"><span>当前会话</span><strong>${esc(current?.name || '新对话')}</strong></div>
+            <label class="agent-selector"><span>运行智能体</span><select id="chatAgent" aria-label="选择智能体" onchange="changeChatAgent(this.value)">${agents.map(agent => `<option value="${agent.id}" ${selectedAgent === agent.id ? 'selected' : ''}>${esc(agent.name)}</option>`).join('')}</select></label>
+          </header>
+          <div class="capability-strip" id="capabilityStrip">${capabilityBarHtml(skills, mcps)}</div>
+        </div>
         <div class="message-stream" id="messages" aria-live="polite">
           ${current?.messages?.length ? current.messages.map(messageHtml).join('') : `
             <div class="conversation-empty"><span class="empty-mark" aria-hidden="true">Z</span><h2>开始调试智能体</h2><p>输入任务，查看模型、工具和知识库如何协同运行。</p></div>`}
@@ -795,6 +952,126 @@ async function chat() {
       </section>
     </div>`;
   window.setTimeout(bindComposer, 0);
+}
+
+function enqueueWorkflow(id) {
+  modal('后台运行工作流', `<form id="runForm" class="form-layout">${field('输入内容', 'input', '', 'textarea', true)}${field('最大尝试次数', 'max_attempts', 3, 'number')}</form>`, async () => {
+    const data = formData($('#runForm')); data.max_attempts = Number(data.max_attempts);
+    try {
+      const result = await api(`/api/workflows/${id}/enqueue`, { method: 'POST', body: JSON.stringify(data) });
+      closeModal(); toast(`工作流已进入队列：${result.task.id}`); go('tasks');
+    } catch (error) { toast(error.message, true); }
+  }, false, '加入队列');
+}
+
+function capabilityBarHtml(skills = state.cache.skills || [], mcps = state.cache.mcp_servers || []) {
+  const selectedSkills = skills.filter(item => state.chatCapabilities.skill_ids.includes(item.id));
+  const selectedMcps = mcps.filter(item => state.chatCapabilities.mcp_server_ids.includes(item.id));
+  const chips = [
+    ...selectedSkills.map(item => ({ ...item, kind: 'skill_ids', label: 'SKILL' })),
+    ...selectedMcps.map(item => ({ ...item, kind: 'mcp_server_ids', label: 'MCP' })),
+  ];
+  return `
+    <span class="capability-caption">当前能力</span>
+    <div class="capability-chips">
+      ${chips.length ? chips.map(item => `
+        <span class="capability-chip"><small>${item.label}</small><strong>${esc(item.name)}</strong>
+          <button type="button" aria-label="从本会话移除 ${esc(item.name)}" onclick="removeChatCapability('${item.kind}','${item.id}')">×</button>
+        </span>`).join('') : '<span class="capability-empty">本会话未启用 Skill 或 MCP</span>'}
+      <button class="capability-add" type="button" onclick="openCapabilityPicker()" aria-label="添加 Skill 或 MCP"><span aria-hidden="true">+</span> 添加</button>
+    </div>`;
+}
+
+function renderCapabilityBar() {
+  const target = $('#capabilityStrip');
+  if (target) target.innerHTML = capabilityBarHtml();
+}
+
+async function ensureChatThread() {
+  if (state.thread) return state.thread;
+  const agent = $('#chatAgent')?.value || state.cache.agents?.[0]?.id;
+  const result = await api('/api/threads', { method: 'POST', body: JSON.stringify({ name: '新对话', agent_id: agent }) });
+  state.thread = result.id;
+  return result.id;
+}
+
+async function saveChatCapabilities() {
+  const threadId = await ensureChatThread();
+  await api(`/api/threads/${threadId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ capability_overrides: state.chatCapabilities }),
+  });
+}
+
+async function removeChatCapability(kind, id) {
+  if (state.activeTurn) return toast('请先停止当前运行', true);
+  const previous = [...state.chatCapabilities[kind]];
+  state.chatCapabilities[kind] = previous.filter(item => item !== id);
+  renderCapabilityBar();
+  try {
+    await saveChatCapabilities();
+    toast('已从本会话移除');
+  } catch (error) {
+    state.chatCapabilities[kind] = previous;
+    renderCapabilityBar();
+    toast(error.message, true);
+  }
+}
+
+function openCapabilityPicker() {
+  if (state.activeTurn) return toast('请先停止当前运行', true);
+  const skills = (state.cache.skills || []).filter(item => item.enabled !== false);
+  const mcps = (state.cache.mcp_servers || []).filter(item => item.enabled !== false);
+  modal('添加会话能力', `
+    <form id="capabilityForm" class="form-layout">
+      <section class="form-section control-full"><header><h3>Skill 与 MCP</h3><p>本会话选择立即生效，也可以同步为当前智能体的默认能力。</p></header></section>
+      ${choiceGroup('Skills', 'skill_ids', skills, state.chatCapabilities.skill_ids)}
+      ${choiceGroup('MCP 服务', 'mcp_server_ids', mcps, state.chatCapabilities.mcp_server_ids)}
+      ${toggleField('同时保存为当前智能体的全局默认配置', 'save_global', false, true)}
+    </form>`, async () => {
+      const form = $('#capabilityForm');
+      const button = $('#modalSave');
+      button.disabled = true;
+      const next = {
+        skill_ids: $$('input[name="skill_ids"]:checked').map(input => input.value),
+        mcp_server_ids: $$('input[name="mcp_server_ids"]:checked').map(input => input.value),
+      };
+      try {
+        const saveGlobal = form.elements.save_global.checked;
+        state.chatCapabilities = next;
+        await saveChatCapabilities();
+        if (saveGlobal) {
+          const agentId = $('#chatAgent')?.value;
+          const agent = (state.cache.agents || []).find(item => item.id === agentId);
+          if (!agent) throw new Error('当前智能体不存在');
+          const updated = await api(`/api/resources/agents/${agentId}`, {
+            method: 'PUT', body: JSON.stringify({ ...agent, ...next }),
+          });
+          state.cache.agents = state.cache.agents.map(item => item.id === agentId ? updated : item);
+        }
+        closeModal();
+        renderCapabilityBar();
+        toast(saveGlobal ? '已更新本会话和智能体默认能力' : '已更新本会话能力');
+      } catch (error) {
+        button.disabled = false;
+        toast(error.message, true);
+      }
+    }, true, '应用');
+}
+
+async function changeChatAgent(agentId) {
+  if (state.activeTurn) return;
+  const agent = (state.cache.agents || []).find(item => item.id === agentId);
+  if (!agent) return;
+  state.chatCapabilities = {
+    skill_ids: [...(agent.skill_ids || [])],
+    mcp_server_ids: [...(agent.mcp_server_ids || [])],
+  };
+  renderCapabilityBar();
+  if (!state.thread) return;
+  try {
+    await api(`/api/threads/${state.thread}`, { method: 'PATCH', body: JSON.stringify({ agent_id: agentId }) });
+  } catch (error) { toast(error.message, true); }
 }
 
 function messageHtml(message) {
@@ -843,19 +1120,87 @@ async function newThread() {
   } catch (error) { toast(error.message, true); }
 }
 
+function createStreamTextAnimator(onFrame) {
+  let target = [];
+  let visible = 0;
+  let visibleText = '';
+  let frame = null;
+  let cancelled = false;
+  let waiters = [];
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+  const settle = () => {
+    if (visible < target.length || frame !== null) return;
+    const pending = waiters;
+    waiters = [];
+    pending.forEach(resolve => resolve());
+  };
+  const draw = () => {
+    frame = null;
+    if (cancelled) { settle(); return; }
+    const backlog = target.length - visible;
+    if (backlog <= 0) { settle(); return; }
+    // Network chunks frequently contain many model deltas. Reveal them over
+    // animation frames so one read() cannot collapse the whole answer into a
+    // single browser paint. Large backlogs catch up without making long
+    // answers feel artificially slow.
+    const step = reducedMotion ? backlog : Math.max(1, Math.min(12, Math.ceil(backlog / 48)));
+    const next = Math.min(target.length, visible + step);
+    visibleText += target.slice(visible, next).join('');
+    visible = next;
+    onFrame(visibleText);
+    if (visible < target.length) frame = requestAnimationFrame(draw);
+    else settle();
+  };
+  const schedule = () => {
+    if (!cancelled && frame === null && visible < target.length) frame = requestAnimationFrame(draw);
+  };
+
+  return {
+    append(text) {
+      if (!text || cancelled) return;
+      target.push(...Array.from(text));
+      schedule();
+    },
+    replace(text) {
+      if (cancelled) return;
+      const next = Array.from(text || '');
+      const nextText = next.join('');
+      if (!nextText.startsWith(visibleText)) {
+        visible = 0;
+        visibleText = '';
+        onFrame('');
+      }
+      target = next;
+      schedule();
+    },
+    flush() {
+      if (cancelled || (visible >= target.length && frame === null)) return Promise.resolve();
+      schedule();
+      return new Promise(resolve => waiters.push(resolve));
+    },
+    cancel() {
+      cancelled = true;
+      if (frame !== null) cancelAnimationFrame(frame);
+      frame = null;
+      const pending = waiters;
+      waiters = [];
+      pending.forEach(resolve => resolve());
+    },
+  };
+}
+
 async function sendMessage() {
   let input = $('#chatInput');
   let button = $('#sendBtn');
   let agentSelect = $('#chatAgent');
+  if (state.activeTurn) return stopGeneration();
   if (!input || !button || button.disabled) return;
   const content = input.value.trim();
   const agent = agentSelect?.value;
   if (!content) return;
   if (!agent) { toast('请先创建并选择智能体', true); return; }
-  if (!state.thread) {
-    const thread = await api('/api/threads', { method: 'POST', body: JSON.stringify({ name: '新对话', agent_id: agent }) });
-    state.thread = thread.id;
-  }
+  if (!state.thread) await ensureChatThread();
   const messages = $('#messages');
   const pendingId = `pending_${Date.now()}`;
   messages?.querySelector('.conversation-empty')?.remove();
@@ -863,30 +1208,84 @@ async function sendMessage() {
     <article class="message-turn assistant is-pending" id="${pendingId}"><div class="turn-avatar" aria-hidden="true">Z</div><div class="turn-content"><header><strong>Codezzn</strong></header><div class="thinking-line"><span></span><span></span><span></span><b>正在检索知识并运行</b></div></div></article>`);
   input.value = '';
   input.style.height = '54px';
-  button.disabled = true;
-  button.textContent = '运行中';
+  const controller = new AbortController();
+  const activeTurn = { controller, pendingId, cancelled: false };
+  state.activeTurn = activeTurn;
+  button.classList.add('is-running');
+  button.setAttribute('aria-label', '停止生成');
+  button.innerHTML = '<span class="stop-glyph" aria-hidden="true"></span><span>停止</span>';
   agentSelect.disabled = true;
+  input.disabled = true;
   scrollMessages(true);
   try {
-    const response = await fetch(`/api/threads/${state.thread}/turns/stream`, { method: 'POST', headers: headers(), body: JSON.stringify({ content, agent_id: agent }) });
+    const response = await fetch(`/api/threads/${state.thread}/turns/stream`, {
+      method: 'POST', headers: headers(), body: JSON.stringify({ content, agent_id: agent }), signal: controller.signal,
+    });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
-    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; const events = [];
-    const renderPending = () => { const pending = document.getElementById(pendingId); if (pending) pending.querySelector('.turn-content').innerHTML = `<header><strong>Codezzn</strong></header><div class="message-copy">${richText(answer)}</div><div class="thinking-line"><b>${esc(events.at(-1)?.status || events.at(-1)?.type || '运行中')}</b></div>`; scrollMessages(); };
-    while (true) { const { value, done } = await reader.read(); buffer += decoder.decode(value || new Uint8Array(), { stream: !done }); const parts = buffer.split(/\n\n/); buffer = parts.pop(); for (const part of parts) { const line = part.split('\n').find(item => item.startsWith('data:')); if (!line) continue; const event = JSON.parse(line.slice(5)); events.push(event); if (event.type === 'assistant_delta') answer += event.content || ''; if (event.type === 'turn_result') answer = event.content || answer; renderPending(); } if (done) break; }
+    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let renderedAnswer = ''; const events = []; let streamError = '';
+    const renderPending = () => { const pending = document.getElementById(pendingId); if (pending) pending.querySelector('.turn-content').innerHTML = `<header><strong>Codezzn</strong></header><div class="message-copy">${richText(renderedAnswer)}</div><div class="thinking-line"><b>${esc(events.at(-1)?.status || events.at(-1)?.type || '运行中')}</b></div>`; scrollMessages(); };
+    const animator = createStreamTextAnimator(text => { renderedAnswer = text; renderPending(); });
+    activeTurn.animator = animator;
+    while (true) {
+      const { value, done } = await reader.read();
+      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+      const parts = buffer.split(/\n\n/);
+      buffer = parts.pop();
+      for (const part of parts) {
+        const line = part.split('\n').find(item => item.startsWith('data:'));
+        if (!line) continue;
+        const event = JSON.parse(line.slice(5));
+        events.push(event);
+        if (event.type === 'assistant_delta') {
+          const delta = event.content || '';
+          answer += delta;
+          animator.append(delta);
+        } else {
+          if (event.type === 'turn_result') {
+            answer = event.content || answer;
+            animator.replace(answer);
+          }
+          if (event.type === 'turn_error') streamError = event.message || event.reason || '运行失败';
+          if (event.type === 'turn_cancelled') activeTurn.cancelled = true;
+          renderPending();
+        }
+      }
+      if (done) break;
+    }
+    if (streamError) throw new Error(streamError);
+    await animator.flush();
     const pending = document.getElementById(pendingId);
-    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: answer || '模型返回了空响应。', meta: { events, usage: {}, runtime: {}, sources: [] } });
+    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: activeTurn.cancelled ? '已停止生成。' : (answer || '模型返回了空响应。'), meta: { events, usage: {}, runtime: {}, sources: [] } });
     scrollMessages(true);
   } catch (error) {
     const pending = document.getElementById(pendingId);
-    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: `请求失败：${error.message}`, error: true });
-    toast(error.message, true);
+    const cancelled = activeTurn.cancelled || error.name === 'AbortError';
+    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: cancelled ? '已停止生成。' : `请求失败：${error.message}`, error: !cancelled });
+    if (!cancelled) toast(error.message, true);
     scrollMessages(true);
   } finally {
     button = $('#sendBtn'); input = $('#chatInput'); agentSelect = $('#chatAgent');
-    if (button) { button.disabled = false; button.textContent = '发送'; }
+    activeTurn.animator?.cancel();
+    if (state.activeTurn === activeTurn) state.activeTurn = null;
+    if (button) { button.disabled = false; button.classList.remove('is-running', 'is-stopping'); button.setAttribute('aria-label', '发送消息'); button.textContent = '发送'; }
     if (agentSelect) agentSelect.disabled = false;
     if (input) { input.disabled = false; input.focus(); }
   }
+}
+
+async function stopGeneration() {
+  const active = state.activeTurn;
+  if (!active || !state.thread || active.cancelled) return;
+  active.cancelled = true;
+  const button = $('#sendBtn');
+  if (button) {
+    button.classList.add('is-stopping');
+    button.innerHTML = '<span class="stop-glyph" aria-hidden="true"></span><span>停止中</span>';
+  }
+  const cancellation = api(`/api/threads/${state.thread}/turns/active`, { method: 'DELETE' }).catch(() => null);
+  active.animator?.cancel();
+  active.controller.abort();
+  await cancellation;
 }
 
 function openSettings() {

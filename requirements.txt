@@ -8,3 +8,4 @@ pytest==8.4.1
 pymilvus==2.5.18
 milvus-lite==2.5.1
 setuptools==80.9.0
+playwright==1.63.0

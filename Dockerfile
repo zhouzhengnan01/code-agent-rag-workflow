@@ -11,6 +11,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
 RUN pip install --timeout 300 --retries 10 --no-cache-dir -r requirements.txt
+RUN python -m playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* /root/.cache/pip
 COPY backend ./backend
 COPY web ./web
 COPY tests ./tests

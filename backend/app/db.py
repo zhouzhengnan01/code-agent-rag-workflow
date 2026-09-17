@@ -48,6 +48,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS threads (
               id TEXT PRIMARY KEY, name TEXT NOT NULL, agent_id TEXT,
               status TEXT NOT NULL DEFAULT 'idle', archived INTEGER NOT NULL DEFAULT 0,
+              capability_overrides TEXT NOT NULL DEFAULT '{}',
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS messages (
@@ -90,8 +91,38 @@ def init_db():
             CREATE TABLE IF NOT EXISTS workflow_runs (
               id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, status TEXT NOT NULL,
               input TEXT NOT NULL, output TEXT, trace TEXT NOT NULL DEFAULT '[]',
+              state TEXT NOT NULL DEFAULT '{}', error TEXT,
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS tasks (
+              id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'queued', payload TEXT NOT NULL DEFAULT '{}',
+              result TEXT, error TEXT, attempts INTEGER NOT NULL DEFAULT 0,
+              max_attempts INTEGER NOT NULL DEFAULT 3, available_at INTEGER NOT NULL,
+              lease_until INTEGER, worker_id TEXT, parent_task_id TEXT,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_tasks_claim ON tasks(status, available_at, created_at);
+            CREATE TABLE IF NOT EXISTS task_events (
+              id TEXT PRIMARY KEY, task_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+              type TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL,
+              UNIQUE(task_id, sequence), FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS memories (
+              id TEXT PRIMARY KEY, scope TEXT NOT NULL, scope_id TEXT NOT NULL,
+              kind TEXT NOT NULL DEFAULT 'experience', content TEXT NOT NULL,
+              metadata TEXT NOT NULL DEFAULT '{}', importance REAL NOT NULL DEFAULT 0.5,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_accessed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_memories_scope ON memories(scope, scope_id, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS subagent_runs (
+              id TEXT PRIMARY KEY, parent_task_id TEXT, parent_thread_id TEXT,
+              parent_turn_id TEXT, agent_id TEXT NOT NULL, name TEXT NOT NULL,
+              task TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', result TEXT,
+              error TEXT, depth INTEGER NOT NULL DEFAULT 1,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_subagents_parent ON subagent_runs(parent_thread_id, parent_turn_id, created_at);
             """
         )
         db.execute("""CREATE TABLE IF NOT EXISTS knowledge_documents (
@@ -110,6 +141,14 @@ def init_db():
             db.execute("ALTER TABLE approvals ADD COLUMN tool_call_id TEXT")
         if "resumable" not in approval_columns:
             db.execute("ALTER TABLE approvals ADD COLUMN resumable INTEGER NOT NULL DEFAULT 0")
+        thread_columns = {row["name"] for row in db.execute("PRAGMA table_info(threads)")}
+        if "capability_overrides" not in thread_columns:
+            db.execute("ALTER TABLE threads ADD COLUMN capability_overrides TEXT NOT NULL DEFAULT '{}'")
+        workflow_columns = {row["name"] for row in db.execute("PRAGMA table_info(workflow_runs)")}
+        if "state" not in workflow_columns:
+            db.execute("ALTER TABLE workflow_runs ADD COLUMN state TEXT NOT NULL DEFAULT '{}'")
+        if "error" not in workflow_columns:
+            db.execute("ALTER TABLE workflow_runs ADD COLUMN error TEXT")
         db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document ON knowledge_chunks(document_id)")
 
 

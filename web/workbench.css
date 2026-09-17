@@ -576,12 +576,25 @@ textarea.control-input { min-height: 126px; resize: vertical; line-height: 1.6; 
 .delete-confirmation p { margin: 0; color: var(--muted); line-height: 1.7; }
 
 .conversation { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--bg); }
+.conversation-top { min-width: 0; background: var(--surface); }
 .conversation-bar { min-height: 72px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 11px 16px 11px 22px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .conversation-title { min-width: 0; display: grid; gap: 2px; }
 .conversation-title span, .agent-selector span { color: var(--muted); font-size: 9px; }
 .conversation-title strong { overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
 .agent-selector { width: min(260px, 46%); display: grid; grid-template-columns: auto minmax(120px, 1fr); align-items: center; gap: 9px; }
 .agent-selector select { min-height: 38px; padding: 7px 10px; font-size: 11px; }
+.capability-strip { min-height: 48px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; padding: 8px 16px 8px 22px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.capability-caption { color: var(--muted); font-size: 9px; white-space: nowrap; }
+.capability-chips { min-width: 0; display: flex; align-items: center; gap: 7px; overflow-x: auto; scrollbar-width: thin; }
+.capability-chip { height: 30px; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); padding: 0 5px 0 9px; color: var(--text-soft); }
+.capability-chip small { color: var(--accent); font: 8px/1 var(--font-mono); letter-spacing: .06em; }
+.capability-chip strong { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 610; }
+.capability-chip button { width: 22px; height: 22px; display: grid; place-items: center; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 15px; line-height: 1; }
+.capability-chip button:hover { background: rgb(236 133 130 / 10%); color: var(--danger); }
+.capability-empty { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
+.capability-add { height: 30px; flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; border: 1px dashed var(--line-strong); border-radius: var(--radius-control); background: transparent; color: var(--muted); padding: 0 10px; font-size: 10px; }
+.capability-add span { color: var(--accent); font: 600 15px/1 var(--font-mono); }
+.capability-add:hover { border-style: solid; background: var(--surface-hover); color: var(--text); }
 
 .message-stream { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 30px clamp(20px, 5vw, 78px) 46px; }
 .conversation-empty { min-height: 100%; display: grid; place-items: center; align-content: center; gap: 10px; text-align: center; }
@@ -620,6 +633,11 @@ textarea.control-input { min-height: 126px; resize: vertical; line-height: 1.6; 
 .prompt-dock textarea { height: 54px; min-height: 54px; max-height: 180px; resize: none; overflow-y: auto; border: 0; border-radius: 0; background: transparent; padding: 15px 16px 8px; box-shadow: none !important; }
 .prompt-footer { min-height: 50px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 8px 8px 16px; }
 .prompt-footer span { color: var(--muted); font-size: 9px; }
+.prompt-footer #sendBtn { min-width: 62px; }
+.prompt-footer #sendBtn.is-running { position: relative; min-width: 82px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; background: var(--surface-raised); color: var(--text); }
+.prompt-footer #sendBtn.is-running::after { content: ""; position: absolute; inset: -1px; border: 1px solid var(--accent); border-radius: inherit; opacity: .55; }
+.stop-glyph { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 2px; background: currentColor; }
+.prompt-footer #sendBtn.is-stopping { color: var(--muted); }
 
 .page-loading { width: min(1480px, 100%); margin: 0 auto; }
 .skeleton-title, .skeleton-subtitle, .skeleton-layout > div { position: relative; overflow: hidden; background: var(--surface); }
@@ -638,6 +656,7 @@ textarea.control-input { min-height: 126px; resize: vertical; line-height: 1.6; 
   .thinking-line span { animation: thinking 900ms ease-in-out infinite alternate; }
   .thinking-line span:nth-child(2) { animation-delay: 140ms; }
   .thinking-line span:nth-child(3) { animation-delay: 280ms; }
+  .prompt-footer #sendBtn.is-running::after { animation: running-ring 1.2s ease-in-out infinite alternate; }
   .skeleton-title::after, .skeleton-subtitle::after, .skeleton-layout > div::after {
     content: "";
     position: absolute;
@@ -651,6 +670,7 @@ textarea.control-input { min-height: 126px; resize: vertical; line-height: 1.6; 
 @keyframes drawer-in { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: translateX(0); } }
 @keyframes toast-in { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes thinking { to { opacity: .25; transform: translateY(-2px); } }
+@keyframes running-ring { to { opacity: .14; transform: scale(1.06); } }
 @keyframes shimmer { to { transform: translateX(100%); } }
 
 @media (prefers-reduced-motion: reduce) {
@@ -717,6 +737,8 @@ textarea.control-input { min-height: 126px; resize: vertical; line-height: 1.6; 
   .conversation-bar { min-height: 66px; padding: 9px 11px; }
   .conversation-title { display: none; }
   .agent-selector { width: 100%; grid-template-columns: auto minmax(0, 1fr); }
+  .capability-strip { min-height: 46px; grid-template-columns: 1fr; gap: 4px; padding: 7px 11px; }
+  .capability-caption { display: none; }
   .message-stream { padding: 22px 13px 32px; }
   .message-turn { width: 96%; grid-template-columns: 29px minmax(0, 1fr); gap: 10px; margin-bottom: 26px; }
   .message-turn.user { width: 88%; grid-template-columns: minmax(0, 1fr) 29px; }
