@@ -8,10 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from datetime import datetime
 import asyncio
+import zipfile
 from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 
-from .agent import persist_event, run_agent
+from .agent import load_agent_run, persist_event, run_agent
 from .capabilities import ROLE_TEMPLATES
 from .db import connect, init_db, migrate_bailian_providers, new_id, now, resource_delete, resource_get, resource_list, resource_save, seed_defaults
 from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, drop_knowledge_index, rag_status
@@ -19,11 +20,17 @@ from .knowledge_eval import evaluate as evaluate_knowledge_backends
 from .knowledge_service import delete_document as delete_knowledge_document, ensure_remote_dataset, health as knowledge_health, reindex as reindex_knowledge_service, search as search_knowledge_service, status as knowledge_status, upload as upload_knowledge_document
 from .ragflow import RAGFlowError
 from .mcp import mcp_manager
-from .memory import delete_memory, get_memory, list_memories, save_memory, search_memories
+from .memory import backfill_memory_embeddings, confirm_memory, delete_memory, expire_memories, get_memory, list_memories, save_memory, search_memories
 from .model import BAILIAN_PRESETS, normalize_provider, public_provider, test_provider
 from .sandbox import sandbox_status
 from .tasks import cancel_task, enqueue_task, get_task, list_tasks, task_events, task_queue
 from .workflows import create_run
+from .worktrees import ensure_worktree, list_worktrees, remove_worktree, worktree_path
+from .workspace import reset_workspace, use_workspace, BASE_WORKSPACE
+from .skill_packages import import_package, read_package_file
+from .code_intelligence import rebuild_index, symbols as code_symbols, references as code_references, graph as code_graph
+from .lsp import lsp_manager
+from .browser import browser_manager
 
 
 THREAD_LOCKS = {}
@@ -71,12 +78,23 @@ def _agent_for_thread(agent, thread):
 
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "web"
-RESOURCE_KINDS = {"agents", "agent_teams", "skills", "providers", "mcp_servers", "knowledge", "workflows"}
+RESOURCE_KINDS = {"agents", "agent_teams", "skills", "providers", "mcp_servers", "lsp_servers", "knowledge", "workflows"}
+
+
+async def run_agent_isolated(agent, history, prompt, *, task_id=None, thread_id=None, **kwargs):
+    worktree = await ensure_worktree(task_id=task_id, thread_id=thread_id)
+    token = use_workspace(worktree_path(worktree)) if worktree else None
+    try:
+        checkpoint = load_agent_run(task_id=task_id, turn_id=kwargs.get("turn_id"))
+        if checkpoint and not kwargs.get("resume_state"): kwargs["resume_state"] = checkpoint["state"]
+        return await run_agent(agent, history, prompt, thread_id=thread_id, current_task_id=task_id, **kwargs)
+    finally:
+        if token is not None: reset_workspace(token)
 
 
 async def execute_persistent_task(task):
     payload = task.get("payload") or {}
-    if task["kind"] in {"agent", "subagent"}:
+    if task["kind"] in {"agent", "subagent", "agent_resume"}:
         agent = resource_get("agents", payload.get("agent_id"))
         if not agent:
             raise ValueError("后台任务引用的智能体不存在")
@@ -85,23 +103,31 @@ async def execute_persistent_task(task):
             with connect() as db:
                 db.execute("UPDATE subagent_runs SET status='running',updated_at=? WHERE id=?", (now(), subagent_run_id))
         try:
-            result = await run_agent(
+            result = await run_agent_isolated(
                 agent,
                 payload.get("history") or [],
                 str(payload.get("task") or payload.get("prompt") or ""),
-                thread_id=payload.get("thread_id"),
+                task_id=task["id"], thread_id=payload.get("thread_id"),
                 turn_id=payload.get("turn_id"),
                 depth=int(payload.get("depth", 0)),
-                current_task_id=task["id"],
             )
             if subagent_run_id:
                 with connect() as db:
                     db.execute("UPDATE subagent_runs SET status='completed',result=?,error=NULL,updated_at=? WHERE id=?", (json.dumps(result, ensure_ascii=False, default=str), now(), subagent_run_id))
+            if task["kind"] == "agent_resume" and payload.get("thread_id") and payload.get("turn_id") and result.get("status") == "completed":
+                with connect() as db:
+                    exists = db.execute("SELECT 1 FROM messages WHERE thread_id=? AND turn_id=? AND role='assistant'", (payload["thread_id"], payload["turn_id"])).fetchone()
+                    if not exists: db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"),payload["thread_id"],payload["turn_id"],"assistant",result["content"],json.dumps({"events":result["events"],"usage":result["usage"],"runtime":result["runtime"],"sources":result["sources"]},ensure_ascii=False),now()))
+                    db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), payload["thread_id"]))
             return result
         except Exception as exc:
             if subagent_run_id:
                 with connect() as db:
                     db.execute("UPDATE subagent_runs SET status='failed',error=?,updated_at=? WHERE id=?", (str(exc)[:4000], now(), subagent_run_id))
+            if payload.get("turn_id"):
+                with connect() as db:
+                    db.execute("UPDATE agent_runs SET status='failed',error=?,updated_at=? WHERE turn_id=? AND status IN ('running','recovering')", (str(exc)[:4000], now(), payload["turn_id"]))
+                    if payload.get("thread_id"): db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), payload["thread_id"]))
             raise
     if task["kind"] == "workflow":
         workflow = resource_get("workflows", payload.get("workflow_id"))
@@ -116,15 +142,25 @@ async def lifespan(_app: FastAPI):
     init_db()
     seed_defaults()
     migrate_bailian_providers()
+    expire_memories()
+    backfill_memory_embeddings()
+    with connect() as db:
+        interrupted = db.execute("SELECT * FROM agent_runs WHERE status='running' AND task_id IS NULL").fetchall()
+    for row in interrupted:
+        state = json.loads(row["state"] or "{}")
+        enqueue_task("agent_resume", "恢复中断的智能体任务", {"agent_id":row["agent_id"],"thread_id":row["thread_id"],"turn_id":row["turn_id"],"prompt":state.get("user_message", "")}, max_attempts=3)
+        with connect() as db: db.execute("UPDATE agent_runs SET status='recovering',updated_at=? WHERE id=?", (now(), row["id"]))
     await task_queue.start(execute_persistent_task, int(os.getenv("CODEZZN_TASK_WORKERS", "4")))
     try:
         yield
     finally:
         await task_queue.close()
         await mcp_manager.close()
+        await lsp_manager.close()
+        await browser_manager.close()
 
 
-app = FastAPI(title="Codezzn", version="0.2.0", description="可部署的智能体开发与运行平台", lifespan=lifespan)
+app = FastAPI(title="Codezzn", version="0.3.0", description="可部署的智能体开发与运行平台", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 
@@ -242,14 +278,16 @@ async def test_provider_endpoint(provider_id: str, payload: dict = Body(default=
 
 @app.post("/api/skills/import")
 async def import_skill(file: UploadFile = File(...)):
-    content = (await file.read()).decode("utf-8", errors="replace")
-    name = Path(file.filename or "skill").stem
-    if file.filename and file.filename.upper() == "SKILL.MD":
-        for line in content.splitlines():
-            if line.startswith("# "):
-                name = line[2:].strip()
-                break
-    return resource_save("skills", {"name": name, "description": "Imported SKILL.md", "content": content, "enabled": True})
+    try: return import_package(file.filename or "SKILL.md", await file.read())
+    except (ValueError, zipfile.BadZipFile) as exc: raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/skills/{skill_id}/files/{path:path}")
+def get_skill_file(skill_id: str, path: str):
+    skill = resource_get("skills", skill_id)
+    if not skill: raise HTTPException(404, "技能不存在")
+    try: return read_package_file(skill, path)
+    except (ValueError, FileNotFoundError) as exc: raise HTTPException(404, str(exc)) from exc
 
 
 @app.post("/api/knowledge/{knowledge_id}/ragflow/provision")
@@ -555,7 +593,7 @@ def get_memories(scope: str = "", scope_id: str = "", limit: int = 100):
 @app.post("/api/memories")
 def create_memory(payload: dict = Body(...)):
     try:
-        return save_memory(payload.get("scope", "project"), payload.get("scope_id", "default"), payload.get("content", ""), payload.get("kind", "experience"), payload.get("importance", 0.5), payload.get("metadata"))
+        return save_memory(payload.get("scope", "project"), payload.get("scope_id", "default"), payload.get("content", ""), payload.get("kind", "experience"), payload.get("importance", 0.5), payload.get("metadata"), payload.get("confidence", 0.7), payload.get("expires_at"), payload.get("confirmed", True), payload.get("supersedes_id"))
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -571,6 +609,46 @@ def remove_memory(memory_id: str):
     if not get_memory(memory_id):
         raise HTTPException(404, "记忆不存在")
     return {"deleted": delete_memory(memory_id)}
+
+
+@app.post("/api/memories/{memory_id}/confirm")
+def approve_memory(memory_id: str, payload: dict = Body(default={})):
+    result = confirm_memory(memory_id, payload.get("accept", True), payload.get("supersede_conflict", False))
+    if not result: raise HTTPException(404, "记忆不存在")
+    return result
+
+
+@app.get("/api/worktrees")
+def get_worktrees(): return {"data": list_worktrees()}
+
+
+@app.delete("/api/worktrees/{worktree_id}")
+async def delete_worktree(worktree_id: str): return {"removed": await remove_worktree(worktree_id)}
+
+
+@app.post("/api/code-index/rebuild")
+async def rebuild_code_index(): return await asyncio.to_thread(rebuild_index, BASE_WORKSPACE)
+
+
+@app.get("/api/code-index/symbols")
+def query_code_symbols(query: str = "", limit: int = 100): return {"data": code_symbols(BASE_WORKSPACE, query, limit)}
+
+
+@app.get("/api/code-index/references")
+def query_code_references(symbol: str, limit: int = 200): return {"data": code_references(BASE_WORKSPACE, symbol, limit)}
+
+
+@app.get("/api/code-index/graph")
+def query_code_graph(kind: str = "call", symbol: str = "", limit: int = 300):
+    if kind not in {"call", "import"}: raise HTTPException(400, "kind 必须为 call 或 import")
+    return {"data": code_graph(BASE_WORKSPACE, kind, symbol, limit)}
+
+
+@app.get("/api/artifacts")
+def get_artifact(path: str):
+    target = (BASE_WORKSPACE / path).resolve()
+    if BASE_WORKSPACE not in target.parents or not target.is_file(): raise HTTPException(404, "产物不存在")
+    return FileResponse(target)
 
 
 @app.post("/api/threads")
@@ -724,8 +802,8 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
             event_sequence += 1
             persist_event(event, thread_id, turn_id, event_sequence)
 
-        result = await run_agent(
-            agent, [], "", emit, streaming=False, thread_id=thread_id, turn_id=turn_id,
+        result = await run_agent_isolated(
+            agent, [], "", on_event=emit, streaming=False, thread_id=thread_id, turn_id=turn_id,
             resume_state=state,
             approval_decision={"tool_call_id": approval["tool_call_id"], "decision": decision, "reason": reason},
         )
@@ -810,7 +888,7 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
         await queue.put({**event, "sequence": event_sequence})
     async def produce():
         try:
-            result = await run_agent(agent, [dict(item) for item in history], content, emit, streaming=True, thread_id=thread_id, turn_id=turn_id)
+            result = await run_agent_isolated(agent, [dict(item) for item in history], content, on_event=emit, streaming=True, thread_id=thread_id, turn_id=turn_id)
             with connect() as db:
                 db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()))
                 db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
@@ -818,10 +896,14 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
         except asyncio.CancelledError:
             event = {"id": new_id("evt"), "timestamp": datetime.utcnow().isoformat() + "Z", "type": "turn_cancelled", "turn_id": turn_id}
             persist_event(event, thread_id, turn_id, event_sequence + 1)
-            with connect() as db: db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
+            with connect() as db:
+                db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
+                db.execute("UPDATE agent_runs SET status='cancelled',updated_at=? WHERE turn_id=? AND status IN ('running','waiting')", (now(), turn_id))
             await queue.put(event)
         except Exception as exc:
-            with connect() as db: db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), thread_id))
+            with connect() as db:
+                db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), thread_id))
+                db.execute("UPDATE agent_runs SET status='failed',error=?,updated_at=? WHERE turn_id=? AND status='running'", (str(exc)[:4000], now(), turn_id))
             await queue.put({"type": "turn_error", "reason": type(exc).__name__, "message": str(exc)[:1200]})
         finally:
             with connect() as db:
@@ -885,7 +967,7 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
         db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
         db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
     try:
-        result = await run_agent(agent, [dict(item) for item in history], content, thread_id=thread_id, turn_id=turn_id)
+        result = await run_agent_isolated(agent, [dict(item) for item in history], content, thread_id=thread_id, turn_id=turn_id)
         with connect() as db:
             db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()))
             db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
@@ -893,6 +975,7 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
     except Exception as exc:
         with connect() as db:
             db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), thread_id))
+            db.execute("UPDATE agent_runs SET status='failed',error=?,updated_at=? WHERE turn_id=? AND status='running'", (str(exc)[:4000], now(), turn_id))
         raise HTTPException(502, str(exc))
     finally:
         lock.release()

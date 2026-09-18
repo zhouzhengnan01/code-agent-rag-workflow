@@ -15,12 +15,24 @@ from .knowledge import format_retrieval_context
 from .knowledge_service import search
 from .memory import memory_context, save_memory, search_memories
 from .mcp import mcp_manager
-from .model import ModelError, chat_completion, stream_chat_completion
+from .model import ModelError, chat_completion, stream_chat_completion, uses_responses, response_completion, stream_response_completion
 from .sandbox import run_command
 from .tasks import enqueue_task, get_task
+from .workspace import BASE_WORKSPACE, current_workspace, sandbox_cwd
+from .code_intelligence import rebuild_index, symbols as code_symbols, references as code_references, graph as code_graph
+from .lsp import lsp_manager
+from .browser import browser_manager
+from .github_service import create_pr, ci_status, review_comment, auth_header_command
+from .skill_packages import package_path, read_package_file, verify_package
 
 
 WORKSPACE = Path(os.getenv("CODEZZN_WORKSPACE", os.path.join(os.getcwd(), "workspace"))).resolve()
+
+
+def _workspace_root():
+    """Return the task worktree, while preserving the legacy WORKSPACE test hook."""
+    selected = current_workspace().resolve()
+    return WORKSPACE.resolve() if selected == BASE_WORKSPACE.resolve() and WORKSPACE.resolve() != BASE_WORKSPACE.resolve() else selected
 
 
 BUILTIN_SCHEMAS = {
@@ -44,6 +56,23 @@ BUILTIN_SCHEMAS = {
     "memory_save": {"description": "保存可跨会话使用的偏好、项目事实或经验", "parameters": {"type": "object", "properties": {"content": {"type": "string"}, "scope": {"type": "string", "enum": ["user", "project", "thread"]}, "kind": {"type": "string"}, "importance": {"type": "number"}}, "required": ["content"]}},
     "delegate_task": {"description": "把一个或多个独立任务委派给允许的子智能体并在后台并行执行", "parameters": {"type": "object", "properties": {"tasks": {"type": "array", "maxItems": 8, "items": {"type": "object", "properties": {"task": {"type": "string"}, "agent_id": {"type": "string"}, "name": {"type": "string"}}, "required": ["task"]}}}, "required": ["tasks"]}},
     "task_status": {"description": "查询或等待后台任务完成", "parameters": {"type": "object", "properties": {"task_ids": {"type": "array", "items": {"type": "string"}}, "wait_seconds": {"type": "integer"}}, "required": ["task_ids"]}},
+    "code_index": {"description": "重建工作区 AST/符号/调用/依赖索引", "parameters": {"type":"object","properties":{}}},
+    "code_symbols": {"description": "按名称查询代码符号", "parameters": {"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}}}},
+    "find_references": {"description": "查找符号在工作区中的所有引用", "parameters": {"type":"object","properties":{"symbol":{"type":"string"},"limit":{"type":"integer"}},"required":["symbol"]}},
+    "call_graph": {"description": "读取函数调用图", "parameters": {"type":"object","properties":{"symbol":{"type":"string"},"limit":{"type":"integer"}}}},
+    "dependency_graph": {"description": "读取模块导入依赖图", "parameters": {"type":"object","properties":{"symbol":{"type":"string"},"limit":{"type":"integer"}}}},
+    "lsp_request": {"description": "调用已配置的 LSP 3.18 language server", "parameters": {"type":"object","properties":{"server_id":{"type":"string"},"method":{"type":"string"},"params":{"type":"object"}},"required":["server_id","method"]}},
+    "git_clone": {"description": "在隔离容器中克隆 Git 仓库", "parameters": {"type":"object","properties":{"url":{"type":"string"},"path":{"type":"string"},"branch":{"type":"string"}},"required":["url","path"]}},
+    "git_fetch": {"description": "从远端获取 Git refs", "parameters": {"type":"object","properties":{"remote":{"type":"string"},"prune":{"type":"boolean"}}}},
+    "git_push": {"description": "推送当前分支到远端", "parameters": {"type":"object","properties":{"remote":{"type":"string"},"branch":{"type":"string"},"set_upstream":{"type":"boolean"}}}},
+    "git_merge": {"description": "合并 ref 并返回冲突文件；冲突时保留工作树供后续解决", "parameters": {"type":"object","properties":{"ref":{"type":"string"}},"required":["ref"]}},
+    "git_merge_abort": {"description": "中止当前 merge conflict 工作流", "parameters": {"type":"object","properties":{}}},
+    "github_create_pr": {"description": "在 GitHub 创建 Pull Request", "parameters": {"type":"object","properties":{"title":{"type":"string"},"head":{"type":"string"},"base":{"type":"string"},"body":{"type":"string"},"draft":{"type":"boolean"}},"required":["title","head","base"]}},
+    "github_ci_status": {"description": "查询 GitHub Checks 和 Actions 状态", "parameters": {"type":"object","properties":{"ref":{"type":"string"}},"required":["ref"]}},
+    "github_review_comment": {"description": "向 GitHub PR 提交行级 review comment", "parameters": {"type":"object","properties":{"pull_number":{"type":"integer"},"body":{"type":"string"},"commit_id":{"type":"string"},"path":{"type":"string"},"line":{"type":"integer"},"side":{"type":"string"}},"required":["pull_number","body","commit_id","path","line"]}},
+    "skill_read_file": {"description": "读取已安装 Skill 包中的 reference、asset 文本或脚本", "parameters": {"type":"object","properties":{"skill_id":{"type":"string"},"path":{"type":"string"}},"required":["skill_id","path"]}},
+    "skill_run_script": {"description": "在隔离容器中执行 Skill 包 scripts/ 下的脚本", "parameters": {"type":"object","properties":{"skill_id":{"type":"string"},"path":{"type":"string"},"args":{"type":"array","items":{"type":"string"}}},"required":["skill_id","path"]}},
+    "browser": {"description": "操作无头 Chromium：导航、DOM 检查、元素/坐标点击、输入、键盘、滚动、等待、截图和页面脚本", "parameters": {"type":"object","properties":{"action":{"type":"string","enum":["navigate","inspect","click","mouse_click","mouse_move","scroll","hover","type","press","wait","screenshot","evaluate"]},"session":{"type":"string"},"url":{"type":"string"},"selector":{"type":"string"},"text":{"type":"string"},"key":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"delta_x":{"type":"number"},"delta_y":{"type":"number"},"seconds":{"type":"number"},"path":{"type":"string"},"full_page":{"type":"boolean"},"script":{"type":"string"}},"required":["action"]}},
 }
 
 MAX_INSTRUCTIONS = 50000
@@ -78,7 +107,7 @@ def persist_event(event, thread_id=None, turn_id=None, sequence=None):
 
 
 def load_instructions(cwd=None, workspace=None, max_bytes=MAX_INSTRUCTIONS):
-    root = (workspace or WORKSPACE).resolve()
+    root = (workspace or _workspace_root()).resolve()
     target = (root / (cwd or ".")).resolve()
     if target != root and root not in target.parents:
         raise ValueError("路径超出工作区")
@@ -107,14 +136,15 @@ def load_instructions(cwd=None, workspace=None, max_bytes=MAX_INSTRUCTIONS):
 
 
 def safe_path(value="."):
-    target = (WORKSPACE / value).resolve()
-    if target != WORKSPACE and WORKSPACE not in target.parents:
+    root = _workspace_root()
+    target = (root / value).resolve()
+    if target != root and root not in target.parents:
         raise ValueError("路径超出工作区")
     return target
 
 
 def snapshot_file(target):
-    backup_root = WORKSPACE / ".codezzn-backups"
+    backup_root = _workspace_root() / ".codezzn-backups"
     backup_root.mkdir(parents=True, exist_ok=True)
     backup = backup_root / f"{new_id('file')}.bak"
     if target.exists():
@@ -154,7 +184,7 @@ async def build_context(agent, provider=None, model=None, user_message="", threa
             "provider": provider.get("name", provider.get("type", "unknown")),
             "provider_type": provider.get("type", "openai-compatible"),
             "model": model,
-            "workspace": str(WORKSPACE),
+            "workspace": str(_workspace_root()),
             "instruction_paths": instructions["paths"],
             "instructions_truncated": instructions["truncated"],
         }
@@ -169,7 +199,32 @@ async def build_context(agent, provider=None, model=None, user_message="", threa
     for skill_id in agent.get("skill_ids", []):
         skill = resource_get("skills", skill_id)
         if skill and skill.get("enabled"):
-            sections.append(f"\n<skill name={json.dumps(skill['name'], ensure_ascii=False)}>\n{skill.get('content', '')[:20000]}\n</skill>")
+            package = {
+                "id": skill_id,
+                "name": skill.get("name"),
+                "version": skill.get("version"),
+                "scripts": skill.get("scripts") or [],
+                "references": skill.get("references") or [],
+                "assets": skill.get("assets") or [],
+            }
+            sections.append(
+                "\n<skill_package>\n"
+                + json.dumps(package, ensure_ascii=False, indent=2)
+                + "\nUse this exact id when calling skill_read_file or skill_run_script.\n"
+                + str(skill.get("content", ""))[:20000]
+                + "\n</skill_package>"
+            )
+    lsp_configs = []
+    for server_id in agent.get("lsp_server_ids", []):
+        server = resource_get("lsp_servers", server_id)
+        if server and server.get("enabled", True):
+            lsp_configs.append({"id": server_id, "name": server.get("name"), "language": server.get("language")})
+    if lsp_configs:
+        sections.append(
+            "\n<available_lsp_servers>\n"
+            + json.dumps(lsp_configs, ensure_ascii=False, indent=2)
+            + "\nUse the matching exact id as lsp_request.server_id.\n</available_lsp_servers>"
+        )
     if agent.get("memory_enabled") and user_message:
         context, _ = memory_context(
             user_message,
@@ -235,14 +290,14 @@ def approval_required(operation):
 
 def _git_command(args):
     return ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-            "-c", "diff.external=", "-c", "safe.directory=/workspace", *args]
+            "-c", "diff.external=", "-c", "safe.directory=*", *args]
 
 
 async def _run_git(args, mode="read-only"):
     if args[0] == "diff":
         args = ["diff", "--no-ext-diff", "--no-textconv", *args[1:]]
     command = _git_command(args)
-    result = await run_command(shlex.join(command), mode)
+    result = await run_command(shlex.join(command), mode, sandbox_cwd())
     return {**result, "command": command}
 
 
@@ -286,16 +341,16 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
         return await search(arguments["query"], agent.get("knowledge_ids", []), min(int(arguments.get("limit", 5)), 10))
     if name == "list_files":
         target = safe_path(arguments.get("path", "."))
-        return [{"name": p.name, "path": str(p.relative_to(WORKSPACE)), "directory": p.is_dir()} for p in list(target.iterdir())[:200]]
+        return [{"name": p.name, "path": str(p.relative_to(_workspace_root())), "directory": p.is_dir()} for p in list(target.iterdir())[:200]]
     if name == "read_file":
         return {"content": safe_path(arguments["path"]).read_text(encoding="utf-8")[:100000]}
     if name == "search_code":
-        path = str(safe_path(arguments.get("path", ".")).relative_to(WORKSPACE)) or "."
+        path = str(safe_path(arguments.get("path", ".")).relative_to(_workspace_root())) or "."
         command = ["rg", "--line-number", "--hidden", "--glob", "!.git/**"]
         if arguments.get("glob"):
             command.extend(["--glob", str(arguments["glob"])])
         command.extend(["--", str(arguments["query"]), path])
-        return await run_command(shlex.join(command), "read-only")
+        return await run_command(shlex.join(command), "read-only", sandbox_cwd())
     if name in ("write_file", "apply_patch"):
         if mode == "read-only":
             return approval_required(name)
@@ -304,7 +359,7 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
     if name == "write_file":
         target = safe_path(arguments["path"])
         backup = atomic_write(target, arguments["content"])
-        return {"written": str(target.relative_to(WORKSPACE)), "bytes": len(arguments["content"].encode()), "backup": str(backup.relative_to(WORKSPACE))}
+        return {"written": str(target.relative_to(_workspace_root())), "bytes": len(arguments["content"].encode()), "backup": str(backup.relative_to(_workspace_root()))}
     if name == "apply_patch":
         if "patch" in arguments:
             patch = str(arguments.get("patch") or "")
@@ -314,10 +369,10 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
             backups = []
             for path in paths:
                 target = safe_path(path)
-                backups.append(str(snapshot_file(target).relative_to(WORKSPACE)))
+                backups.append(str(snapshot_file(target).relative_to(_workspace_root())))
             encoded = base64.b64encode(patch.encode()).decode()
             script = f"echo {shlex.quote(encoded)} | base64 -d > /tmp/codezzn.patch && git apply --check /tmp/codezzn.patch && git apply /tmp/codezzn.patch"
-            result = await run_command(script, "workspace-write")
+            result = await run_command(script, "workspace-write", sandbox_cwd())
             if result.get("exit_code"):
                 raise RuntimeError(result.get("stderr") or result.get("stdout") or "git apply failed")
             return {"changed": True, "paths": paths, "backups": backups, "result": result}
@@ -332,7 +387,7 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
             raise ValueError("Unified diff patches are not supported; use exact old/new replacements")
         target.parent.mkdir(parents=True, exist_ok=True)
         backup = atomic_write(target, updated)
-        return {"path": str(target.relative_to(WORKSPACE)), "changed": original != updated, "backup": str(backup.relative_to(WORKSPACE)), "diff": "".join(difflib.unified_diff(original.splitlines(True), updated.splitlines(True), fromfile=str(target), tofile=str(target)))}
+        return {"path": str(target.relative_to(_workspace_root())), "changed": original != updated, "backup": str(backup.relative_to(_workspace_root())), "diff": "".join(difflib.unified_diff(original.splitlines(True), updated.splitlines(True), fromfile=str(target), tofile=str(target)))}
     if name == "run_shell":
         if not agent.get("allow_shell", False):
             raise PermissionError("此智能体未启用 shell 权限")
@@ -340,13 +395,13 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
             raise PermissionError("danger-full-access is not supported; use read-only or workspace-write")
         if not auto_approve:
             return approval_required(name)
-        return await run_command(arguments["command"], mode)
+        return await run_command(arguments["command"], mode, sandbox_cwd())
     if name == "run_tests":
         if not agent.get("allow_shell", False):
             raise PermissionError("此智能体未启用 shell 权限")
         if not auto_approve:
             return approval_required(name)
-        return await run_command(arguments["command"], mode)
+        return await run_command(arguments["command"], mode, sandbox_cwd())
     if name == "git_status":
         return await _run_git(["status", "--short"])
     if name == "git_diff":
@@ -377,7 +432,7 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
         safe = []
         for value in paths[:100]:
             target = safe_path(str(value))
-            safe.append(str(target.relative_to(WORKSPACE)) or ".")
+            safe.append(str(target.relative_to(_workspace_root())) or ".")
         return await _run_git(["add", "--", *safe], "workspace-write")
     if name == "git_commit":
         if mode != "workspace-write" or not auto_approve:
@@ -391,12 +446,12 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
             return approval_required(name)
         target = safe_path(arguments["path"])
         backup = safe_path(arguments["backup"])
-        backup_root = (WORKSPACE / ".codezzn-backups").resolve()
+        backup_root = (_workspace_root() / ".codezzn-backups").resolve()
         if backup_root not in backup.parents:
             raise ValueError("只能使用 Codezzn 自动备份")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(backup.read_bytes())
-        return {"restored": str(target.relative_to(WORKSPACE)), "backup": str(backup.relative_to(WORKSPACE))}
+        return {"restored": str(target.relative_to(_workspace_root())), "backup": str(backup.relative_to(_workspace_root()))}
     if name == "memory_search":
         scopes = [("project", str(agent.get("memory_project_id") or "default")), ("user", str(agent.get("memory_user_id") or "default"))]
         if thread_id: scopes.append(("thread", thread_id))
@@ -435,7 +490,105 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
             if all(value and value["status"] in {"completed", "failed", "cancelled"} for value in values) or asyncio.get_running_loop().time() >= deadline:
                 return {"tasks": values}
             await asyncio.sleep(0.35)
+    if name == "code_index":
+        return await asyncio.to_thread(rebuild_index, _workspace_root())
+    if name == "code_symbols":
+        return {"symbols": await asyncio.to_thread(code_symbols, _workspace_root(), arguments.get("query", ""), arguments.get("limit", 100))}
+    if name == "find_references":
+        return {"references": await asyncio.to_thread(code_references, _workspace_root(), str(arguments["symbol"]), arguments.get("limit", 200))}
+    if name in ("call_graph", "dependency_graph"):
+        return {"edges": await asyncio.to_thread(code_graph, _workspace_root(), "call" if name == "call_graph" else "import", arguments.get("symbol", ""), arguments.get("limit", 300))}
+    if name == "lsp_request":
+        server_id = str(arguments["server_id"])
+        if server_id not in (agent.get("lsp_server_ids") or []): raise PermissionError("未授权的 LSP 服务")
+        server = resource_get("lsp_servers", server_id)
+        if not server or not server.get("enabled", True): raise ValueError("LSP 服务不存在或未启用")
+        return {"result": await lsp_manager.request(server, _workspace_root(), str(arguments["method"]), arguments.get("params") or {})}
+    if name == "git_clone":
+        if mode != "workspace-write" or not auto_approve: return approval_required(name)
+        url = str(arguments["url"]); target = safe_path(arguments["path"])
+        if not re.match(r"^(https://|ssh://|git@)[^\s]+$", url): raise ValueError("仅支持 HTTPS/SSH Git URL")
+        relative = target.relative_to(_workspace_root()).as_posix()
+        args = ["clone", *( ["--branch", str(arguments["branch"])] if arguments.get("branch") else []), "--", url, relative]
+        return await run_command(shlex.join(["git", *auth_header_command(), *args]), "workspace-write", sandbox_cwd(), network=True)
+    if name in ("git_fetch", "git_push"):
+        if mode != "workspace-write" or not auto_approve: return approval_required(name)
+        remote = _git_revision(str(arguments.get("remote") or "origin"))
+        if name == "git_fetch": args = ["fetch", *( ["--prune"] if arguments.get("prune", True) else []), remote]
+        else:
+            branch = _git_revision(str(arguments.get("branch") or "HEAD")); args = ["push", *( ["--set-upstream"] if arguments.get("set_upstream") else []), remote, branch]
+        command = ["git", *auth_header_command(), "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "safe.directory=*", *args]
+        result = await run_command(shlex.join(command), "workspace-write", sandbox_cwd(), network=True)
+        return {key:value for key,value in result.items() if key != "command"}
+    if name == "git_merge":
+        if mode != "workspace-write" or not auto_approve: return approval_required(name)
+        result = await _run_git(["merge", "--no-commit", "--no-ff", _git_revision(arguments["ref"])], "workspace-write")
+        conflicts = await _run_git(["diff", "--name-only", "--diff-filter=U"])
+        return {"merge":result,"conflicts":conflicts.get("output", "").splitlines(),"requires_resolution":bool(conflicts.get("output", "").strip())}
+    if name == "git_merge_abort":
+        if mode != "workspace-write" or not auto_approve: return approval_required(name)
+        return await _run_git(["merge", "--abort"], "workspace-write")
+    if name.startswith("github_"):
+        if not auto_approve and name != "github_ci_status": return approval_required(name)
+        remote_result = await _run_git(["remote", "get-url", "origin"]); remote = remote_result.get("output", "").strip()
+        if name == "github_create_pr": return await create_pr(remote, arguments["title"], arguments["head"], arguments["base"], arguments.get("body", ""), arguments.get("draft", False))
+        if name == "github_ci_status": return await ci_status(remote, arguments["ref"])
+        return await review_comment(remote, arguments["pull_number"], arguments["body"], arguments["commit_id"], arguments["path"], arguments["line"], arguments.get("side", "RIGHT"))
+    if name == "skill_read_file":
+        skill = resource_get("skills", arguments["skill_id"])
+        if not skill or arguments["skill_id"] not in (agent.get("skill_ids") or []): raise PermissionError("未授权的 Skill 包")
+        return read_package_file(skill, arguments["path"])
+    if name == "skill_run_script":
+        if not auto_approve: return approval_required(name)
+        skill = resource_get("skills", arguments["skill_id"])
+        if not skill or arguments["skill_id"] not in (agent.get("skill_ids") or []): raise PermissionError("未授权的 Skill 包")
+        verify_package(skill)
+        relative = str(arguments["path"])
+        if not relative.startswith("scripts/") or relative not in (skill.get("scripts") or []): raise PermissionError("只能执行 manifest 中的 scripts 文件")
+        path = package_path(skill, relative); extension = path.suffix.lower()
+        runner = {".py":"python", ".sh":"sh"}.get(extension)
+        if not runner: raise ValueError("只允许执行 .py 或 .sh Skill 脚本")
+        args = [str(value) for value in (arguments.get("args") or [])]
+        package_relative = path.relative_to(BASE_WORKSPACE).as_posix()
+        return await run_command(shlex.join([runner, package_relative, *args]), mode, ".")
+    if name == "browser":
+        if not agent.get("allow_browser", False): raise PermissionError("当前智能体未启用浏览器能力")
+        if not auto_approve and arguments.get("action") in {"click","mouse_click","mouse_move","scroll","hover","type","press","evaluate"}: return approval_required(name)
+        values = dict(arguments); action = values.pop("action"); session = values.pop("session", thread_id or "default")
+        return await browser_manager.execute(action, session, **values)
     raise ValueError(name)
+
+
+SIDE_EFFECT_TOOLS = {
+    "write_file", "apply_patch", "run_shell", "run_tests", "git_branch", "git_stage", "git_commit",
+    "restore_file", "memory_save", "delegate_task", "git_clone", "git_fetch", "git_push", "git_merge",
+    "git_merge_abort", "github_create_pr", "github_review_comment", "skill_run_script", "browser",
+}
+
+
+async def execute_tool_once(call_id, name, arguments, agent, routes, **kwargs):
+    """Checkpoint tool results and avoid replaying ambiguous external side effects after a crash."""
+    if not call_id:
+        return await execute_tool(name, arguments, agent, routes, **kwargs)
+    with connect() as db:
+        row = db.execute("SELECT * FROM tool_executions WHERE call_id=?", (call_id,)).fetchone()
+    if row and row["status"] == "completed":
+        return json.loads(row["result"] or "null")
+    if row and row["status"] in {"running", "failed"} and name in SIDE_EFFECT_TOOLS:
+        return {"error": {"code": "interrupted_tool_execution", "message": "该副作用工具在进程中断前已开始，系统不会自动重放；请检查外部状态后重新发起。"}}
+    timestamp = now()
+    with connect() as db:
+        db.execute("INSERT INTO tool_executions(call_id,turn_id,tool_name,arguments,status,created_at,updated_at) VALUES(?,?,?,?, 'running',?,?) ON CONFLICT(call_id) DO UPDATE SET status='running',error=NULL,updated_at=excluded.updated_at", (call_id, kwargs.get("turn_id"), name, json.dumps(arguments, ensure_ascii=False, default=str), timestamp, timestamp))
+    try:
+        result = await execute_tool(name, arguments, agent, routes, **kwargs)
+        if isinstance(result, dict) and (result.get("error") or {}).get("code") == "approval_required":
+            with connect() as db: db.execute("DELETE FROM tool_executions WHERE call_id=?", (call_id,))
+            return result
+        with connect() as db: db.execute("UPDATE tool_executions SET status='completed',result=?,updated_at=? WHERE call_id=?", (json.dumps(result, ensure_ascii=False, default=str), now(), call_id))
+        return result
+    except BaseException as exc:
+        with connect() as db: db.execute("UPDATE tool_executions SET status='failed',error=?,updated_at=? WHERE call_id=?", (str(exc)[:4000], now(), call_id))
+        raise
 
 
 def _public_sources(sources):
@@ -443,6 +596,30 @@ def _public_sources(sources):
         {"source": item.get("source"), "position": item.get("position"), "score": item.get("score"), "retrieval": item.get("retrieval")}
         for item in sources
     ]
+
+
+def compact_chat_messages(messages, max_chars=120000, keep_recent=16):
+    """Bound Chat Completions context without splitting recent tool-call exchanges."""
+    max_chars = max(8000, int(max_chars or 120000))
+    total = sum(len(str(item.get("content") or "")) + len(json.dumps(item.get("tool_calls") or [])) for item in messages)
+    if total <= max_chars or len(messages) <= keep_recent + 1:
+        return messages
+    system = [messages[0]] if messages and messages[0].get("role") == "system" else []
+    start = max(len(system), len(messages) - keep_recent)
+    # Do not begin in the middle of an assistant tool-call + tool-output exchange.
+    while start > len(system) and messages[start].get("role") == "tool":
+        start -= 1
+    older = messages[len(system):start]
+    notes = []
+    for item in older:
+        if item.get("role") in {"user", "assistant"} and item.get("content"):
+            text = re.sub(r"\s+", " ", str(item["content"])).strip()
+            notes.append(f"{item['role']}: {text[:500]}")
+    summary = {"role": "system", "content": "Earlier conversation was locally compacted. Salient transcript excerpts:\n" + "\n".join(notes[-20:])}
+    result = [*system, summary, *messages[start:]]
+    while sum(len(str(item.get("content") or "")) for item in result) > max_chars and len(result) > 4:
+        del result[2]
+    return result
 
 
 def _save_checkpoint(thread_id, turn_id, agent_id, state):
@@ -456,6 +633,124 @@ def _save_checkpoint(thread_id, turn_id, agent_id, state):
             (new_id("checkpoint"), thread_id, turn_id, agent_id, "waiting", json.dumps(state, ensure_ascii=False), timestamp, timestamp),
         )
         db.execute("UPDATE threads SET status='waiting_for_approval',updated_at=? WHERE id=?", (timestamp, thread_id))
+
+
+def save_agent_run(agent, state, status="running", thread_id=None, turn_id=None, task_id=None, response_id=None, error=None):
+    if not turn_id and not task_id:
+        return None
+    timestamp = now(); run_id = state.get("agent_run_id")
+    with connect() as db:
+        if not run_id:
+            row = db.execute("SELECT id FROM agent_runs WHERE ((task_id IS NOT NULL AND task_id=?) OR (turn_id IS NOT NULL AND turn_id=?)) AND status IN ('running','waiting') ORDER BY created_at DESC LIMIT 1", (task_id, turn_id)).fetchone()
+            run_id = row["id"] if row else new_id("arun"); state["agent_run_id"] = run_id
+        db.execute("INSERT INTO agent_runs(id,task_id,thread_id,turn_id,agent_id,status,state,response_id,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,state=excluded.state,response_id=excluded.response_id,error=excluded.error,updated_at=excluded.updated_at", (run_id, task_id, thread_id, turn_id, agent["id"], status, json.dumps(state, ensure_ascii=False, default=str), response_id, error, timestamp, timestamp))
+    return run_id
+
+
+def load_agent_run(task_id=None, turn_id=None):
+    with connect() as db:
+        row = db.execute("SELECT * FROM agent_runs WHERE ((task_id IS NOT NULL AND task_id=?) OR (turn_id IS NOT NULL AND turn_id=?)) AND status IN ('running','waiting','recovering','failed') ORDER BY created_at DESC LIMIT 1", (task_id, turn_id)).fetchone()
+    if not row: return None
+    item = dict(row); item["state"] = json.loads(item["state"] or "{}"); return item
+
+
+async def _run_responses_agent(agent, provider, selected_model, candidates, history, user_message, on_event, streaming, thread_id, turn_id, resume_state, approval_decision, depth, current_task_id):
+    tools, routes = await tool_specs(agent); events, sources, total_usage = [], [], {}
+    state = dict(resume_state or {})
+    user_message = state.get("user_message") or user_message
+    instructions = await build_context(agent, provider, selected_model, user_message, thread_id)
+    previous_response_id = state.get("previous_response_id")
+    pending = state.get("pending_tool_calls") or []
+    next_input = state.get("next_input") or []
+    round_number = int(state.get("round", 0))
+    if not resume_state:
+        await _emit(events, on_event, "turn_started", turn_id=turn_id)
+        await _emit(events, on_event, "model_selected", provider=provider.get("name", provider.get("type", "unknown")), model=selected_model)
+        if agent.get("knowledge_ids"):
+            await _emit(events, on_event, "knowledge_started")
+            try:
+                sources = await search(user_message, agent.get("knowledge_ids"), limit=6)
+                retrieval = format_retrieval_context(sources)
+                if retrieval: instructions += "\n" + retrieval
+                await _emit(events, on_event, "knowledge_completed", count=len(sources), sources=_public_sources(sources))
+            except Exception as exc: await _emit(events, on_event, "knowledge_failed", reason=type(exc).__name__)
+        if thread_id:
+            with connect() as db: rows = db.execute("SELECT response_id,state FROM agent_runs WHERE thread_id=? AND agent_id=? AND status='completed' AND response_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1", (thread_id, agent["id"])).fetchall()
+            if rows:
+                prior = json.loads(rows[0]["state"] or "{}");
+                if prior.get("model") == selected_model and prior.get("provider_id") == provider.get("id"): previous_response_id = rows[0]["response_id"]
+        if previous_response_id: next_input = [{"role":"user","content":user_message}]
+        else: next_input = [{"role":item["role"],"content":item["content"]} for item in history if item["role"] in ("user","assistant")][-20:] + [{"role":"user","content":user_message}]
+    else:
+        events = state.get("events", []); sources = state.get("sources", []); total_usage = state.get("usage", {})
+        await _emit(events, on_event, "turn_resumed", turn_id=turn_id)
+    max_rounds = int(agent.get("max_tool_rounds", 8))
+    state.update({"mode":"responses","previous_response_id":previous_response_id,"pending_tool_calls":pending,"next_input":next_input,"events":events,"sources":sources,"usage":total_usage,"round":round_number,"model":selected_model,"provider_id":provider.get("id"),"user_message":user_message})
+    save_agent_run(agent, state, thread_id=thread_id, turn_id=turn_id, task_id=current_task_id, response_id=previous_response_id)
+    runtime_index = 0
+    while round_number <= max_rounds:
+        if not pending:
+            while True:
+                try:
+                    if streaming:
+                        response, usage, response_id = {"content":"","tool_calls":[]}, {}, None
+                        async for event in stream_response_completion(provider, selected_model, next_input, tools, instructions, previous_response_id, agent.get("reasoning_effort")):
+                            if event["type"] == "assistant_delta": response["content"] += event["content"]; await _emit(events, on_event, "assistant_delta", content=event["content"])
+                            elif event["type"] == "finish": response, usage, response_id = event["response"], event["usage"], event["response_id"]
+                    else:
+                        response, usage, response_id, _ = await response_completion(provider, selected_model, next_input, tools, instructions, previous_response_id, agent.get("reasoning_effort"))
+                    break
+                except ModelError as exc:
+                    if runtime_index + 1 >= len(candidates): raise
+                    runtime_index += 1; provider, selected_model = candidates[runtime_index]; previous_response_id = None
+                    instructions = await build_context(agent, provider, selected_model, user_message, thread_id)
+                    await _emit(events, on_event, "model_fallback", provider=provider.get("name", provider.get("type", "unknown")), model=selected_model, reason=str(exc)[:300])
+            previous_response_id = response_id
+            for key, value in usage.items():
+                if isinstance(value, (int,float)): total_usage[key] = total_usage.get(key, 0) + value
+            pending = list(response.get("tool_calls") or [])
+            # previous_response_id already carries the model input and function calls;
+            # the next request must contain only function_call_output items.
+            next_input = []
+            state = {"mode":"responses","previous_response_id":previous_response_id,"pending_tool_calls":pending,"next_input":[],"events":events,"sources":sources,"usage":total_usage,"round":round_number,"model":selected_model,"provider_id":provider.get("id"),"user_message":user_message}
+            save_agent_run(agent, state, thread_id=thread_id, turn_id=turn_id, task_id=current_task_id, response_id=previous_response_id)
+            if not pending:
+                content = response.get("content") or ""
+                if agent.get("memory_enabled") and agent.get("auto_memory") and content:
+                    save_memory(
+                        "project", str(agent.get("memory_project_id") or "default"),
+                        f"任务：{user_message[:1000]}\n结果：{content[:2000]}", "experience", 0.55,
+                        {"agent_id": agent.get("id"), "thread_id": thread_id, "turn_id": turn_id},
+                    )
+                await _emit(events, on_event, "assistant_status", status="completed"); await _emit(events, on_event, "turn_completed", usage=total_usage)
+                save_agent_run(agent, state, "completed", thread_id, turn_id, current_task_id, previous_response_id)
+                return {"status":"completed","content":content,"events":events,"usage":total_usage,"sources":_public_sources(sources),"runtime":{"provider":provider.get("name", provider.get("type","unknown")),"provider_type":provider.get("type","openai-compatible"),"model":selected_model,"api":"responses","response_id":previous_response_id}}
+
+        async def invoke(call):
+            name = call["function"]["name"]; arguments = json.loads(call["function"].get("arguments") or "{}")
+            await _emit(events, on_event, "tool_started", name=name)
+            approved = bool(approval_decision and approval_decision.get("tool_call_id") == call["id"] and approval_decision.get("decision") == "approved")
+            denied = bool(approval_decision and approval_decision.get("tool_call_id") == call["id"] and approval_decision.get("decision") == "denied")
+            result = {"error":{"code":"approval_denied","message":approval_decision.get("reason") or "Approval denied"}} if denied else await execute_tool_once(call.get("id"), name, arguments, agent, routes, approved=approved, thread_id=thread_id, turn_id=turn_id, depth=depth, current_task_id=current_task_id)
+            return call, name, arguments, result
+        completed = await asyncio.gather(*(invoke(call) for call in pending), return_exceptions=True) if agent.get("parallel_tools", True) and agent.get("auto_approve") else [await invoke(call) for call in pending]
+        outputs = list(next_input)
+        for index, item in enumerate(completed):
+            if isinstance(item, Exception): raise item
+            call, name, arguments, result = item
+            if isinstance(result, dict) and (result.get("error") or {}).get("code") == "approval_required":
+                if not thread_id or not turn_id: result = {"error":{"code":"approval_unavailable","message":"后台调用没有审批会话"}}
+                else:
+                    approval_id = new_id("approval")
+                    with connect() as db: db.execute("INSERT INTO approvals(id,thread_id,turn_id,tool_name,arguments,status,created_at,tool_call_id,resumable) VALUES(?,?,?,?,?,'pending',?,?,1)", (approval_id,thread_id,turn_id,name,json.dumps(arguments,ensure_ascii=False),now(),call["id"]))
+                    state.update({"pending_tool_calls":pending[index:],"next_input":outputs}); save_agent_run(agent,state,"waiting",thread_id,turn_id,current_task_id,previous_response_id); _save_checkpoint(thread_id,turn_id,agent["id"],state)
+                    await _emit(events,on_event,"approval_required",name=name,status="pending",approval_id=approval_id,turn_id=turn_id)
+                    return {"status":"waiting_for_approval","content":"","events":events,"usage":total_usage,"sources":_public_sources(sources),"approval_id":approval_id}
+            outputs.append({"type":"function_call_output","call_id":call["id"],"output":json.dumps(result,ensure_ascii=False,default=str)[:100000]})
+            await _emit(events,on_event,"tool_completed",name=name)
+        pending = []; next_input = outputs; round_number += 1
+        state.update({"pending_tool_calls":[],"next_input":next_input,"round":round_number,"events":events,"usage":total_usage}); save_agent_run(agent,state,thread_id=thread_id,turn_id=turn_id,task_id=current_task_id,response_id=previous_response_id)
+    raise RuntimeError("达到最大工具调用轮次")
 
 
 async def run_agent(agent, history, user_message, on_event=None, streaming=False, thread_id=None, turn_id=None, resume_state=None, approval_decision=None, depth=0, current_task_id=None):
@@ -477,6 +772,8 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
             raise ValueError("智能体没有有效的模型提供方")
         selected_model = agent.get("model") or provider.get("default_model")
         candidates = [(provider, selected_model)]
+    if uses_responses(provider) or (resume_state or {}).get("mode") == "responses":
+        return await _run_responses_agent(agent, provider, selected_model, candidates, history, user_message, on_event, streaming, thread_id, turn_id, resume_state, approval_decision, depth, current_task_id)
     runtime_index = 0
     tools, routes = await tool_specs(agent)
     pending_tool_calls = None
@@ -506,9 +803,12 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
                 await _emit(events, on_event, "knowledge_failed", reason=type(exc).__name__)
         messages.append({"role": "user", "content": user_message})
 
+    save_agent_run(agent, {"messages":messages,"pending_tool_calls":pending_tool_calls or [],"events":events,"usage":total_usage,"sources":sources,"round":round_number,"user_message":user_message,"model":selected_model,"provider_id":provider.get("id")}, thread_id=thread_id, turn_id=turn_id, task_id=current_task_id)
+
     max_rounds = int(agent.get("max_tool_rounds", 6))
     while round_number <= max_rounds:
         if pending_tool_calls is None:
+            messages = compact_chat_messages(messages, agent.get("chat_context_chars", 120000), agent.get("chat_keep_recent", 16))
             if streaming:
                 response, usage, content_parts = {"role": "assistant"}, {}, []
                 while True:
@@ -563,12 +863,14 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
                     )
                 await _emit(events, on_event, "assistant_status", status="completed")
                 await _emit(events, on_event, "turn_completed", usage=total_usage)
+                save_agent_run(agent, {"messages":messages,"pending_tool_calls":[],"events":events,"usage":total_usage,"sources":sources,"round":round_number,"user_message":user_message,"model":selected_model,"provider_id":provider.get("id")}, "completed", thread_id, turn_id, current_task_id)
                 return {
                     "status": "completed", "content": content, "events": events, "usage": total_usage,
                     "sources": _public_sources(sources),
                     "runtime": {"provider": provider.get("name", provider.get("type", "unknown")), "provider_type": provider.get("type", "openai-compatible"), "model": selected_model},
                 }
             messages.append(response)
+            save_agent_run(agent, {"messages":messages,"pending_tool_calls":pending_tool_calls,"events":events,"usage":total_usage,"sources":sources,"round":round_number,"user_message":user_message,"model":selected_model,"provider_id":provider.get("id")}, thread_id=thread_id, turn_id=turn_id, task_id=current_task_id)
 
         while pending_tool_calls:
             call = pending_tool_calls[0]
@@ -583,7 +885,7 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
                     approval_decision = None
                     await _emit(events, on_event, "tool_failed", name=name, reason="approval_denied")
                 else:
-                    result = await execute_tool(name, arguments, agent, routes, approved=approved, thread_id=thread_id, turn_id=turn_id, depth=depth, current_task_id=current_task_id)
+                    result = await execute_tool_once(call.get("id"), name, arguments, agent, routes, approved=approved, thread_id=thread_id, turn_id=turn_id, depth=depth, current_task_id=current_task_id)
                     if approved:
                         approval_decision = None
                     if isinstance(result, dict) and isinstance(result.get("error"), dict) and result["error"].get("code") == "approval_required":
@@ -601,6 +903,7 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
                                 (approval_id, thread_id, turn_id, name, json.dumps(arguments, ensure_ascii=False), now(), call["id"]),
                             )
                         _save_checkpoint(thread_id, turn_id, agent["id"], state)
+                        save_agent_run(agent, state, "waiting", thread_id, turn_id, current_task_id)
                         await _emit(events, on_event, "approval_required", name=name, status="pending", approval_id=approval_id, turn_id=turn_id)
                         return {
                             "status": "waiting_for_approval", "content": response.get("content", "") if 'response' in locals() else "",
@@ -614,6 +917,7 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
                 await _emit(events, on_event, "tool_failed", name=name, reason=type(exc).__name__)
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": output[:50000]})
             pending_tool_calls.pop(0)
+            save_agent_run(agent, {"messages":messages,"pending_tool_calls":pending_tool_calls,"events":events,"usage":total_usage,"sources":sources,"round":round_number,"user_message":user_message,"model":selected_model,"provider_id":provider.get("id")}, thread_id=thread_id, turn_id=turn_id, task_id=current_task_id)
         pending_tool_calls = None
         round_number += 1
     raise RuntimeError("达到最大工具调用轮次")

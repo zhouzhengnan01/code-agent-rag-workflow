@@ -123,6 +123,37 @@ def init_db():
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_subagents_parent ON subagent_runs(parent_thread_id, parent_turn_id, created_at);
+            CREATE TABLE IF NOT EXISTS agent_runs (
+              id TEXT PRIMARY KEY, task_id TEXT, thread_id TEXT, turn_id TEXT,
+              agent_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'running',
+              state TEXT NOT NULL DEFAULT '{}', response_id TEXT, worktree_id TEXT,
+              error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_runs_resume ON agent_runs(status, updated_at);
+            CREATE TABLE IF NOT EXISTS tool_executions (
+              call_id TEXT PRIMARY KEY, turn_id TEXT, tool_name TEXT NOT NULL,
+              arguments TEXT NOT NULL, status TEXT NOT NULL, result TEXT, error TEXT,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS worktrees (
+              id TEXT PRIMARY KEY, task_id TEXT, thread_id TEXT, path TEXT NOT NULL UNIQUE,
+              branch TEXT, base_ref TEXT, status TEXT NOT NULL DEFAULT 'active',
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS code_files (
+              workspace TEXT NOT NULL, path TEXT NOT NULL, language TEXT, digest TEXT NOT NULL,
+              indexed_at INTEGER NOT NULL, PRIMARY KEY(workspace,path)
+            );
+            CREATE TABLE IF NOT EXISTS code_symbols (
+              workspace TEXT NOT NULL, path TEXT NOT NULL, name TEXT NOT NULL,
+              qualified_name TEXT NOT NULL, kind TEXT NOT NULL, line INTEGER NOT NULL, end_line INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(workspace,name);
+            CREATE TABLE IF NOT EXISTS code_edges (
+              workspace TEXT NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL,
+              source TEXT NOT NULL, target TEXT NOT NULL, line INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_edges_target ON code_edges(workspace,kind,target);
             """
         )
         db.execute("""CREATE TABLE IF NOT EXISTS knowledge_documents (
@@ -149,6 +180,14 @@ def init_db():
             db.execute("ALTER TABLE workflow_runs ADD COLUMN state TEXT NOT NULL DEFAULT '{}'")
         if "error" not in workflow_columns:
             db.execute("ALTER TABLE workflow_runs ADD COLUMN error TEXT")
+        memory_columns = {row["name"] for row in db.execute("PRAGMA table_info(memories)")}
+        for name, definition in {
+            "embedding": "TEXT NOT NULL DEFAULT '[]'", "confidence": "REAL NOT NULL DEFAULT 0.7",
+            "status": "TEXT NOT NULL DEFAULT 'confirmed'", "expires_at": "INTEGER",
+            "supersedes_id": "TEXT", "conflict_with": "TEXT",
+        }.items():
+            if name not in memory_columns:
+                db.execute(f"ALTER TABLE memories ADD COLUMN {name} {definition}")
         db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document ON knowledge_chunks(document_id)")
 
 

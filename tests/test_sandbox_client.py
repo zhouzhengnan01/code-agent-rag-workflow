@@ -74,7 +74,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
                 {'allow_shell': True, 'auto_approve': True, 'sandbox_mode': 'read-only'},
                 {'run_shell': ('builtin', None)})
             self.assertEqual(result['output'], 'ok')
-            run.assert_awaited_once_with('id', 'read-only')
+            run.assert_awaited_once_with('id', 'read-only', '.')
             with self.assertRaises(PermissionError):
                 await agent.execute_tool('run_shell', {'command': 'id'},
                     {'allow_shell': True, 'auto_approve': True, 'sandbox_mode': 'danger-full-access'},
@@ -85,8 +85,9 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(agent, 'run_command', new_callable=AsyncMock) as run:
             run.return_value = {'exit_code': 0, 'output': ''}
             await agent._run_git(['diff'])
-            command, mode = run.call_args.args
+            command, mode, cwd = run.call_args.args
             self.assertEqual(mode, 'read-only')
+            self.assertEqual(cwd, '.')
             self.assertIn('--no-ext-diff', command)
             self.assertIn('--no-textconv', command)
             self.assertIn('core.hooksPath=/dev/null', command)

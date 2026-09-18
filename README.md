@@ -5,16 +5,17 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 ## 已实现
 
 - 智能体：通用/编码/审查/研究/运维角色模板；系统提示词、技能/知识库/MCP/内置工具组合；逐工具 `allow`/`ask`/`deny` 策略
-- 模型接入：任意 OpenAI-compatible `chat/completions` 服务；按正则/关键词动态路由模型，并在连接或模型错误时依次回退
-- 技能：在线创建、启停、编辑、删除，以及导入 `SKILL.md`
+- 模型接入：OpenAI-compatible Chat Completions 与原生 Responses API；支持持久 `previous_response_id`、reasoning effort、自动/本地上下文压缩、并行与异步函数工具声明、动态路由和故障回退
+- 技能：在线创建、启停、编辑、删除；安全导入单文件 `SKILL.md` 或带 `scripts/`、`assets/`、`references/`、`skill.json` 的 ZIP 包，并校验 SemVer、依赖声明和内容完整性
 - MCP：stdio 与 Streamable HTTP JSON-RPC transport，支持版本/能力协商、Session ID、JSON/SSE、工具、资源/资源模板、提示词、补全、订阅、日志级别、分页，以及 stdio roots 反向请求
 - RAG 知识库：可选择本地 SQLite + Milvus 混合检索，或通过独立 RAGFlow 服务使用复杂文档解析、全文/向量混合召回、重排与来源引用；旧知识库保持本地后端，不会被默认配置自动迁移
 - 工作流：input、prompt、agent、knowledge、mcp、condition、parallel、output 节点；并行就绪队列、条件边、节点超时/重试、检查点恢复、后台运行和节点 trace
 - Workbench：仪表盘、对话、角色/智能体团队、任务队列、长期记忆、各资源管理、工作流 JSON 设计器、设置
-- 工具执行：知识检索、代码搜索、目录读取、原子文件读写、精确替换/unified diff、测试、Git 状态/Diff/Log/分支/暂存/提交/Review、备份恢复；写操作受沙箱、审批与工具策略共同控制
+- 工具执行：知识检索、代码搜索、AST/符号/引用/调用图/依赖图、LSP 3.18、目录读取、原子文件读写、测试、完整 Git 远端/merge 工作流、GitHub PR/CI/Review、Playwright 浏览器/DOM/截图；写操作受沙箱、审批与工具策略共同控制
 - 后台任务：SQLite 持久队列、并发 worker、失败退避重试、取消、事件历史、进程重启后恢复未完成任务；智能体和工作流均可后台执行
 - 多智能体：可配置团队、协调智能体、成员白名单、并发和深度限制；主智能体通过 `delegate_task` 并行委派并用 `task_status` 汇总
-- 长期记忆：用户、项目和线程三级作用域，重要度、去重、检索注入和可选的自动经验沉淀
+- 长期记忆：用户、项目和线程三级作用域，哈希向量+词法混合检索、可信度、冲突待确认、确认/拒绝、过期淘汰和自动经验沉淀
+- 任务隔离与恢复：Git 工作区为每个任务/会话创建独立 worktree；模型轮次、Responses ID 和工具结果持续检查点化，进程重启自动续跑，副作用工具不会在状态不明时自动重放
 - Execution safety: container-backed `read-only` / `workspace-write` Shell and read-only Git; `danger-full-access` Shell is rejected. Thread locks, approval records, atomic file writes, and backups remain unchanged.
 - CLI：`python -m backend.app.cli exec` 支持非交互执行、stdin 和 JSONL 事件输出
 - 持久化：SQLite WAL 保存业务数据，Milvus 保存知识向量，记录线程消息、知识来源、工具事件、token usage 与工作流运行记录
@@ -89,13 +90,13 @@ Install any other trusted dependencies into a custom image at build time and set
 - Only the broker mounts `/var/run/docker.sock`. **Never mount the socket in the main service or execution containers**, and do not configure a remote Docker TCP endpoint. The broker receives only explicitly listed control settings, not the application's `.env` or provider keys.
 - The broker connects only to the isolated, internal `sandbox-control` network and has no published port. The main service joins both `default` and `sandbox-control`. `/health` and `/tasks` on broker port 8090 require `Authorization: Bearer <CODEZZN_SANDBOX_TOKEN>`.
 - The broker resolves the `codezzn` container's `/workspace` mount using Docker inspect; it does not guess a host workspace path. Keep `CODEZZN_SANDBOX_WORKSPACE_CONTAINER` aligned with the main container name when customizing deployment. Do not mount the workspace into the broker itself.
-- Each Shell or Git tool invocation gets a **separate execution container**, not one container for a whole Turn. Execution runs as UID/GID `10001:10001` in `/workspace`, without network, inherited application environment secrets, or Docker socket. Defaults are 1 CPU, 512 MiB memory, 64 PIDs, and a 60-second timeout, configurable with `CODEZZN_SANDBOX_CPUS`, `CODEZZN_SANDBOX_MEMORY_MB`, `CODEZZN_SANDBOX_PIDS`, and `CODEZZN_SANDBOX_TIMEOUT`.
-- Only Shell/Git execution is container-sandboxed. MCP servers (including native stdio processes) and native Python file tools are **out of scope** and still execute in the main application's trust boundary. Files containing secrets under the shared workspace remain readable to allowed tools; environment isolation does not hide workspace files.
-- The workspace is shared between invocations, agents, and threads. Writes persist in `workspace-write`; this is **not branch, tenant, or per-Turn filesystem isolation**. Coordinate concurrent edits separately.
+- Each Shell or Git tool invocation gets a **separate execution container**, not one container for a whole Turn. Execution runs as UID/GID `10001:10001` in the task worktree, without inherited application secrets or Docker socket. Network is off except explicitly approved Git remote calls when `CODEZZN_SANDBOX_GIT_NETWORK=true`. Defaults are 1 CPU, 512 MiB memory, 64 PIDs, and a 60-second timeout.
+- Only Shell/Git execution is container-sandboxed. MCP/LSP servers, Playwright, and native Python file tools are **out of scope** and execute in the main application's trust boundary. Browser sessions can reach networks available to the main container; enable them only for trusted agents.
+- When `/workspace` is a Git work tree, each persistent task or conversation receives an independent branch and `git worktree` below `.codezzn-worktrees/`. A non-Git workspace cannot provide branch isolation and falls back to the base workspace.
 
 ### Tool permissions and Linux bind mounts
 
-`run_shell` requires both `allow_shell=true` and approval/tool-policy permission, in either `read-only` or `workspace-write`. Read-only Shell **does not require enabling `danger-full-access`**; that mode is rejected rather than executed on the host. Git status/diff/log/review always use `read-only`, disable hooks and fsmonitor, and disable external diffs/text conversion. Review refs reject option-like or unsupported revision input. `apply_patch` supports exact `old`/`new` replacement and unified diff; both create recoverable backups and remain subject to write approval.
+`run_shell` requires both `allow_shell=true` and approval/tool-policy permission, in either `read-only` or `workspace-write`. Read-only Shell **does not require enabling `danger-full-access`**; that mode is rejected rather than executed on the host. Git status/diff/log/review always use `read-only`, disable hooks and fsmonitor, and disable external diffs/text conversion. Clone/fetch/push additionally require `CODEZZN_SANDBOX_GIT_NETWORK=true` and approval. Review refs reject option-like or unsupported revision input. `apply_patch` supports exact `old`/`new` replacement and unified diff; both create recoverable backups and remain subject to write approval.
 
 On Linux, the execution UID/GID is always `10001:10001`, independent of `CODEZZN_UID`/`CODEZZN_GID` for the main service. Provision `./workspace` ownership, shared group permissions, or ACLs so that both identities can traverse/read it, and can write when workspace-write is intended. An empty root-owned bind directory may otherwise produce `Permission denied`. Aligning the main user and workspace owner to UID/GID 10001 is one option; keep `./data` writable by the main user as well. Do not solve this by enabling full-access mode, making the workspace world-writable, or running execution containers as root. Read-only mode still needs filesystem read/traverse permissions and rejects workspace writes; tests that emit caches must use `/tmp` or workspace-write.
 
@@ -235,17 +236,27 @@ HTTP：
 
 持久任务为本机 SQLite 的 at-least-once 执行语义。进程异常退出时，运行中任务在下次启动重新排队；带外部副作用的自定义工具必须自行保证幂等。
 
+### 新增编码执行能力
+
+- Responses API：在“模型接入”把 API 模式设为 `Responses API`，再设置默认 reasoning effort、压缩阈值和异步工具声明。系统保存 `response_id` 并用 `previous_response_id` 延续推理；Chat Completions 提供方仍使用本地有界压缩。
+- 代码智能：给智能体启用 `code_index`、`code_symbols`、`find_references`、`call_graph`、`dependency_graph`。Python 使用 AST；其他语言建议在“LSP 服务”添加已安装的 language server，并启用 `lsp_request`。
+- GitHub：在 `.env` 配置 `CODEZZN_GITHUB_TOKEN`；给智能体启用 Git 远端和 GitHub 工具。所有写操作默认审批，clone/fetch/push 还要求 sandbox overlay 与 `CODEZZN_SANDBOX_GIT_NETWORK=true`。
+- Skill 包：上传 ZIP 时包内必须只有一个 `SKILL.md`；可带 `skill.json`，其中 `version` 使用 SemVer，`dependencies` 为字符串/对象数组。脚本只能位于 `scripts/` 且目前仅执行 `.py`/`.sh`；依赖不会在运行期自动安装。
+- Browser/Computer Use：给智能体启用 `browser` 工具和“允许浏览器操作”。支持 DOM inspect、selector/坐标点击、鼠标移动、滚动、输入、键盘、截图和受审批的页面脚本；截图写入任务工作区并可通过 `/api/artifacts?path=...` 读取。
+- Worktree：当 `/workspace` 本身是 Git 仓库时自动生效；可用 `GET /api/worktrees` 查看，用 `DELETE /api/worktrees/{id}` 清理。清理前确认分支内容已经提交或推送。
+
 ## API 概览
 
 - `/api/resources/agents`、`/api/resources/agent_teams`、`/api/resources/providers`、`/api/resources/skills`、`/api/resources/mcp_servers`、`/api/resources/knowledge`、`/api/resources/workflows`：CRUD
 - `GET /api/agent-templates`：角色模板
-- `POST /api/skills/import`：导入 `SKILL.md`
+- `POST /api/skills/import`：导入 `SKILL.md` 或完整 ZIP Skill 包
 - `POST /api/knowledge/{id}/documents`、`POST /api/knowledge/search`
 - `POST /api/mcp_servers/{id}/test`、resources/prompts 相关 MCP API
 - `GET /api/sandbox/status`: authenticated broker health and task states
 - `POST /api/workflows/{id}/run`、`POST /api/workflows/{id}/enqueue`、`GET /api/workflow-runs`
 - `POST /api/agent-tasks`、`GET/DELETE /api/tasks/{id}`、`GET /api/subagents`
 - `GET/POST/DELETE /api/memories`、`POST /api/memories/search`
+- `POST /api/memories/{id}/confirm`、`GET/DELETE /api/worktrees/{id}`、`POST /api/code-index/rebuild`、`GET /api/code-index/symbols|references|graph`、`GET /api/artifacts`
 - `POST /api/threads`、`GET /api/threads/{id}`、`POST /api/threads/{id}/turns`、`POST /api/threads/{id}/turns/stream`
 - `POST /api/threads/{id}/fork`、`POST /api/threads/{id}/resume`
 - `GET /api/threads/{id}/approvals`、`POST /api/approvals/{approval_id}`、`GET /api/threads/{id}/events`
@@ -254,7 +265,7 @@ HTTP：
 
 ## 当前边界
 
-This is a runnable single-node platform, not a pixel-for-pixel or protocol-equivalent replica of OpenAI Codex Desktop. The optional container sandbox covers Shell/Git only and is intended for a trusted single-machine deployment, not hostile multitenancy. MCP sampling/elicitation and OAuth discovery, tenant identity/RBAC, encrypted secret storage, per-task Git worktrees, remote/distributed workers, realtime audio/video, and a signed plugin marketplace remain unimplemented. SQLite queue recovery is local at-least-once execution, not a distributed exactly-once scheduler. Further production hardening should prioritize tenant boundaries, Vault/KMS, idempotency, isolated native/MCP tools, and per-task worktrees.
+This is a runnable single-node platform, not a protocol-equivalent replica of OpenAI Codex Desktop. The optional container sandbox covers Shell/Git only and is intended for a trusted single-machine deployment, not hostile multitenancy. AST support is exact for Python and heuristic for other languages unless an external LSP server is configured. Skill dependencies are declared and exposed but deliberately not installed at runtime; bake trusted dependencies into images. GitHub integration currently targets GitHub REST and needs `CODEZZN_GITHUB_TOKEN`. MCP sampling/elicitation and OAuth discovery, tenant identity/RBAC, encrypted secret storage, remote/distributed workers, realtime audio/video, and a signed plugin marketplace remain outside this release. SQLite recovery is local at-least-once execution; the tool ledger prevents automatic replay of ambiguous side effects but is not a distributed exactly-once transaction system.
 
 ## 许可证说明
 

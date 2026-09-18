@@ -7,6 +7,7 @@ const pages = [
   { id: 'providers', label: '模型接入', short: 'MODEL' },
   { id: 'skills', label: '技能', short: 'SKILL' },
   { id: 'mcp_servers', label: 'MCP 服务', short: 'MCP' },
+  { id: 'lsp_servers', label: 'LSP 服务', short: 'LSP' },
   { id: 'knowledge', label: '知识库', short: 'RAG' },
   { id: 'memories', label: '记忆', short: 'MEM' },
   { id: 'workflows', label: '工作流', short: 'FLOW' },
@@ -14,7 +15,7 @@ const pages = [
 
 const navGroups = [
   ['工作区', ['dashboard', 'chat', 'tasks']],
-  ['构建', ['agents', 'agent_teams', 'providers', 'skills', 'mcp_servers', 'knowledge', 'memories']],
+  ['构建', ['agents', 'agent_teams', 'providers', 'skills', 'mcp_servers', 'lsp_servers', 'knowledge', 'memories']],
   ['编排', ['workflows']],
 ];
 
@@ -24,6 +25,7 @@ const labels = {
   providers: ['模型接入', '管理 OpenAI-compatible 推理端点和模型凭据。'],
   skills: ['技能', '维护可插拔的 SKILL.md 指令包。'],
   mcp_servers: ['MCP 服务', '连接外部工具、服务和数据源。'],
+  lsp_servers: ['LSP 服务', '连接 pyright、typescript-language-server、gopls、rust-analyzer 等语言服务器。'],
   knowledge: ['知识库', '上传文档，构建可检索的 RAG 上下文。'],
   workflows: ['工作流', '把智能体和工具编排成可重复运行的流程。'],
 };
@@ -327,9 +329,9 @@ async function memoriesPage() {
       <div class="collection-toolbar"><div class="collection-count"><strong>${result.data.length}</strong><span>记忆条目</span></div><label class="filter-control"><span>筛选</span><input type="search" oninput="filterResources(this.value)" placeholder="搜索内容或范围"></label></div>
       ${result.data.length ? `<div class="resource-list" id="resourceList">${result.data.map(memory => `
         <article class="resource-record" data-search="${esc(`${memory.scope} ${memory.scope_id} ${memory.kind} ${memory.content}`.toLowerCase())}">
-          <div class="record-identity"><span class="state-badge">${esc(memory.scope)}</span><div><h2>${esc(memory.kind)}</h2><p>${esc(memory.content)}</p></div></div>
-          <div class="record-facts"><span>${esc(memory.scope_id)}</span><span>重要度 ${Number(memory.importance).toFixed(2)}</span><span>${timeText(memory.updated_at)}</span></div>
-          <div class="record-actions"><button class="button button-danger button-small" type="button" onclick="removeMemory('${memory.id}')">删除</button></div>
+          <div class="record-identity"><span class="state-badge ${memory.status !== 'confirmed' ? 'is-off' : ''}">${esc(memory.status || memory.scope)}</span><div><h2>${esc(memory.kind)}</h2><p>${esc(memory.content)}</p></div></div>
+          <div class="record-facts"><span>${esc(memory.scope)}/${esc(memory.scope_id)}</span><span>重要度 ${Number(memory.importance).toFixed(2)}</span><span>可信度 ${Number(memory.confidence ?? .7).toFixed(2)}</span>${memory.conflict_with ? '<span>检测到冲突</span>' : ''}${memory.expires_at ? `<span>过期 ${timeText(memory.expires_at)}</span>` : ''}</div>
+          <div class="record-actions">${memory.status === 'pending' ? `<button class="button button-primary button-small" type="button" onclick="confirmMemory('${memory.id}',true,${Boolean(memory.conflict_with)})">确认</button><button class="button button-quiet button-small" type="button" onclick="confirmMemory('${memory.id}',false,false)">拒绝</button>` : ''}<button class="button button-danger button-small" type="button" onclick="removeMemory('${memory.id}')">删除</button></div>
         </article>`).join('')}</div>` : '<div class="state-page"><span class="state-code">长期记忆</span><h2>还没有记忆</h2><p>可以手动新增，也可以在智能体中启用自动经验沉淀。</p></div>'}
     </div>`;
 }
@@ -338,12 +340,17 @@ function createMemory() {
   modal('新增长期记忆', `<form id="memoryForm" class="form-layout">
     ${selectField('范围', 'scope', '<option value="project">项目</option><option value="user">用户</option><option value="thread">会话</option>')}
     ${field('范围 ID', 'scope_id', 'default')}${field('类型', 'kind', 'fact')}
-    ${field('重要度（0-1）', 'importance', 0.6, 'number')}${field('内容', 'content', '', 'textarea', true)}
+    ${field('重要度（0-1）', 'importance', 0.6, 'number')}${field('可信度（0-1）', 'confidence', 0.8, 'number')}${field('过期时间戳（可空）', 'expires_at', '')}${field('内容', 'content', '', 'textarea', true)}
   </form>`, async () => {
-    const data = formData($('#memoryForm')); data.importance = Number(data.importance);
+    const data = formData($('#memoryForm')); data.importance = Number(data.importance); data.confidence = Number(data.confidence); data.expires_at = data.expires_at ? Number(data.expires_at) : null;
     try { await api('/api/memories', { method: 'POST', body: JSON.stringify(data) }); closeModal(); toast('记忆已保存'); if (state.page === 'memories') loadPage(); }
     catch (error) { toast(error.message, true); }
   }, false, '保存记忆');
+}
+
+async function confirmMemory(id, accept, supersede) {
+  try { await api(`/api/memories/${id}/confirm`, { method:'POST', body:JSON.stringify({accept, supersede_conflict:supersede}) }); toast(accept ? '记忆已确认' : '记忆已拒绝'); loadPage(); }
+  catch(error){ toast(error.message, true); }
 }
 
 async function removeMemory(id) {
@@ -360,7 +367,7 @@ async function resources(kind) {
       <header class="collection-header">
         <div><span class="overline">能力管理</span><h1>${labels[kind][0]}</h1><p>${labels[kind][1]}</p></div>
         <div class="header-actions">
-          ${kind === 'skills' ? '<button class="button button-quiet" type="button" onclick="importSkill()">导入 SKILL.md</button>' : ''}
+          ${kind === 'skills' ? '<button class="button button-quiet" type="button" onclick="importSkill()">导入 Skill 包</button>' : ''}
           <button class="button button-primary" type="button" onclick="editResource('${kind}')">新建${labels[kind][0]}</button>
         </div>
       </header>
@@ -384,6 +391,7 @@ function resourceCard(kind, item) {
   if (kind === 'providers') facts = [item.type === 'bailian' ? '阿里云百炼' : 'OpenAI compatible', `${(item.models || []).length} 个模型`, item.api_key_configured ? '密钥已配置' : '等待密钥'];
   if (kind === 'knowledge') facts = [`${item.document_count || 0} 个文档`, `${item.chunk_count || 0} 个片段`, item.backend === 'ragflow' ? 'RAGFlow' : (item.embedding_model || '本地 Milvus')];
   if (kind === 'mcp_servers') facts = [(item.transport || 'stdio').toUpperCase()];
+  if (kind === 'lsp_servers') facts = [item.command || '未配置命令'];
   if (kind === 'workflows') facts = [`${(item.nodes || []).length} 个节点`];
   if (kind === 'skills') facts = ['SKILL.md'];
   const searchText = `${item.name} ${description} ${facts.join(' ')}`.toLowerCase();
@@ -416,6 +424,7 @@ async function editResource(kind, id) {
   if (kind === 'providers') return providerForm(item || {});
   if (kind === 'skills') return skillForm(item || {});
   if (kind === 'mcp_servers') return mcpForm(item || {});
+  if (kind === 'lsp_servers') return lspForm(item || {});
   if (kind === 'knowledge') return knowledgeForm(item || {});
   if (kind === 'agents') return agentForm(item || {});
   if (kind === 'agent_teams') return agentTeamForm(item || {});
@@ -451,11 +460,18 @@ async function providerForm(item) {
       ${field('模型（逗号分隔）', 'models', (item.models || []).join(', '), 'text', true, '例如 qwen3.7-plus。')}
       ${field('默认模型', 'default_model', item.default_model || 'gpt-4.1-mini')}
       ${field('超时（秒）', 'timeout', item.timeout || 120, 'number')}
+      ${selectField('API 模式', 'api_mode', `<option value="chat_completions" ${(item.api_mode || 'chat_completions') === 'chat_completions' ? 'selected' : ''}>Chat Completions 兼容模式</option><option value="responses" ${item.api_mode === 'responses' ? 'selected' : ''}>Responses API</option>`, true, '只有端点真实支持 /responses 时才选择 Responses API。')}
+      ${selectField('默认推理强度', 'reasoning_effort', ['low','medium','high','xhigh'].map(value => `<option value="${value}" ${(item.reasoning_effort || 'medium') === value ? 'selected' : ''}>${value}</option>`).join(''))}
+      ${field('压缩阈值（token）', 'compact_threshold', item.compact_threshold || 120000, 'number')}
+      ${toggleField('自动上下文压缩', 'context_compaction', item.context_compaction !== false)}${toggleField('异步工具声明', 'async_tools', item.async_tools === true)}
     </form>`, () => {
       const data = formData($('#editForm'));
       delete data.preset;
       data.models = data.models.split(',').map(value => value.trim()).filter(Boolean);
       data.timeout = Number(data.timeout);
+      data.compact_threshold = Number(data.compact_threshold);
+      data.context_compaction = $('#editForm [name=context_compaction]').checked;
+      data.async_tools = $('#editForm [name=async_tools]').checked;
       save('providers', item.id, data);
     });
   const form = $('#editForm');
@@ -557,6 +573,21 @@ function choiceGroup(title, name, items, selected = []) {
     </div>`;
 }
 
+function lspForm(item) {
+  modal(item.id ? '编辑 LSP 服务' : '新建 LSP 服务', `
+    <form id="editForm" class="form-layout">
+      ${field('名称', 'name', item.name)}${field('语言', 'language', item.language || 'python')}
+      ${field('启动命令', 'command', item.command || 'pyright-langserver')}
+      ${field('参数 JSON 数组', 'args', JSON.stringify(item.args || ['--stdio']), 'textarea', true)}
+      ${toggleField('启用服务', 'enabled', item.enabled !== false, true)}
+    </form>`, () => {
+      try {
+        const data = formData($('#editForm')); data.args = JSON.parse(data.args || '[]'); data.enabled = $('#editForm [name=enabled]').checked;
+        save('lsp_servers', item.id, data);
+      } catch (error) { toast(`JSON 格式错误：${error.message}`, true); }
+    });
+}
+
 async function agentTeamForm(item) {
   const agents = await load('agents');
   modal(item.id ? '编辑智能体团队' : '新建智能体团队', `
@@ -585,8 +616,8 @@ async function agentForm(item) {
   const unsupportedSandbox = !sandboxModes.some(mode => mode.value === selectedSandbox);
   const sandboxOptions = (unsupportedSandbox ? '<option value="" selected disabled>旧配置不受支持，请重新选择</option>' : '')
     + sandboxModes.map(mode => `<option value="${mode.value}" ${selectedSandbox === mode.value ? 'selected' : ''}>${mode.label}</option>`).join('');
-  const [providers, skills, knowledge, mcps, agents, teams, templateResult] = await Promise.all([
-    ...['providers', 'skills', 'knowledge', 'mcp_servers', 'agents', 'agent_teams'].map(load),
+  const [providers, skills, knowledge, mcps, agents, teams, lsps, templateResult] = await Promise.all([
+    ...['providers', 'skills', 'knowledge', 'mcp_servers', 'agents', 'agent_teams', 'lsp_servers'].map(load),
     api('/api/agent-templates'),
   ]);
   const templates = templateResult.data;
@@ -596,8 +627,14 @@ async function agentForm(item) {
     { id: 'restore_file', name: '恢复文件' }, { id: 'run_shell', name: 'Shell' }, { id: 'run_tests', name: '运行测试' },
     { id: 'git_status', name: 'Git 状态' }, { id: 'git_diff', name: 'Git 差异' }, { id: 'git_log', name: 'Git 日志' },
     { id: 'git_branch', name: 'Git 分支' }, { id: 'git_stage', name: 'Git 暂存' }, { id: 'git_commit', name: 'Git 提交' }, { id: 'review', name: '代码审查' },
+    { id: 'code_index', name: '代码索引' }, { id: 'code_symbols', name: '符号查询' }, { id: 'find_references', name: '引用查找' },
+    { id: 'call_graph', name: '调用图' }, { id: 'dependency_graph', name: '依赖图' }, { id: 'lsp_request', name: 'LSP 查询' },
+    { id: 'git_clone', name: 'Git Clone' }, { id: 'git_fetch', name: 'Git Fetch' }, { id: 'git_push', name: 'Git Push' },
+    { id: 'git_merge', name: 'Git Merge' }, { id: 'git_merge_abort', name: '中止 Merge' },
+    { id: 'github_create_pr', name: '创建 PR' }, { id: 'github_ci_status', name: 'CI 状态' }, { id: 'github_review_comment', name: 'PR Review 评论' },
+    { id: 'skill_read_file', name: '读取 Skill 包文件' }, { id: 'skill_run_script', name: '执行 Skill 脚本' }, { id: 'browser', name: '浏览器 / 截图' },
   ];
-  const defaultPolicy = { default: 'inherit', tools: { write_file: 'ask', apply_patch: 'ask', restore_file: 'ask', run_shell: 'ask', run_tests: 'ask', git_branch: 'ask', git_stage: 'ask', git_commit: 'ask', 'mcp:*': 'ask' } };
+  const defaultPolicy = { default: 'inherit', tools: { write_file: 'ask', apply_patch: 'ask', restore_file: 'ask', run_shell: 'ask', run_tests: 'ask', git_branch: 'ask', git_stage: 'ask', git_commit: 'ask', git_clone: 'ask', git_fetch: 'ask', git_push: 'ask', git_merge: 'ask', git_merge_abort: 'ask', github_create_pr: 'ask', github_review_comment: 'ask', skill_run_script: 'ask', browser: 'ask', 'mcp:*': 'ask' } };
   modal(item.id ? '编辑智能体' : '新建智能体', `
     <form id="editForm" class="form-layout">
       <section class="form-section control-full"><header><h3>身份与模型</h3><p>定义智能体的职责和推理模型。</p></header></section>
@@ -610,10 +647,12 @@ async function agentForm(item) {
       ${field('故障回退模型 JSON', 'fallback_models', JSON.stringify(item.fallback_models || [], null, 2), 'textarea', true, '格式：[ { "provider_id": "...", "model": "..." } ]')}
       ${field('系统提示词', 'system_prompt', item.system_prompt || '你是一个可靠的智能体。', 'textarea', true)}
       ${field('Temperature', 'temperature', item.temperature ?? 0.2, 'number')}${field('最大工具轮次', 'max_tool_rounds', item.max_tool_rounds || 6, 'number')}
+      ${selectField('推理强度', 'reasoning_effort', ['low','medium','high','xhigh'].map(value => `<option value="${value}" ${(item.reasoning_effort || 'medium') === value ? 'selected' : ''}>${value}</option>`).join(''))}${toggleField('并行工具调用', 'parallel_tools', item.parallel_tools !== false)}
       <section class="form-section control-full"><header><h3>能力装配</h3><p>选择这个智能体可以访问的能力。</p></header></section>
       ${choiceGroup('技能', 'skill_ids', skills, item.skill_ids)}
       ${choiceGroup('知识库', 'knowledge_ids', knowledge, item.knowledge_ids)}
       ${choiceGroup('MCP 服务', 'mcp_server_ids', mcps, item.mcp_server_ids)}
+      ${choiceGroup('LSP 服务', 'lsp_server_ids', lsps, item.lsp_server_ids || [])}
       ${choiceGroup('内置工具', 'builtin_tools', tools, item.builtin_tools || [])}
       ${choiceGroup('可委派子智能体', 'subagent_ids', agents.filter(agent => agent.id !== item.id), item.subagent_ids || [])}
       ${field('最大并行子智能体', 'max_concurrent_subagents', item.max_concurrent_subagents || 4, 'number')}${field('最大委派深度', 'max_subagent_depth', item.max_subagent_depth || 2, 'number')}
@@ -622,8 +661,8 @@ async function agentForm(item) {
       ${field('工具策略 JSON', 'tool_policy', JSON.stringify(item.tool_policy || defaultPolicy, null, 2), 'textarea', true)}
       ${toggleField('启用长期记忆', 'memory_enabled', item.memory_enabled === true)}${toggleField('自动沉淀任务经验', 'auto_memory', item.auto_memory === true)}
       <section class="form-section control-full"><header><h3>执行权限与沙箱</h3><p>沙箱模式不会自动开启 Shell、自动批准或启动沙箱服务。</p></header></section>
-      ${selectField('沙箱模式', 'sandbox_mode', sandboxOptions, true, '只读：容器不能写入工作区；工作区可写：容器可修改工作区文件。两种模式均禁止联网，Git 查询始终只读。MCP 不受此沙箱模式隔离。旧配置未指定模式时，保存会设为只读；不支持 danger-full-access。')}
-      ${toggleField('允许执行 Shell', 'allow_shell', item.allow_shell === true)}${toggleField('自动批准写入、Shell 和 MCP', 'auto_approve', item.auto_approve === true)}${toggleField('启用智能体', 'enabled', item.enabled !== false)}
+      ${selectField('沙箱模式', 'sandbox_mode', sandboxOptions, true, '只读：容器不能写入工作区；工作区可写：容器可修改工作区文件。普通命令禁止联网；Git 远端操作需要单独启用 broker 的受控网络。MCP 和浏览器不受 Shell 沙箱隔离。旧配置未指定模式时，保存会设为只读；不支持 danger-full-access。')}
+      ${toggleField('允许执行 Shell', 'allow_shell', item.allow_shell === true)}${toggleField('允许浏览器操作', 'allow_browser', item.allow_browser === true)}${toggleField('自动批准写入、Shell 和 MCP', 'auto_approve', item.auto_approve === true)}${toggleField('启用智能体', 'enabled', item.enabled !== false)}
     </form>`, () => {
       const data = formData($('#editForm'));
       if (!sandboxModes.some(mode => mode.value === data.sandbox_mode)) {
@@ -631,7 +670,7 @@ async function agentForm(item) {
         return;
       }
       try {
-        for (const name of ['skill_ids', 'knowledge_ids', 'mcp_server_ids', 'builtin_tools', 'subagent_ids']) {
+        for (const name of ['skill_ids', 'knowledge_ids', 'mcp_server_ids', 'lsp_server_ids', 'builtin_tools', 'subagent_ids']) {
           data[name] = $$(`#editForm [name=${name}]:checked`).map(input => input.value);
         }
         data.model_routes = JSON.parse(data.model_routes || '[]');
@@ -642,9 +681,11 @@ async function agentForm(item) {
         data.max_concurrent_subagents = Number(data.max_concurrent_subagents);
         data.max_subagent_depth = Number(data.max_subagent_depth);
         data.allow_shell = $('#editForm [name=allow_shell]').checked;
+        data.allow_browser = $('#editForm [name=allow_browser]').checked;
         data.auto_approve = $('#editForm [name=auto_approve]').checked;
         data.memory_enabled = $('#editForm [name=memory_enabled]').checked;
         data.auto_memory = $('#editForm [name=auto_memory]').checked;
+        data.parallel_tools = $('#editForm [name=parallel_tools]').checked;
         data.enabled = $('#editForm [name=enabled]').checked;
         save('agents', item.id, data);
       } catch (error) { toast(`JSON 格式错误：${error.message}`, true); }
@@ -682,8 +723,8 @@ async function removeResource(kind, id) {
 }
 
 function importSkill() {
-  modal('导入 SKILL.md', `
-    <form id="uploadForm"><label class="drop-field"><input type="file" name="file" accept=".md,text/markdown" required><span class="drop-title">选择 Markdown 文件</span><span>文件会保存为可选择的技能配置。</span></label></form>`, async () => {
+  modal('导入 Skill 包', `
+    <form id="uploadForm"><label class="drop-field"><input type="file" name="file" accept=".md,.zip,text/markdown,application/zip" required><span class="drop-title">选择 SKILL.md 或 ZIP 包</span><span>ZIP 可包含 scripts/、references/、assets/ 和 skill.json；导入时会校验路径与完整性。</span></label></form>`, async () => {
       try {
         await api('/api/skills/import', { method: 'POST', body: new FormData($('#uploadForm')) });
         closeModal(); toast('技能已导入'); loadPage();

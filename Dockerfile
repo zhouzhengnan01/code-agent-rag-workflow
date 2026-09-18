@@ -3,7 +3,7 @@ FROM ${BASE_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
-    VIRTUAL_ENV=
+    VIRTUAL_ENV= PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 USER root
 WORKDIR /app
 RUN apt-get update \
@@ -12,6 +12,7 @@ RUN apt-get update \
 COPY requirements.txt .
 RUN pip install --timeout 300 --retries 10 --no-cache-dir -r requirements.txt
 RUN python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright \
     && rm -rf /var/lib/apt/lists/* /root/.cache/pip
 COPY backend ./backend
 COPY web ./web

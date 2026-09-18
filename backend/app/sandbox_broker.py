@@ -73,6 +73,7 @@ class Config:
         self.timeout = int(os.getenv("CODEZZN_SANDBOX_TIMEOUT", "60"))
         self.output_limit = 20000
         self.max_active = 4
+        self.allow_git_network = os.getenv("CODEZZN_SANDBOX_GIT_NETWORK", "false").lower() == "true"
         if not math.isfinite(self.cpus) or not 0.1 <= self.cpus <= 8:
             raise ValueError("CPUs must be between 0.1 and 8")
         if not 64 * 1024 * 1024 <= self.memory <= 8 * 1024**3 or not 8 <= self.pids <= 512 or not 1 <= self.timeout <= 600:
@@ -80,11 +81,11 @@ class Config:
         self.state = os.getenv("CODEZZN_SANDBOX_STATE", "/state/tasks.db")
 
 
-def container_spec(config, task_id, command, mode, mount, deadline, image_id):
+def container_spec(config, task_id, command, mode, mount, deadline, image_id, cwd=".", network=False):
     if mode not in ("read-only", "workspace-write"):
         raise ValueError("Only read-only and workspace-write modes are supported")
     return {
-        "Image": image_id, "User": "10001:10001", "WorkingDir": "/workspace",
+        "Image": image_id, "User": "10001:10001", "WorkingDir": "/workspace" + ("/" + cwd if cwd != "." else ""),
         # PID 1 owns an independent deadline even if the broker is stopped.
         "Entrypoint": ["python", "-c", "import subprocess,sys\ntry:\n r=subprocess.run(['/bin/sh','-c',sys.argv[2]],timeout=float(sys.argv[1]));sys.exit(r.returncode)\nexcept subprocess.TimeoutExpired:\n sys.exit(124)"],
         "Cmd": [str(max(0.1, deadline - time.time())), command], "Tty": False,
@@ -92,7 +93,7 @@ def container_spec(config, task_id, command, mode, mount, deadline, image_id):
         "Labels": {LABEL: config.instance, TASK_LABEL: task_id, DEADLINE_LABEL: str(deadline)},
         "HostConfig": {
             "Mounts": [{**mount, "Target": "/workspace", "ReadOnly": mode == "read-only"}],
-            "NetworkMode": "none", "ReadonlyRootfs": True, "Privileged": False,
+            "NetworkMode": "bridge" if network else "none", "ReadonlyRootfs": True, "Privileged": False,
             "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"],
             "NanoCpus": int(config.cpus * 1_000_000_000), "Memory": config.memory,
             "MemorySwap": config.memory, "PidsLimit": config.pids,
@@ -182,15 +183,21 @@ class Broker:
     def submit(self, payload):
         if self.stop.is_set():
             raise RuntimeError("Broker is stopping")
-        if set(payload) - {"id", "command", "mode"}:
+        if set(payload) - {"id", "command", "mode", "cwd", "network"}:
             raise ValueError("Unknown fields; container policy is administrator-controlled")
         task_id, command, mode = payload.get("id"), payload.get("command"), payload.get("mode", "read-only")
+        cwd = str(payload.get("cwd") or ".").replace("\\", "/")
+        network = bool(payload.get("network", False))
         if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
             raise ValueError("Invalid task id")
         if not isinstance(command, str) or not command.strip() or len(command.encode()) > 32768 or "\x00" in command:
             raise ValueError("Invalid command")
         if mode not in ("read-only", "workspace-write"):
             raise ValueError("Unsupported sandbox mode")
+        if network and not self.config.allow_git_network:
+            raise ValueError("Networked Git is disabled by CODEZZN_SANDBOX_GIT_NETWORK")
+        if cwd.startswith("/") or cwd == ".." or any(part in ("", "..") for part in cwd.split("/")):
+            if cwd != ".": raise ValueError("Invalid workspace cwd")
         with self.lock:
             # Fail closed while leftovers cannot be reconciled.
             if self.recovery_error:
@@ -207,7 +214,7 @@ class Broker:
                 db.execute("INSERT INTO tasks(id,name,status,mode,created,deadline) VALUES(?,?,?,?,?,?)",
                            (task_id, name, "queued", mode, now, now + self.config.timeout))
             cancel = threading.Event()
-            thread = threading.Thread(target=self.execute, args=(task_id, command, cancel), daemon=True)
+            thread = threading.Thread(target=self.execute, args=(task_id, command, cancel, cwd, network), daemon=True)
             self.running[task_id] = (thread, cancel)
             thread.start()
         return self.get(task_id)
@@ -221,7 +228,7 @@ class Broker:
                 return True
             raise
 
-    def execute(self, task_id, command, cancel):
+    def execute(self, task_id, command, cancel, cwd=".", network=False):
         row = self.get(task_id)
         status, error, output, exit_code = "failed", "", "", None
         try:
@@ -230,7 +237,7 @@ class Broker:
             if cancel.is_set():
                 status = "cancelled"
                 return
-            spec = container_spec(self.config, task_id, command, row["mode"], mount, row["deadline"], image_id)
+            spec = container_spec(self.config, task_id, command, row["mode"], mount, row["deadline"], image_id, cwd, network)
             created = self.docker.request("POST", "/containers/create?" + urlencode({"name": row["name"]}), spec)
             self.update(task_id, container_id=created["Id"])
             if created.get("Warnings"):
@@ -344,7 +351,7 @@ def handler_for(broker):
                 if self.command == "GET" and self.path == "/health":
                     broker.image()
                     broker.workspace()
-                    return self.respond(200, {"ready": broker.recovery_error is None, "recovery_error": broker.recovery_error, "tasks": broker.tasks(), "policy": {"network": "none", "user": "10001:10001", "cpus": broker.config.cpus, "memory_bytes": broker.config.memory, "pids": broker.config.pids, "timeout": broker.config.timeout}})
+                    return self.respond(200, {"ready": broker.recovery_error is None, "recovery_error": broker.recovery_error, "tasks": broker.tasks(), "policy": {"network": "git-opt-in" if broker.config.allow_git_network else "none", "user": "10001:10001", "cpus": broker.config.cpus, "memory_bytes": broker.config.memory, "pids": broker.config.pids, "timeout": broker.config.timeout}})
                 if self.command == "POST" and self.path == "/tasks":
                     size = int(self.headers.get("Content-Length", "0"))
                     if not 0 < size <= 65536:

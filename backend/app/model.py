@@ -170,12 +170,18 @@ async def stream_chat_completion(provider, model, messages, tools=None, temperat
 async def test_provider(provider, model=None):
     provider = normalize_provider(provider)
     selected_model = model or provider.get("default_model")
-    message, usage = await chat_completion(
-        provider,
-        selected_model,
-        [{"role": "user", "content": "只回复 OK"}],
-        temperature=0,
-    )
+    if uses_responses(provider):
+        message, usage, response_id, _ = await response_completion(
+            provider, selected_model, [{"role": "user", "content": "只回复 OK"}], instructions="Return only OK."
+        )
+    else:
+        message, usage = await chat_completion(
+            provider,
+            selected_model,
+            [{"role": "user", "content": "只回复 OK"}],
+            temperature=0,
+        )
+        response_id = None
     return {
         "ok": True,
         "provider_type": provider.get("type"),
@@ -183,4 +189,94 @@ async def test_provider(provider, model=None):
         "model": normalize_qwen_model(selected_model) if is_bailian(provider) else selected_model,
         "response": message.get("content", ""),
         "usage": usage,
+        "response_id": response_id,
     }
+
+
+def uses_responses(provider):
+    return str(provider.get("api_mode") or "chat_completions") == "responses"
+
+
+def response_tools(tools, async_tools=False):
+    result = []
+    for item in tools or []:
+        function = item.get("function") or item
+        value = {"type":"function", "name":function["name"], "description":function.get("description", ""), "parameters":function.get("parameters", {"type":"object","properties":{}}), "strict":False}
+        if async_tools: value["async"] = True
+        result.append(value)
+    return result
+
+
+def _response_result(data):
+    text, calls = [], []
+    for item in data.get("output") or []:
+        if item.get("type") == "message":
+            for content in item.get("content") or []:
+                if content.get("type") in ("output_text", "text") and content.get("text"): text.append(content["text"])
+        elif item.get("type") == "function_call":
+            calls.append({"id":item.get("call_id") or item.get("id"),"type":"function","function":{"name":item.get("name", ""),"arguments":item.get("arguments", "{}")}})
+    return {"role":"assistant","content":"".join(text),"tool_calls":calls}, data.get("usage") or {}, data.get("id"), data.get("output") or []
+
+
+def _responses_payload(provider, model, input_items, tools, instructions, previous_response_id=None, reasoning_effort=None, stream=False):
+    payload = {
+        "model": model, "input": input_items, "instructions": instructions, "store": True,
+        "stream": stream, "parallel_tool_calls": True, "tools": response_tools(tools, provider.get("async_tools") is True),
+        "reasoning": {"effort": reasoning_effort or provider.get("reasoning_effort", "medium")},
+    }
+    if previous_response_id: payload["previous_response_id"] = previous_response_id
+    if provider.get("context_compaction", True):
+        payload["context_management"] = [{"type":"compaction", "compact_threshold":int(provider.get("compact_threshold", 120000))}]
+    if provider.get("prompt_cache_key"): payload["prompt_cache_key"] = str(provider["prompt_cache_key"])[:64]
+    if not tools: payload.pop("tools")
+    return payload
+
+
+async def response_completion(provider, model, input_items, tools=None, instructions="", previous_response_id=None, reasoning_effort=None):
+    provider = normalize_provider(provider); api_key = provider.get("api_key") or ""
+    if not api_key: raise ModelError("模型提供方尚未配置 API Key")
+    url = provider.get("base_url", "https://api.openai.com/v1").rstrip("/") + "/responses"
+    headers = {"Content-Type":"application/json", **provider.get("headers", {}), "Authorization":f"Bearer {api_key}"}
+    payload = _responses_payload(provider, model, input_items, tools, instructions, previous_response_id, reasoning_effort)
+    try:
+        async with httpx.AsyncClient(timeout=provider.get("timeout", 180)) as client: response = await client.post(url, headers=headers, json=payload)
+        if response.status_code >= 400: raise ModelError(f"Responses API 返回 {response.status_code}: {response.text[:1200]}")
+        return _response_result(response.json())
+    except httpx.HTTPError as exc: raise ModelError(f"无法连接 Responses API {url}: {exc}") from exc
+
+
+async def stream_response_completion(provider, model, input_items, tools=None, instructions="", previous_response_id=None, reasoning_effort=None):
+    provider = normalize_provider(provider); api_key = provider.get("api_key") or ""
+    if not api_key: raise ModelError("模型提供方尚未配置 API Key")
+    url = provider.get("base_url", "https://api.openai.com/v1").rstrip("/") + "/responses"
+    headers = {"Content-Type":"application/json", **provider.get("headers", {}), "Authorization":f"Bearer {api_key}"}
+    payload = _responses_payload(provider, model, input_items, tools, instructions, previous_response_id, reasoning_effort, True)
+    try:
+        async with httpx.AsyncClient(timeout=provider.get("timeout", 180)) as client:
+            async with client.stream("POST", url, headers=headers, json=payload) as response:
+                if response.status_code >= 400: raise ModelError(f"Responses API 返回 {response.status_code}: {(await response.aread()).decode(errors='replace')[:1200]}")
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"): continue
+                    raw = line[5:].strip()
+                    if not raw or raw == "[DONE]": continue
+                    try: event = json.loads(raw)
+                    except json.JSONDecodeError: continue
+                    kind = event.get("type")
+                    if kind == "response.output_text.delta": yield {"type":"assistant_delta","content":event.get("delta", "")}
+                    elif kind == "response.completed":
+                        message, usage, response_id, output = _response_result(event.get("response") or {})
+                        yield {"type":"finish","response":message,"usage":usage,"response_id":response_id,"output":output}
+                    elif kind in ("response.failed", "response.incomplete"):
+                        raise ModelError(str((event.get("response") or {}).get("error") or kind))
+    except httpx.HTTPError as exc: raise ModelError(f"无法连接 Responses API {url}: {exc}") from exc
+
+
+async def compact_response(provider, model, previous_response_id, instructions=""):
+    provider = normalize_provider(provider); api_key = provider.get("api_key") or ""
+    if not api_key: raise ModelError("模型提供方尚未配置 API Key")
+    url = provider.get("base_url", "https://api.openai.com/v1").rstrip("/") + "/responses/compact"
+    headers = {"Content-Type":"application/json", **provider.get("headers", {}), "Authorization":f"Bearer {api_key}"}
+    async with httpx.AsyncClient(timeout=provider.get("timeout", 180)) as client:
+        response = await client.post(url, headers=headers, json={"model":model,"previous_response_id":previous_response_id,"instructions":instructions})
+    if response.status_code >= 400: raise ModelError(f"上下文压缩失败 {response.status_code}: {response.text[:1000]}")
+    return response.json()

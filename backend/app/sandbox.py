@@ -21,7 +21,7 @@ async def sandbox_status():
         return response.json()
 
 
-async def run_command(command, mode="read-only"):
+async def run_command(command, mode="read-only", cwd=".", network=False):
     if mode not in ("read-only", "workspace-write"):
         raise PermissionError("Container execution supports read-only or workspace-write only")
     url, headers = settings()
@@ -32,7 +32,7 @@ async def run_command(command, mode="read-only"):
             import uuid
             task_id = uuid.uuid4().hex
             response = await client.post(url + "/tasks", headers=headers,
-                                         json={"id": task_id, "command": command, "mode": mode})
+                                         json={"id": task_id, "command": command, "mode": mode, "cwd": cwd, "network": bool(network)})
             response.raise_for_status()
             while True:
                 response = await client.get(url + "/tasks/" + task_id, headers=headers)

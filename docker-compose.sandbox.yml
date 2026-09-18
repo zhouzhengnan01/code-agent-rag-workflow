@@ -39,6 +39,7 @@ services:
       CODEZZN_SANDBOX_MEMORY_MB: ${CODEZZN_SANDBOX_MEMORY_MB:-512}
       CODEZZN_SANDBOX_PIDS: ${CODEZZN_SANDBOX_PIDS:-64}
       CODEZZN_SANDBOX_TIMEOUT: ${CODEZZN_SANDBOX_TIMEOUT:-60}
+      CODEZZN_SANDBOX_GIT_NETWORK: ${CODEZZN_SANDBOX_GIT_NETWORK:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - sandbox-state:/state

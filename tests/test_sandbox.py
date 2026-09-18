@@ -117,6 +117,18 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(len(self.docker.specs), 2)
         self.assertTrue(any(not s['HostConfig']['Mounts'][0]['ReadOnly'] for s in self.docker.specs))
 
+    def test_git_network_is_opt_in_and_cwd_is_scoped(self):
+        with self.assertRaises(ValueError):
+            self.submit(network=True)
+        self.config.allow_git_network = True
+        row = self.finish(self.submit(network=True, cwd='.codezzn-worktrees/task-1'))
+        self.assertEqual(row['status'], 'completed')
+        spec = self.docker.specs[-1]
+        self.assertEqual(spec['HostConfig']['NetworkMode'], 'bridge')
+        self.assertEqual(spec['WorkingDir'], '/workspace/.codezzn-worktrees/task-1')
+        with self.assertRaises(ValueError):
+            self.submit(cwd='../outside')
+
     def test_timeout_kills_container(self):
         self.docker.forever = True
         self.config.timeout = 0.15
