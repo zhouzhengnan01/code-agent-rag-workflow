@@ -3,10 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light">
   <title>Codezzn Studio</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/assets/workbench.css">
+  <link rel="stylesheet" href="/assets/roboflow-theme.css">
 </head>
 <body>
   <a class="skip-link" href="#content">跳到主要内容</a>
@@ -28,6 +29,8 @@
 
       <nav class="primary-nav" id="nav"></nav>
 
+      <button class="rail-expand" id="railToggle" type="button" onclick="toggleRailExpanded()" aria-label="展开导航" aria-expanded="false" title="展开导航"><span aria-hidden="true">›</span></button>
+
       <div class="rail-footer">
         <div class="service-state" aria-live="polite">
           <span class="status-lamp" aria-hidden="true"></span>
@@ -44,7 +47,7 @@
     <main class="workspace-main">
       <header class="command-bar">
         <div class="command-context">
-          <button class="icon-button menu-button" type="button" onclick="toggleRail(true)" aria-label="打开导航">菜单</button>
+          <button class="icon-button menu-button" type="button" onclick="toggleRail(true)" aria-label="打开导航"><span aria-hidden="true">☰</span></button>
           <div class="breadcrumb"><span>Codezzn</span><strong id="pageTitle">概览</strong></div>
         </div>
         <div class="command-actions">

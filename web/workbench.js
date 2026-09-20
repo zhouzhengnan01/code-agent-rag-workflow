@@ -19,6 +19,21 @@ const navGroups = [
   ['编排', ['workflows']],
 ];
 
+const navIcons = {
+  dashboard: '<path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/>',
+  chat: '<path d="M21 11.5a8.4 8.4 0 0 1-9 8.5 9 9 0 0 1-4-.9L3 21l1.9-5A9 9 0 1 1 21 11.5Z"/>',
+  tasks: '<path d="M8 4h11a2 2 0 0 1 2 2v14H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1m1-2h7v4H7zM8 11h9M8 15h6"/>',
+  agents: '<rect x="4" y="7" width="16" height="13" rx="3"/><path d="M12 3v4M9 3h6M8 13h.01M16 13h.01M9 17h6"/>',
+  agent_teams: '<circle cx="8" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M2 20v-2a6 6 0 0 1 12 0v2zM15 15a5 5 0 0 1 7 4v1h-5"/>',
+  providers: '<path d="m12 2-8 11h7l-1 9 10-12h-7l1-8z"/>',
+  skills: '<path d="m12 2 2.7 6.3L21 11l-6.3 2.7L12 20l-2.7-6.3L3 11l6.3-2.7z"/>',
+  mcp_servers: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="8.5" y="14" width="7" height="7" rx="1"/><path d="M6.5 10v2h12v-2M12 12v2"/>',
+  lsp_servers: '<path d="m8 5-6 7 6 7M16 5l6 7-6 7M14 3l-4 18"/>',
+  knowledge: '<path d="M12 6a8 8 0 0 0-9-2v15a8 8 0 0 1 9 2 8 8 0 0 1 9-2V4a8 8 0 0 0-9 2ZM12 6v15"/>',
+  memories: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  workflows: '<circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="12" cy="19" r="2"/><path d="M6.7 6.1 11 17M17.3 6.1 13 17M7 5h10"/>',
+};
+
 const labels = {
   agents: ['智能体', '将模型、提示词、知识与工具组合成可运行的智能体。'],
   agent_teams: ['智能体团队', '配置协调智能体、团队成员和并行委派边界。'],
@@ -124,6 +139,16 @@ function formData(form) { return Object.fromEntries(new FormData(form).entries()
 
 function toggleRail(open) { document.body.classList.toggle('rail-open', open); }
 
+function toggleRailExpanded() {
+  const expanded = document.body.classList.toggle('rail-expanded');
+  const toggle = $('#railToggle');
+  if (toggle) {
+    toggle.setAttribute('aria-expanded', String(expanded));
+    toggle.setAttribute('aria-label', expanded ? '收起导航' : '展开导航');
+    toggle.title = expanded ? '收起导航' : '展开导航';
+  }
+}
+
 function nav() {
   const byId = Object.fromEntries(pages.map(page => [page.id, page]));
   $('#nav').innerHTML = navGroups.map(([group, ids]) => `
@@ -133,7 +158,8 @@ function nav() {
         const page = byId[id];
         const active = state.page === id;
         return `
-          <button class="nav-item ${active ? 'is-active' : ''}" type="button" onclick="go('${id}')" ${active ? 'aria-current="page"' : ''}>
+          <button class="nav-item ${active ? 'is-active' : ''}" type="button" onclick="go('${id}')" aria-label="${esc(page.label)}" title="${esc(page.label)}" ${active ? 'aria-current="page"' : ''}>
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${navIcons[id]}</svg>
             <span class="nav-label">${page.label}</span><span class="nav-short">${page.short}</span>
           </button>`;
       }).join('')}
@@ -143,6 +169,7 @@ function nav() {
 function go(page) {
   state.page = page;
   toggleRail(false);
+  document.body.classList.toggle('page-dashboard', page === 'dashboard');
   if (location.hash !== `#${page}`) history.replaceState(null, '', `#${page}`);
   nav();
   $('#pageTitle').textContent = pages.find(item => item.id === page)?.label || page;
@@ -175,6 +202,7 @@ function loading() {
 
 async function loadPage() {
   const content = $('#content');
+  document.body.classList.toggle('page-dashboard', state.page === 'dashboard');
   content.classList.toggle('viewport-chat', state.page === 'chat');
   content.innerHTML = loading();
   try {
@@ -196,21 +224,7 @@ async function loadPage() {
 }
 
 async function dashboard() {
-  const kinds = ['agents', 'providers', 'skills', 'mcp_servers', 'knowledge', 'workflows'];
-  const [all, recent, rag] = await Promise.all([
-    Promise.all(kinds.map(load)),
-    api('/api/threads'),
-    api('/api/rag/status').catch(() => ({ ok: false, backend: '未连接', collections: 0 })),
-  ]);
-  const map = Object.fromEntries(kinds.map((kind, index) => [kind, all[index]]));
-  const configured = map.providers.filter(item => item.api_key_configured).length;
-  const documents = map.knowledge.reduce((sum, item) => sum + Number(item.document_count || 0), 0);
-  const stats = [
-    ['智能体', map.agents.length, '可运行配置'],
-    ['模型', map.providers.length, `${configured} 个密钥已就绪`],
-    ['技能', map.skills.length, '可插拔指令'],
-    ['知识文档', documents, `${rag.collections || 0} 个向量集合`],
-  ];
+  const recent = await api('/api/threads');
   const setup = [
     ['连接模型', '配置百炼或其他兼容模型', 'providers', 'MODEL'],
     ['装配智能体', '选择模型、技能、知识和工具', 'agents', 'AGENT'],
@@ -219,56 +233,92 @@ async function dashboard() {
   ];
 
   $('#content').innerHTML = `
-    <div class="dashboard-page page-enter">
-      <section class="dashboard-lead">
-        <div class="lead-copy">
-          <span class="overline">本地智能体工作区</span>
-          <h1>智能体，从构建到运行。</h1>
-          <p>组合 Qwen、技能、MCP、知识库和工作流，直接在本地验证结果。</p>
-          <div class="lead-actions">
-            <button class="button button-primary button-large" type="button" onclick="go('chat')">开始对话</button>
-            <button class="button button-quiet button-large" type="button" onclick="go('agents')">配置智能体</button>
+    <div class="rf-dashboard page-enter">
+      <section class="rf-hero">
+        <div class="rf-hero-inner">
+          <h1>今天想构建什么？</h1>
+          <div class="rf-composer">
+            <textarea class="rf-composer-input" id="dashboardInput" aria-label="输入构建任务" placeholder="描述你想构建的智能体或任务…" rows="2" oninput="updateDashboardSend()" onkeydown="dashboardComposerKeydown(event)"></textarea>
+            <div class="rf-composer-toolbar">
+              <div class="rf-composer-tools">
+                <button type="button" onclick="go('agents')" aria-label="查看智能体"><span aria-hidden="true">✧</span> 智能体</button>
+                <button type="button" onclick="go('chat')" aria-label="查看对话历史"><span aria-hidden="true">◷</span> 历史</button>
+              </div>
+              <button class="rf-composer-send" id="dashboardSend" type="button" onclick="sendDashboardPrompt()" aria-label="发送任务" disabled><span aria-hidden="true">↑</span></button>
+            </div>
           </div>
+          <div class="rf-suggestions" aria-label="快速开始">
+            <button class="rf-suggestion" type="button" onclick="go('agents')">创建智能体</button>
+            <button class="rf-suggestion" type="button" onclick="go('providers')">接入模型</button>
+            <button class="rf-suggestion" type="button" onclick="go('workflows')">编排工作流</button>
+            <button class="rf-suggestion" type="button" onclick="go('knowledge')">打开知识库</button>
+          </div>
+          <button class="rf-connect" type="button" onclick="go('agents')">配置编码智能体 <span aria-hidden="true">→</span></button>
         </div>
-        <aside class="runtime-panel">
-          <div class="runtime-heading"><span>系统运行状态</span><strong>${rag.ok ? '就绪' : '检查配置'}</strong></div>
-          <dl>
-            <div><dt>推理提供方</dt><dd>${configured}/${map.providers.length}</dd></div>
-            <div><dt>向量后端</dt><dd>${esc(rag.backend || '未连接')}</dd></div>
-            <div><dt>工作流</dt><dd>${map.workflows.length}</dd></div>
-          </dl>
-          <button class="text-action" type="button" onclick="go('providers')">查看运行配置</button>
-        </aside>
       </section>
-
-      <section class="stat-ribbon" aria-label="工作区统计">
-        ${stats.map(([name, value, note]) => `
-          <div class="stat-item"><span>${name}</span><strong>${value}</strong><small>${note}</small></div>`).join('')}
-      </section>
-
-      <div class="dashboard-work">
-        <section class="launch-panel">
-          <header class="block-heading"><div><h2>构建路径</h2><p>按能力链路继续配置。</p></div></header>
-          <div class="launch-grid">
-            ${setup.map(([name, note, page, code]) => `
-              <button class="launch-item" type="button" onclick="go('${page}')">
-                <span class="launch-code">${code}</span><span><strong>${name}</strong><small>${note}</small></span><b aria-hidden="true">打开</b>
+      <div class="rf-home-panel">
+        <div class="rf-home-tabs" role="tablist" aria-label="首页内容">
+          <button class="rf-home-tab is-active" type="button" role="tab" aria-selected="true" onclick="switchDashboardTab('recent')" data-home-tab="recent">最近</button>
+          <button class="rf-home-tab" type="button" role="tab" aria-selected="false" onclick="switchDashboardTab('examples')" data-home-tab="examples">示例</button>
+        </div>
+        <section class="rf-home-section rf-examples" data-home-section="examples">
+          <header><h2>从这里开始</h2><p>选一条路径，把想法变成可运行的智能体。</p></header>
+          <div class="rf-example-grid">
+            ${setup.slice(0, 3).map(([name, note, page, code]) => `
+              <button class="rf-example-card" type="button" onclick="go('${page}')">
+                <span class="rf-example-icon" aria-hidden="true">${code.slice(0, 1)}</span><strong>${name}</strong><small>${note}</small><span class="rf-example-arrow" aria-hidden="true">→</span>
               </button>`).join('')}
           </div>
         </section>
-        <aside class="activity-panel">
-          <header class="block-heading"><div><h2>最近对话</h2><p>${recent.data.length} 个活跃会话</p></div><button class="text-action" type="button" onclick="go('chat')">全部</button></header>
+        <section class="rf-home-section rf-recent is-active" data-home-section="recent">
+          <header><div><h2>最近对话</h2><p>${recent.data.length} 个活跃会话</p></div><button class="text-action" type="button" onclick="go('chat')">查看全部 →</button></header>
           ${recent.data.length ? `
-            <div class="activity-list">
+            <div class="rf-recent-list">
               ${recent.data.slice(0, 5).map(thread => `
-                <button class="activity-item" type="button" onclick="state.threadScope='active';state.thread='${thread.id}';go('chat')">
-                  <span><strong>${esc(thread.name)}</strong><small>${esc(thread.status)}</small></span><b>打开</b>
+                <button class="rf-recent-card" type="button" onclick="openDashboardThread('${esc(thread.id)}')" aria-label="打开会话 ${esc(thread.name)}">
+                  <span class="rf-recent-icon" aria-hidden="true">◷</span><span><strong>${esc(thread.name)}</strong><small>${esc(threadStatus(thread.status))}</small></span><b aria-hidden="true">→</b>
                 </button>`).join('')}
-            </div>` : `
-            <div class="state-inline"><p>还没有对话记录。</p><button class="text-action" type="button" onclick="go('chat')">创建第一个会话</button></div>`}
-        </aside>
+            </div>` : `<div class="state-inline"><p>还没有对话记录。</p><button class="text-action" type="button" onclick="go('chat')">开始第一段对话 →</button></div>`}
+        </section>
       </div>
     </div>`;
+}
+
+function updateDashboardSend() {
+  const button = $('#dashboardSend');
+  if (button) button.disabled = !$('#dashboardInput')?.value.trim();
+}
+
+function dashboardComposerKeydown(event) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    sendDashboardPrompt();
+  }
+}
+
+function sendDashboardPrompt() {
+  const prompt = $('#dashboardInput')?.value.trim();
+  if (!prompt) return;
+  state.pendingDashboardPrompt = prompt;
+  state.threadScope = 'active';
+  state.thread = null;
+  go('chat');
+}
+
+function openDashboardThread(threadId) {
+  state.pendingDashboardPrompt = null;
+  state.threadScope = 'active';
+  state.thread = threadId;
+  go('chat');
+}
+
+function switchDashboardTab(tab) {
+  $$('.rf-home-tab').forEach(button => {
+    const active = button.dataset.homeTab === tab;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  $$('.rf-home-section').forEach(section => section.classList.toggle('is-active', section.dataset.homeSection === tab));
 }
 
 function timeText(value) {
@@ -943,7 +993,7 @@ async function chat() {
   ]);
   const threads = threadResult.data;
   state.chatThreads = threads;
-  if (!threads.some(thread => thread.id === state.thread)) state.thread = threads[0]?.id || null;
+  if (!threads.some(thread => thread.id === state.thread)) state.thread = state.pendingDashboardPrompt ? null : (threads[0]?.id || null);
   const current = state.thread ? await api(`/api/threads/${state.thread}`).catch(() => null) : null;
   const selectedAgent = current?.agent_id || agents[0]?.id || '';
   const selectedAgentConfig = agents.find(item => item.id === selectedAgent) || {};
@@ -992,7 +1042,20 @@ async function chat() {
         </footer>
       </section>
     </div>`;
-  window.setTimeout(bindComposer, 0);
+  window.setTimeout(() => {
+    if (state.page !== 'chat') return;
+    bindComposer();
+    if (state.pendingDashboardPrompt) {
+      const prompt = state.pendingDashboardPrompt;
+      state.pendingDashboardPrompt = null;
+      const input = $('#chatInput');
+      if (input) {
+        input.value = prompt;
+        input.dispatchEvent(new Event('input'));
+        sendMessage();
+      }
+    }
+  }, 0);
 }
 
 function enqueueWorkflow(id) {
