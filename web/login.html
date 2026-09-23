@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light">
+  <title>登录 · Codezzn</title><link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/assets/auth.css?v=0.5.0"><link rel="stylesheet" href="/assets/auth-promo.css?v=0.5.0">
+</head>
+<body data-auth-mode="login">
+  <main class="auth-split">
+    <section class="auth-pane" aria-labelledby="authTitle">
+      <a class="auth-brand" href="/" aria-label="Codezzn 首页"><span class="auth-brand-mark" aria-hidden="true">Z</span><span class="auth-brand-word">codezzn</span></a>
+      <div class="auth-workflow"><div class="auth-workflow-inner">
+        <h1 id="authTitle">Sign In or Sign Up</h1><div class="current-session" id="currentSession" hidden></div>
+        <section class="provider-view" id="providerView" aria-label="登录方式"><ul class="provider-list">
+          <li><button class="provider-button" type="button" data-provider="google"><img src="/assets/sites/app-roboflow-com-f07e3b30/login-7e93fba0/google.svg" alt=""><span>Continue with Google</span></button></li>
+          <li class="provider-last-used"><a class="provider-button provider-github" id="githubButton" href="/api/auth/github/start?next=/workbench.html"><img src="/assets/sites/app-roboflow-com-f07e3b30/login-7e93fba0/github.svg" alt=""><span>Continue with Github</span></a><span class="last-used-badge">Last Used</span></li>
+          <li><button class="provider-button" type="button" data-provider="email"><img src="/assets/sites/app-roboflow-com-f07e3b30/login-7e93fba0/mail.svg" alt=""><span>Continue with Email</span></button></li>
+          <li><button class="provider-button" type="button" data-provider="sso"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-1 6h2v2h-2V7zm0 4h2v6h-2v-6z"/></svg><span>Continue with SSO</span></button></li>
+        </ul></section>
+        <section class="email-step" id="emailStep" hidden aria-label="邮箱登录"><div class="floating-field"><label for="emailEntry">Email</label><input id="emailEntry" type="email" inputmode="email" autocomplete="email" required></div><div class="step-actions"><button class="action-button action-primary" id="emailNext" type="button">Next</button><button class="action-button action-secondary" id="emailCancel" type="button">Cancel</button></div></section>
+        <form class="credential-form" id="authForm" hidden novalidate>
+          <button class="selected-email" id="selectedEmail" type="button" title="更换邮箱"></button>
+          <div class="floating-field" data-register-only hidden><label for="name">Name</label><input id="name" name="name" type="text" autocomplete="name"></div>
+          <input id="email" name="email" type="hidden">
+          <div class="floating-field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required></div>
+          <div class="floating-field" data-register-only hidden><label for="confirmPassword">Confirm password</label><input id="confirmPassword" name="confirmPassword" type="password" autocomplete="new-password"></div>
+          <button class="action-button action-primary submit-button" id="submitButton" type="submit"><span class="button-label">Sign In</span><span class="button-spinner" aria-hidden="true"></span></button>
+          <button class="action-button action-secondary" id="formCancel" type="button">Cancel</button>
+          <p class="mode-switch">New to Codezzn? <a id="switchLink" href="/register">Create an account</a></p>
+        </form>
+        <p class="auth-feedback" id="authFeedback" role="status" aria-live="polite"></p>
+        <p class="legal-copy">By continuing, you are agreeing to our <a href="#terms">Terms of Service</a> and <a href="#privacy">Privacy Policy</a>.</p>
+      </div></div>
+      <footer class="auth-footer"><span>© 2026 Codezzn.</span><nav aria-label="帮助链接"><a href="/workbench.html">Workbench</a><a href="#status">Status</a></nav></footer>
+    </section>
+    <aside id="authPromo" class="auth-promo-mount" aria-label="Codezzn 产品展示"></aside>
+  </main>
+  <script src="/assets/auth-promo.js?v=0.5.0"></script><script src="/assets/auth.js?v=0.5.0"></script>
+</body>
+</html>

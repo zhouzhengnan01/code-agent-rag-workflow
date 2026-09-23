@@ -141,11 +141,63 @@ function toggleRail(open) { document.body.classList.toggle('rail-open', open); }
 
 function toggleRailExpanded() {
   const expanded = document.body.classList.toggle('rail-expanded');
+  try { localStorage.codezznRailExpanded = expanded ? 'true' : 'false'; } catch (_) {}
+  syncRailState();
+}
+
+function syncRailState() {
+  const expanded = document.body.classList.contains('rail-expanded');
   const toggle = $('#railToggle');
   if (toggle) {
     toggle.setAttribute('aria-expanded', String(expanded));
     toggle.setAttribute('aria-label', expanded ? '收起导航' : '展开导航');
     toggle.title = expanded ? '收起导航' : '展开导航';
+  }
+}
+
+function setupRailBehavior() {
+  const rail = $('#workspaceRail');
+  if (!rail) return;
+  try { document.body.classList.toggle('rail-expanded', localStorage.codezznRailExpanded === 'true'); } catch (_) {}
+  syncRailState();
+  rail.addEventListener('mouseenter', () => {
+    if (matchMedia('(min-width: 701px)').matches) document.body.classList.add('rail-hover');
+  });
+  rail.addEventListener('mouseleave', () => document.body.classList.remove('rail-hover'));
+  rail.addEventListener('focusin', () => {
+    if (matchMedia('(min-width: 701px)').matches) document.body.classList.add('rail-hover');
+  });
+  rail.addEventListener('focusout', event => {
+    if (!rail.contains(event.relatedTarget)) document.body.classList.remove('rail-hover');
+  });
+}
+
+async function loadSession() {
+  try {
+    const result = await fetch('/api/auth/me', { credentials: 'same-origin' }).then(async response => {
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      return data;
+    });
+    if (!result.authenticated || !result.user) return;
+    const user = result.user;
+    const label = user.name || 'Codezzn 用户';
+    $('#sessionName').textContent = label;
+    $('#sessionProvider').textContent = user.provider === 'github' ? 'GitHub 账号' : '邮箱账号';
+    $('#sessionAvatar').textContent = label.trim().charAt(0).toUpperCase() || 'U';
+    $('#sessionLogout').hidden = false;
+  } catch (_) {
+    // The workbench remains available when authentication is optional.
+  }
+}
+
+async function logoutSession() {
+  const button = $('#sessionLogout');
+  if (button) { button.disabled = true; button.textContent = '…'; }
+  try {
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+  } finally {
+    location.assign('/login');
   }
 }
 
@@ -880,7 +932,7 @@ function richText(value) {
 }
 
 function threadStatus(status) {
-  return ({ idle: '就绪', running: '运行中', error: '出错' })[status] || status || '就绪';
+  return ({ idle: '就绪', running: '运行中', waiting_for_approval: '等待审批', error: '出错' })[status] || status || '就绪';
 }
 
 function closeSessionMenus() {
@@ -995,6 +1047,9 @@ async function chat() {
   state.chatThreads = threads;
   if (!threads.some(thread => thread.id === state.thread)) state.thread = state.pendingDashboardPrompt ? null : (threads[0]?.id || null);
   const current = state.thread ? await api(`/api/threads/${state.thread}`).catch(() => null) : null;
+  const approvals = state.thread
+    ? (await api(`/api/threads/${state.thread}/approvals/inbox`).catch(() => ({ data: [] }))).data
+    : [];
   const selectedAgent = current?.agent_id || agents[0]?.id || '';
   const selectedAgentConfig = agents.find(item => item.id === selectedAgent) || {};
   const overrides = current?.capability_overrides || {};
@@ -1033,7 +1088,7 @@ async function chat() {
           <div class="capability-strip" id="capabilityStrip">${capabilityBarHtml(skills, mcps)}</div>
         </div>
         <div class="message-stream" id="messages" aria-live="polite">
-          ${current?.messages?.length ? current.messages.map(messageHtml).join('') : `
+          ${current?.messages?.length || approvals.length ? `${(current?.messages || []).map(messageHtml).join('')}${approvals.map(approvalHtml).join('')}` : `
             <div class="conversation-empty"><span class="empty-mark" aria-hidden="true">Z</span><h2>开始调试智能体</h2><p>输入任务，查看模型、工具和知识库如何协同运行。</p></div>`}
         </div>
         <footer class="prompt-dock">
@@ -1195,6 +1250,46 @@ function messageHtml(message) {
     </article>`;
 }
 
+function approvalHtml(approval) {
+  const args = JSON.stringify(approval.arguments || {}, null, 2);
+  return `
+    <article class="message-turn assistant approval-turn" id="approval_${esc(approval.id)}">
+      <div class="turn-avatar" aria-hidden="true">!</div>
+      <div class="turn-content">
+        <header><strong>需要审批</strong><span>${esc(approval.tool_name)}</span></header>
+        <div class="approval-card">
+          <div class="approval-heading"><span>工具准备执行</span><strong>${esc(approval.tool_name)}</strong></div>
+          <pre>${esc(args)}</pre>
+          <div class="approval-actions">
+            <button class="button button-quiet button-small" type="button" onclick="resolveApproval('${approval.id}','denied')">拒绝</button>
+            <button class="button button-primary button-small" type="button" onclick="resolveApproval('${approval.id}','approved')">允许并继续</button>
+          </div>
+        </div>
+      </div>
+    </article>`;
+}
+
+async function resolveApproval(approvalId, decision) {
+  const card = document.getElementById(`approval_${approvalId}`);
+  const buttons = card ? [...card.querySelectorAll('button')] : [];
+  buttons.forEach(button => { button.disabled = true; });
+  const action = decision === 'approved' ? '正在执行并继续对话' : '正在拒绝并继续对话';
+  const heading = card?.querySelector('.approval-heading span');
+  if (heading) heading.textContent = action;
+  try {
+    await api(`/api/approvals/${approvalId}`, {
+      method: 'POST',
+      body: JSON.stringify({ decision }),
+    });
+    toast(decision === 'approved' ? '已允许工具调用' : '已拒绝工具调用');
+    await loadPage();
+  } catch (error) {
+    buttons.forEach(button => { button.disabled = false; });
+    if (heading) heading.textContent = '工具准备执行';
+    toast(error.message, true);
+  }
+}
+
 function scrollMessages(smooth = false) {
   const messages = $('#messages');
   if (messages) messages.scrollTo({ top: messages.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
@@ -1326,7 +1421,7 @@ async function sendMessage() {
       method: 'POST', headers: headers(), body: JSON.stringify({ content, agent_id: agent }), signal: controller.signal,
     });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
-    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let renderedAnswer = ''; const events = []; let streamError = '';
+    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let renderedAnswer = ''; const events = []; let streamError = ''; let resultStatus = ''; let approvalId = '';
     const renderPending = () => { const pending = document.getElementById(pendingId); if (pending) pending.querySelector('.turn-content').innerHTML = `<header><strong>Codezzn</strong></header><div class="message-copy">${richText(renderedAnswer)}</div><div class="thinking-line"><b>${esc(events.at(-1)?.status || events.at(-1)?.type || '运行中')}</b></div>`; scrollMessages(); };
     const animator = createStreamTextAnimator(text => { renderedAnswer = text; renderPending(); });
     activeTurn.animator = animator;
@@ -1347,6 +1442,8 @@ async function sendMessage() {
         } else {
           if (event.type === 'turn_result') {
             answer = event.content || answer;
+            resultStatus = event.status || '';
+            approvalId = event.approval_id || '';
             animator.replace(answer);
           }
           if (event.type === 'turn_error') streamError = event.message || event.reason || '运行失败';
@@ -1359,7 +1456,15 @@ async function sendMessage() {
     if (streamError) throw new Error(streamError);
     await animator.flush();
     const pending = document.getElementById(pendingId);
-    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: activeTurn.cancelled ? '已停止生成。' : (answer || '模型返回了空响应。'), meta: { events, usage: {}, runtime: {}, sources: [] } });
+    if (pending && resultStatus === 'waiting_for_approval') {
+      const inbox = await api(`/api/threads/${state.thread}/approvals/inbox`).catch(() => ({ data: [] }));
+      const approval = inbox.data.find(item => item.id === approvalId) || inbox.data.at(-1);
+      pending.outerHTML = approval
+        ? approvalHtml(approval)
+        : messageHtml({ role: 'assistant', content: '工具调用正在等待审批，请刷新页面后处理。', meta: { events, usage: {}, runtime: {}, sources: [] } });
+    } else if (pending) {
+      pending.outerHTML = messageHtml({ role: 'assistant', content: activeTurn.cancelled ? '已停止生成。' : (answer || '模型返回了空响应。'), meta: { events, usage: {}, runtime: {}, sources: [] } });
+    }
     scrollMessages(true);
   } catch (error) {
     const pending = document.getElementById(pendingId);
@@ -1428,7 +1533,9 @@ window.addEventListener('hashchange', () => {
 });
 
 state.page = pages.some(item => item.id === location.hash.slice(1)) ? location.hash.slice(1) : 'dashboard';
+setupRailBehavior();
 nav();
 $('#pageTitle').textContent = pages.find(item => item.id === state.page).label;
 checkHealth();
+loadSession();
 loadPage();

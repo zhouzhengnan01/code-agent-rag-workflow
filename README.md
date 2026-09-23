@@ -19,7 +19,7 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 - Execution safety: container-backed `read-only` / `workspace-write` Shell and read-only Git; `danger-full-access` Shell is rejected. Thread locks, approval records, atomic file writes, and backups remain unchanged.
 - CLI：`python -m backend.app.cli exec` 支持非交互执行、stdin 和 JSONL 事件输出
 - 持久化：SQLite WAL 保存业务数据，Milvus 保存知识向量，记录线程消息、知识来源、工具事件、token usage 与工作流运行记录
-- 部署：Dockerfile、Compose healthcheck、持久化数据卷、可选 API 管理密钥
+- 认证与部署：本地账号、HttpOnly 会话、GitHub OAuth、Dockerfile、Compose healthcheck、持久化数据卷和可选 API 管理密钥
 
 ## 启动
 
@@ -29,9 +29,32 @@ if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 docker compose up -d --build
 ```
 
-打开 <http://127.0.0.1:8080/workbench.html>。首次启动会生成一个默认 OpenAI-compatible 提供方和默认智能体；请先在“模型接入”中填入有效 API Key，或将 Base URL 改为你的 Ollama、vLLM、LM Studio、OneAPI 等兼容端点。
+打开 <http://127.0.0.1:8080/>。Docker Compose 默认启用登录保护，首次使用请注册本地账号，或按下文配置 GitHub OAuth。首次启动会生成一个默认 OpenAI-compatible 提供方和默认智能体；登录后请先在“模型接入”中填入有效 API Key，或将 Base URL 改为你的 Ollama、vLLM、LM Studio、OneAPI 等兼容端点。
 
 Windows Docker Desktop 使用 bind mount 时，宿主机文件权限可能与容器内非 root UID 不一致。Compose 默认使用 `CODEZZN_UID=0`、`CODEZZN_GID=0` 保证本地启动可写；Linux 主机可在 `.env` 中改为 `./data` 和 `./workspace` 所属用户的 UID/GID。
+
+### 注册、登录与 GitHub OAuth
+
+本地注册使用 scrypt 密码哈希；浏览器只保存 `HttpOnly`、`SameSite=Lax` 会话 Cookie。生产环境放在 HTTPS 反向代理后时，将 `CODEZZN_PUBLIC_URL` 改为外部 HTTPS 地址，并设置 `CODEZZN_COOKIE_SECURE=true`。
+
+要启用“使用 GitHub 继续”，在 GitHub 创建 OAuth App，Homepage URL 填 Codezzn 的公开地址，Authorization callback URL 填：
+
+```text
+http://127.0.0.1:8080/api/auth/github/callback
+```
+
+然后写入现有 `.env`（不要提交真实 Secret）：
+
+```env
+CODEZZN_AUTH_REQUIRED=true
+CODEZZN_PUBLIC_URL=http://127.0.0.1:8080
+CODEZZN_GITHUB_CLIENT_ID=your-client-id
+CODEZZN_GITHUB_CLIENT_SECRET=your-client-secret
+CODEZZN_SESSION_DAYS=14
+CODEZZN_COOKIE_SECURE=false
+```
+
+修改后运行 `docker compose up -d --build`。未配置 GitHub OAuth 时，本地邮箱注册/登录仍可正常使用，GitHub 按钮会返回明确的配置提示。
 
 ### 可选 RAGFlow 检索后端
 
@@ -163,6 +186,12 @@ docker run --rm --name codezzn-sandbox-verification --user 0:0 --network none --
 | `CODEZZN_MILVUS_URI` | `/app/data/milvus.db` | Milvus Lite 数据文件；可替换为独立 Milvus 地址 |
 | `MILVUS_COLLECTION_PREFIX` | `codezzn_kb_` | 知识库 Collection 前缀 |
 | `CODEZZN_ADMIN_KEY` | 空 | 非空时，API 要求 `X-Codezzn-Key` |
+| `CODEZZN_AUTH_REQUIRED` | Compose 中为 `true` | 要求工作台使用账号会话或管理密钥认证 |
+| `CODEZZN_PUBLIC_URL` | `http://127.0.0.1:8080` | GitHub OAuth 回调所使用的外部地址 |
+| `CODEZZN_GITHUB_CLIENT_ID` | 空 | GitHub OAuth App Client ID |
+| `CODEZZN_GITHUB_CLIENT_SECRET` | 空 | GitHub OAuth App Client Secret |
+| `CODEZZN_SESSION_DAYS` | `14` | 登录会话有效天数 |
+| `CODEZZN_COOKIE_SECURE` | `false` | HTTPS 生产环境应设为 `true` |
 | `CODEZZN_BASE_IMAGE` | `python:3.12-slim` | Docker Hub 不可用时可换成内部 Python 3.12 基础镜像 |
 
 Workbench 会将管理密钥保存在浏览器 `localStorage` 中。生产环境应放在 HTTPS 反向代理后，并配置认证、网络隔离和备份。模型密钥当前由本机 SQLite 保存，适合私有单机部署；团队/生产部署应接入 Vault/KMS。

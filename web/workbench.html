@@ -6,8 +6,8 @@
   <meta name="color-scheme" content="light">
   <title>Codezzn Studio</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/assets/workbench.css">
-  <link rel="stylesheet" href="/assets/roboflow-theme.css">
+  <link rel="stylesheet" href="/assets/workbench.css?v=0.4.0">
+  <link rel="stylesheet" href="/assets/roboflow-theme.css?v=0.4.0">
 </head>
 <body>
   <a class="skip-link" href="#content">跳到主要内容</a>
@@ -32,6 +32,14 @@
       <button class="rail-expand" id="railToggle" type="button" onclick="toggleRailExpanded()" aria-label="展开导航" aria-expanded="false" title="展开导航"><span aria-hidden="true">›</span></button>
 
       <div class="rail-footer">
+        <div class="rail-session" id="railSession" aria-live="polite">
+          <span class="session-avatar" id="sessionAvatar" aria-hidden="true">?</span>
+          <span class="session-copy">
+            <strong id="sessionName">本地访客</strong>
+            <small id="sessionProvider">未登录</small>
+          </span>
+          <button class="session-logout" id="sessionLogout" type="button" onclick="logoutSession()" hidden>退出</button>
+        </div>
         <div class="service-state" aria-live="polite">
           <span class="status-lamp" aria-hidden="true"></span>
           <span><small>运行状态</small><strong id="healthText">正在连接</strong></span>
@@ -62,6 +70,6 @@
   <div id="sessionMenuRoot"></div>
   <div id="modalRoot"></div>
   <div id="toastRoot" aria-live="polite"></div>
-  <script src="/assets/workbench.js"></script>
+  <script src="/assets/workbench.js?v=0.4.0"></script>
 </body>
 </html>

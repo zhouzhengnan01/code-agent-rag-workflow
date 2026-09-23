@@ -14,13 +14,14 @@ services:
       CODEZZN_MILVUS_URI: /app/data/milvus.db
       MILVUS_COLLECTION_PREFIX: codezzn_kb_
       CODEZZN_KNOWLEDGE_BACKEND: ${CODEZZN_KNOWLEDGE_BACKEND:-local}
+      CODEZZN_AUTH_REQUIRED: ${CODEZZN_AUTH_REQUIRED:-true}
     ports:
-      - "127.0.0.1:${CODEZZN_PORT:-8080}:8080"
+      - "0.0.0.0:${CODEZZN_PORT:-8080}:8080"
     volumes:
       - ./data:/app/data
       - ./workspace:/workspace
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://0.0.0.0:8080/healthz')"]
       interval: 20s
       timeout: 5s
       retries: 5

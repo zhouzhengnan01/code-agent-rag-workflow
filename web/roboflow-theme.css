@@ -259,3 +259,104 @@ body.page-dashboard .viewport { height: 100%; padding: 0; background: #fff; }
   .rf-example-icon { height: 50px; }
   .rf-recent-list { gap: 9px; }
 }
+
+/* Roboflow-style hover rail. Temporary expansion and pinned expansion share
+   one layout state so the workspace track always follows the visible rail. */
+@media (min-width: 701px) {
+  .studio-shell {
+    grid-template-columns: 60px minmax(0, 1fr);
+    transition: grid-template-columns 200ms cubic-bezier(0, 0, .2, 1);
+  }
+  body.rail-expanded .studio-shell,
+  body.rail-hover .studio-shell { grid-template-columns: 155px minmax(0, 1fr); }
+
+  .workspace-rail {
+    width: auto;
+    height: 100vh;
+    padding: 12px 20px 12px 8px;
+    gap: 8px;
+    border-right: 1px solid rgb(255 255 255 / 8%);
+    background: #0c0f1a;
+    transition: width 200ms cubic-bezier(0, 0, .2, 1);
+  }
+
+  .brand-lockup { flex: 0 0 32px; width: 127px; background: transparent; box-shadow: none; }
+  .brand-name {
+    display: grid;
+    opacity: 0;
+    transform: translateX(-4px);
+    pointer-events: none;
+    transition: opacity 150ms ease, transform 150ms ease;
+  }
+  body.rail-expanded .brand-name,
+  body.rail-hover .brand-name { opacity: 1; transform: none; pointer-events: auto; }
+
+  .primary-nav { width: 127px; margin-top: 0; gap: 8px; }
+  .nav-item { width: 34px; height: 34px; padding: 0 5px; border-radius: 8px; transition: width 200ms cubic-bezier(0, 0, .2, 1), background-color 150ms ease, border-color 150ms ease, color 150ms ease; }
+  .nav-icon { width: 22px; flex-basis: 22px; }
+  .nav-label {
+    display: block;
+    opacity: 0;
+    transform: translateX(-4px);
+    pointer-events: none;
+    transition: opacity 150ms ease, transform 150ms ease;
+  }
+  body.rail-expanded .nav-item,
+  body.rail-hover .nav-item { width: 127px; padding-right: 8px; }
+  body.rail-expanded .nav-label,
+  body.rail-hover .nav-label { opacity: 1; transform: none; pointer-events: auto; }
+  .nav-item:hover { background: rgb(255 255 255 / 8%); }
+  .nav-item.is-active { border-color: rgb(167 139 250 / 48%); background: rgb(109 40 217 / 20%); color: #ddd6fe; }
+
+  .rail-expand { right: -1px; }
+  body.rail-hover:not(.rail-expanded) .rail-expand span { display: inline-block; transform: rotate(180deg); }
+
+  .rail-footer { width: 127px; overflow: hidden; }
+  .rail-session {
+    width: 34px;
+    min-height: 34px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    overflow: hidden;
+    border-radius: 8px;
+    color: #d1d5db;
+    transition: width 200ms cubic-bezier(0, 0, .2, 1), background-color 150ms ease;
+  }
+  body.rail-expanded .rail-session,
+  body.rail-hover .rail-session { width: 127px; padding-right: 5px; background: rgb(255 255 255 / 4%); }
+  .session-avatar { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border-radius: 8px; background: #292638; color: #ddd6fe; font-size: 12px; font-weight: 700; }
+  .session-copy { min-width: 0; display: grid; flex: 1; opacity: 0; transform: translateX(-4px); transition: opacity 150ms ease, transform 150ms ease; }
+  .session-copy strong { overflow: hidden; color: #f3f4f6; font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+  .session-copy small { color: #9ca3af; font-size: 9px; white-space: nowrap; }
+  .session-logout { flex: 0 0 auto; border: 0; background: transparent; color: #a78bfa; padding: 3px; font-size: 9px; }
+  .session-logout:hover { color: #ddd6fe; }
+  body.rail-expanded .session-copy,
+  body.rail-hover .session-copy { opacity: 1; transform: none; }
+
+  body.rail-expanded .service-state,
+  body.rail-hover .service-state,
+  body.rail-expanded .rail-action,
+  body.rail-hover .rail-action { width: 127px; justify-content: flex-start; padding: 0 8px; }
+  body.rail-expanded .service-state > span:last-child,
+  body.rail-hover .service-state > span:last-child { display: grid; }
+  body.rail-expanded .rail-action,
+  body.rail-hover .rail-action { justify-content: space-between; }
+  body.rail-expanded .rail-action > span:first-child,
+  body.rail-hover .rail-action > span:first-child { display: inline; }
+}
+
+@media (max-width: 700px) {
+  body.rail-hover .studio-shell { grid-template-columns: minmax(0, 1fr); }
+  .workspace-rail { width: 245px; height: 100vh; padding: 12px; gap: 8px; }
+  .rail-session { min-height: 40px; display: flex; align-items: center; gap: 9px; padding: 3px; border-radius: 8px; background: rgb(255 255 255 / 4%); }
+  .session-avatar { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border-radius: 8px; background: #292638; color: #ddd6fe; font-size: 12px; font-weight: 700; }
+  .session-copy { min-width: 0; display: grid; flex: 1; }
+  .session-copy strong { overflow: hidden; color: #f3f4f6; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+  .session-copy small { color: #9ca3af; font-size: 9px; }
+  .session-logout { border: 0; background: transparent; color: #c4b5fd; padding: 6px; font-size: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studio-shell, .workspace-rail, .nav-item, .nav-label, .brand-name, .rail-session, .session-copy { transition-duration: .01ms !important; }
+}

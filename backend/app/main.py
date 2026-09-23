@@ -5,7 +5,7 @@ from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from datetime import datetime
 import asyncio
 import zipfile
@@ -31,6 +31,10 @@ from .skill_packages import import_package, read_package_file
 from .code_intelligence import rebuild_index, symbols as code_symbols, references as code_references, graph as code_graph
 from .lsp import lsp_manager
 from .browser import browser_manager
+from .auth import (
+    clear_session, create_session, github_authorize_url, github_callback,
+    github_configured, login_user, register_user, request_user, set_session_cookie,
+)
 
 
 THREAD_LOCKS = {}
@@ -165,14 +169,23 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 
 
+PUBLIC_PATHS = {"/healthz", "/login", "/register"}
+
+
 @app.middleware("http")
-async def auth(request: Request, call_next):
+async def access_control(request: Request, call_next):
     key = os.getenv("CODEZZN_ADMIN_KEY")
-    if key and request.url.path not in ("/healthz", "/", "/workbench.html") and not request.url.path.startswith("/assets/"):
-        supplied = request.headers.get("X-Codezzn-Key") or request.query_params.get("api_key")
-        if supplied != key:
-            from fastapi.responses import JSONResponse
-            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    path = request.url.path
+    public = path in PUBLIC_PATHS or path.startswith("/assets/") or path.startswith("/api/auth/")
+    user = request_user(request)
+    request.state.user = user
+    supplied = request.headers.get("X-Codezzn-Key") or request.query_params.get("api_key")
+    key_valid = bool(key and supplied == key)
+    auth_required = os.getenv("CODEZZN_AUTH_REQUIRED", "false").lower() == "true"
+    if not public and (auth_required or key) and not user and not key_valid:
+        if path in {"/", "/workbench.html"}:
+            return RedirectResponse("/login?next=/workbench.html", status_code=303)
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     return await call_next(request)
 
 
@@ -180,6 +193,67 @@ async def auth(request: Request, call_next):
 @app.get("/workbench.html")
 def workbench():
     return FileResponse(WEB / "workbench.html")
+
+
+@app.get("/login")
+def login_page():
+    return FileResponse(WEB / "login.html")
+
+
+@app.get("/register")
+def register_page():
+    return FileResponse(WEB / "register.html")
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    return {"authenticated": bool(request.state.user), "user": request.state.user, "github_configured": github_configured()}
+
+
+@app.post("/api/auth/register")
+def auth_register(payload: dict = Body(...)):
+    user = register_user(payload.get("name"), payload.get("email"), payload.get("password"))
+    token, expires = create_session(user["id"])
+    response = JSONResponse({"user": user})
+    set_session_cookie(response, token, expires)
+    return response
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: dict = Body(...)):
+    user = login_user(payload.get("email"), payload.get("password"))
+    token, expires = create_session(user["id"])
+    response = JSONResponse({"user": user})
+    set_session_cookie(response, token, expires)
+    return response
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request):
+    response = JSONResponse({"ok": True})
+    clear_session(request, response)
+    return response
+
+
+@app.get("/api/auth/github/start")
+def auth_github_start(next: str = "/workbench.html"):
+    return RedirectResponse(github_authorize_url(next), status_code=303)
+
+
+@app.get("/api/auth/github/callback")
+async def auth_github_callback(code: str = "", state: str = "", error: str = ""):
+    if error:
+        return RedirectResponse("/login?error=github_denied", status_code=303)
+    if not code or not state:
+        return RedirectResponse("/login?error=github_invalid", status_code=303)
+    try:
+        user, next_path = await github_callback(code, state)
+    except HTTPException as exc:
+        return RedirectResponse(f"/login?error=github_{exc.status_code}", status_code=303)
+    token, expires = create_session(user["id"])
+    response = RedirectResponse(next_path, status_code=303)
+    set_session_cookie(response, token, expires)
+    return response
 
 
 @app.get("/healthz")
@@ -808,6 +882,8 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
             approval_decision={"tool_call_id": approval["tool_call_id"], "decision": decision, "reason": reason},
         )
         if result["status"] == "waiting_for_approval":
+            with connect() as db:
+                db.execute("UPDATE threads SET status='waiting_for_approval',updated_at=? WHERE id=?", (now(), thread_id))
             return {"approval": {**dict(approval), "status": decision, "resolution": reason, "arguments": json.loads(approval["arguments"])}, "turn_id": turn_id, **result}
         with connect() as db:
             db.execute(
@@ -889,10 +965,23 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
     async def produce():
         try:
             result = await run_agent_isolated(agent, [dict(item) for item in history], content, on_event=emit, streaming=True, thread_id=thread_id, turn_id=turn_id)
+            if result["status"] == "waiting_for_approval":
+                # run_agent has already persisted a resumable checkpoint and set
+                # the thread to waiting_for_approval. Do not turn the empty
+                # interim assistant content into a completed message, and do not
+                # overwrite the waiting state with idle.
+                await queue.put({
+                    "type": "turn_result",
+                    "turn_id": turn_id,
+                    "status": result["status"],
+                    "approval_id": result.get("approval_id"),
+                    **{key: result[key] for key in ("content", "usage", "runtime", "sources")},
+                })
+                return
             with connect() as db:
                 db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()))
                 db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
-            await queue.put({"type": "turn_result", "turn_id": turn_id, **{key: result[key] for key in ("content", "usage", "runtime", "sources")}})
+            await queue.put({"type": "turn_result", "turn_id": turn_id, "status": result["status"], **{key: result[key] for key in ("content", "usage", "runtime", "sources")}})
         except asyncio.CancelledError:
             event = {"id": new_id("evt"), "timestamp": datetime.utcnow().isoformat() + "Z", "type": "turn_cancelled", "turn_id": turn_id}
             persist_event(event, thread_id, turn_id, event_sequence + 1)
@@ -968,6 +1057,8 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
         db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
     try:
         result = await run_agent_isolated(agent, [dict(item) for item in history], content, thread_id=thread_id, turn_id=turn_id)
+        if result["status"] == "waiting_for_approval":
+            return {"turn_id": turn_id, **result}
         with connect() as db:
             db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()))
             db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))

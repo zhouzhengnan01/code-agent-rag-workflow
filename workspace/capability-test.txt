@@ -1,0 +1,6 @@
+Codezzn capability test
+Responses API
+AST Symbol Index
+Worktree
+Memory
+Browser
