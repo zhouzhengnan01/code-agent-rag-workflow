@@ -3,6 +3,8 @@ import asyncio
 import json
 from pathlib import Path
 
+from .db import current_tenant
+
 
 class LspError(RuntimeError): pass
 
@@ -45,6 +47,8 @@ class LspManager:
                 await self._send(process, {"jsonrpc":"2.0","id":message["id"],"result":result})
 
     async def process(self, config, root):
+        if current_tenant() is not None:
+            raise LspError("多用户模式下本机 LSP 进程暂不可用")
         root = Path(root).resolve(); key = f"{config['id']}:{root}"
         process = self.processes.get(key)
         if process and process.returncode is None: return process

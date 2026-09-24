@@ -18,12 +18,19 @@ from .mcp import mcp_manager
 from .model import ModelError, chat_completion, stream_chat_completion, uses_responses, response_completion, stream_response_completion
 from .sandbox import run_command
 from .tasks import enqueue_task, get_task
-from .workspace import BASE_WORKSPACE, current_workspace, sandbox_cwd
+from .workspace import BASE_WORKSPACE, current_workspace, sandbox_cwd, tenant_workspace, use_workspace, reset_workspace
 from .code_intelligence import rebuild_index, symbols as code_symbols, references as code_references, graph as code_graph
 from .lsp import lsp_manager
 from .browser import browser_manager
 from .github_service import create_pr, ci_status, review_comment, auth_header_command
 from .skill_packages import package_path, read_package_file, verify_package
+from .projects import get_turn_project, project_root, record_artifact
+from .domain_tools import (
+    create_project_tool, create_workflow_draft, discard_workflow_draft,
+    enqueue_workflow_run, get_workflow_draft, get_workflow_run,
+    get_workflow_version, list_project_artifacts_tool, list_project_tools, list_workflow_tools, list_workflow_versions,
+    save_workflow_draft, select_project_tool, update_workflow_draft,
+)
 
 
 WORKSPACE = Path(os.getenv("CODEZZN_WORKSPACE", os.path.join(os.getcwd(), "workspace"))).resolve()
@@ -36,6 +43,21 @@ def _workspace_root():
 
 
 BUILTIN_SCHEMAS = {
+    "ask_user": {"description": "需要用户决定重要选项或补充信息时暂停任务，并在对话中显示可选项及自由输入；等待用户回答后继续。不要用它代替写文件工具的审批。", "parameters": {"type": "object", "properties": {"question": {"type": "string"}, "options": {"type": "array", "maxItems": 4, "items": {"type": "object", "properties": {"label": {"type": "string"}, "description": {"type": "string"}}, "required": ["label"]}}}, "required": ["question"]}},
+    "project_list": {"description": "列出当前用户已有项目，供选择目标资产位置", "parameters": {"type": "object", "properties": {}}},
+    "project_create": {"description": "经用户确认后创建当前用户的新项目；返回 project_id 并绑定本次对话", "parameters": {"type": "object", "properties": {"name": {"type": "string"}, "description": {"type": "string"}}, "required": ["name"]}},
+    "project_select": {"description": "经用户确认后选择一个已有项目，允许本次对话的文件产物保存在该项目", "parameters": {"type": "object", "properties": {"project_id": {"type": "string"}}, "required": ["project_id"]}},
+    "project_artifacts": {"description": "列出当前用户指定项目中的已保存文件", "parameters": {"type": "object", "properties": {"project_id": {"type": "string"}}, "required": ["project_id"]}},
+    "workflow_list": {"description": "列出当前用户的 Workflow 和版本", "parameters": {"type": "object", "properties": {}}},
+    "workflow_get": {"description": "读取一个已保存 Workflow 的完整定义", "parameters": {"type": "object", "properties": {"workflow_id": {"type": "string"}}, "required": ["workflow_id"]}},
+    "workflow_versions": {"description": "列出一个 Workflow 的已保存历史版本", "parameters": {"type": "object", "properties": {"workflow_id": {"type": "string"}}, "required": ["workflow_id"]}},
+    "workflow_version_get": {"description": "读取 Workflow 的指定历史版本定义", "parameters": {"type": "object", "properties": {"workflow_id": {"type": "string"}, "version": {"type": "integer"}}, "required": ["workflow_id", "version"]}},
+    "workflow_draft_create": {"description": "创建或编辑 Workflow 草稿，不改变正式 Workflow；保存前先验证节点和连线", "parameters": {"type": "object", "properties": {"workflow_id": {"type": "string"}, "project_id": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"}, "nodes": {"type": "array", "items": {"type": "object"}}, "edges": {"type": "array", "items": {"type": "object"}}, "max_parallel": {"type": "integer"}}, "required": ["name", "nodes", "edges"]}},
+    "workflow_draft_update": {"description": "修改尚未保存的 Workflow 草稿；不会改变正式 Workflow", "parameters": {"type": "object", "properties": {"draft_id": {"type": "string"}, "name": {"type": "string"}, "description": {"type": "string"}, "nodes": {"type": "array", "items": {"type": "object"}}, "edges": {"type": "array", "items": {"type": "object"}}, "max_parallel": {"type": "integer"}}, "required": ["draft_id"]}},
+    "workflow_draft_save": {"description": "经用户确认后将 Workflow 草稿正式保存；若源 Workflow 已改变则拒绝覆盖", "parameters": {"type": "object", "properties": {"draft_id": {"type": "string"}}, "required": ["draft_id"]}},
+    "workflow_draft_discard": {"description": "丢弃 Workflow 草稿；正式 Workflow 不受影响", "parameters": {"type": "object", "properties": {"draft_id": {"type": "string"}}, "required": ["draft_id"]}},
+    "workflow_run": {"description": "经用户确认后将已保存 Workflow 放入后台队列执行，返回可追踪的 run_id", "parameters": {"type": "object", "properties": {"workflow_id": {"type": "string"}, "input": {}}, "required": ["workflow_id"]}},
+    "workflow_run_get": {"description": "查看 Workflow 后台运行的状态、输出和执行记录", "parameters": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]}},
     "knowledge_search": {"description": "搜索已选择的知识库", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}},
     "list_files": {"description": "列出工作区文件", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}},
     "read_file": {"description": "读取工作区内的文本文件", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
@@ -143,6 +165,64 @@ def safe_path(value="."):
     return target
 
 
+def project_tool_path(value, agent):
+    """Resolve chat file tools inside the selected, tenant-owned project."""
+    project_id = agent.get("_project_id")
+    if not project_id:
+        return safe_path(value), _workspace_root()
+    relative = Path(str(value))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("项目文件路径必须是项目内的相对路径")
+    if len(relative.parts) >= 2 and relative.parts[0] == "projects":
+        if relative.parts[1] != project_id:
+            raise PermissionError("不能访问其他项目的文件")
+        relative = Path(*relative.parts[2:])
+    root = project_root(project_id).resolve()
+    target = (root / relative).resolve()
+    if target != root and root not in target.parents:
+        raise PermissionError("项目文件路径超出当前项目")
+    return target, root
+
+
+def project_sandbox_cwd(agent):
+    if agent.get("_project_id"):
+        return project_root(agent["_project_id"]).relative_to(tenant_workspace()).as_posix()
+    return sandbox_cwd()
+
+
+def project_file_state(agent, limit=3000):
+    """Cheap bounded change detection for artifacts produced by shell tools."""
+    if not (agent.get("_project_save") and agent.get("_project_id")):
+        return {}
+    root = project_root(agent["_project_id"])
+    if not root.exists():
+        return {}
+    state = {}
+    for directory, names, files in os.walk(root):
+        names[:] = [name for name in names if name not in {".git", ".venv", "__pycache__", ".codezzn-backups"}]
+        for name in files:
+            path = Path(directory) / name
+            if path.is_symlink():
+                continue
+            stat = path.stat()
+            state[path.relative_to(root).as_posix()] = (stat.st_mtime_ns, stat.st_size)
+            if len(state) >= limit:
+                return state
+    return state
+
+
+def record_changed_project_files(agent, before, thread_id, turn_id):
+    if not (agent.get("_project_save") and agent.get("_project_id")):
+        return []
+    root = project_root(agent["_project_id"])
+    changed = []
+    for relative, fingerprint in project_file_state(agent).items():
+        if before.get(relative) != fingerprint:
+            record_artifact(agent["_project_id"], thread_id, turn_id, root / relative, "file")
+            changed.append(relative)
+    return changed
+
+
 def snapshot_file(target):
     backup_root = _workspace_root() / ".codezzn-backups"
     backup_root.mkdir(parents=True, exist_ok=True)
@@ -154,12 +234,27 @@ def snapshot_file(target):
     return backup
 
 
-def atomic_write(target, content):
+def atomic_write(target, content, sandbox_root=None):
     target.parent.mkdir(parents=True, exist_ok=True)
+    if sandbox_root is not None:
+        shared = Path(sandbox_root).resolve()
+        relative_parent = target.parent.resolve().relative_to(shared)
+        current = shared
+        for part in (None, *relative_parent.parts):
+            if part is not None:
+                current = current / part
+            os.chown(current, -1, 10001)
+            os.chmod(current, 0o770)
     snapshot = snapshot_file(target)
     fd, temp_name = tempfile.mkstemp(prefix=".codezzn-", dir=str(target.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            if sandbox_root is not None:
+                # The app may run as root on Windows bind mounts while the
+                # isolated executor always runs as 10001:10001. Share with
+                # that group, never with every host user.
+                os.fchown(handle.fileno(), -1, 10001)
+                os.fchmod(handle.fileno(), 0o660)
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
@@ -173,8 +268,28 @@ def atomic_write(target, content):
 async def build_context(agent, provider=None, model=None, user_message="", thread_id=None):
     instructions = load_instructions(agent.get("workspace_cwd"))
     sections = [agent.get("system_prompt", "You are a helpful assistant.")]
+    sections.append("When a material user choice or missing requirement prevents responsible progress, use ask_user with a concise question and up to four distinct options. It pauses the task until the user chooses or types an answer. Do not ask for choices that the user already specified, and do not treat a project choice as permission to bypass tool approval.")
+    sections.append("Projects and Workflows are durable assets, not just prose. For requests to create or change them, inspect existing assets first, use the project/workflow tools, and show the resulting asset ID. If an active_project is supplied, reuse it; never create a duplicate project for the same request. If there is no project decision and a real file must be written, use project_list and ask_user to choose an existing or new project, then call project_select or project_create; their approval is the binding project choice. Stage Workflow edits with workflow_draft_create or workflow_draft_update, explain the proposed changes, then call workflow_draft_save only after the user approves that exact save. A draft must not be described as a saved Workflow. Use workflow_run only when execution is requested; inspect workflow_run_get for progress and errors. Never call a write tool after the user declined saving for this turn.")
     template = role_template(agent.get("role_template"))
     sections.append(f"\n<role_template name={json.dumps(agent.get('role_template', 'general'))}>\n{template['instructions']}\n</role_template>")
+    if agent.get("_project_save") is True and agent.get("_project_id"):
+        sections.append(
+            "\n<active_project>\n"
+            f"project_id: {agent['_project_id']}\n"
+            "The user explicitly approved saving artifacts to this project. "
+            "For any requested code or local deliverable, create an actual file with write_file or apply_patch before your final answer; "
+            "a code block in the answer is not a saved artifact. File-tool paths are relative to this project's root. "
+            "Mention the exact saved filename and summarize what was written. "
+            "Never put files into a different project. Existing tool approval policies still apply.\n"
+            "</active_project>"
+        )
+    elif agent.get("_project_save") is False:
+        sections.append(
+            "\n<project_write_decision>\nThe user declined saving artifacts for this turn. "
+            + (f"The selected project is {agent['_project_id']}; you may read its existing files. " if agent.get("_project_id") else "")
+            + "Answer the request without writing or modifying files. Do not claim a file was saved.\n"
+            "</project_write_decision>"
+        )
     if instructions["content"]:
         sections.append("\n<workspace_instructions>\n" + instructions["content"] + "\n</workspace_instructions>")
     if provider and model:
@@ -239,7 +354,10 @@ async def build_context(agent, provider=None, model=None, user_message="", threa
 
 async def tool_specs(agent):
     specs, routes = [], {}
-    builtin_names = list(dict.fromkeys(agent.get("builtin_tools", [])))
+    domain_tools = ("project_list", "project_create", "project_select", "project_artifacts", "workflow_list", "workflow_get", "workflow_versions", "workflow_version_get",
+                    "workflow_draft_create", "workflow_draft_update", "workflow_draft_save",
+                    "workflow_draft_discard", "workflow_run", "workflow_run_get")
+    builtin_names = list(dict.fromkeys(["ask_user", *domain_tools, *(agent.get("builtin_tools", []))]))
     if agent.get("memory_enabled"):
         builtin_names.extend(name for name in ("memory_search", "memory_save") if name not in builtin_names)
     if agent.get("subagent_ids"):
@@ -288,6 +406,14 @@ def approval_required(operation):
     return {"error": {"code": "approval_required", "operation": operation, "message": f"Approval required for {operation}"}}
 
 
+def domain_result(operation, function, *args, **kwargs):
+    """Return recoverable domain errors to the model instead of aborting a turn."""
+    try:
+        return function(*args, **kwargs)
+    except (ValueError, PermissionError) as exc:
+        return {"error": {"code": f"{operation}_failed", "message": str(exc)}}
+
+
 def _git_command(args):
     return ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
             "-c", "diff.external=", "-c", "safe.directory=*", *args]
@@ -311,7 +437,21 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
     route = routes.get(name)
     if not route:
         raise ValueError(f"未知工具: {name}")
+    if name == "ask_user":
+        if not approved:
+            return approval_required(name)
+        return {"answer": str(agent.get("_user_answer") or "")[:4000]}
+    if agent.get("_project_save") is False and name in {
+        "write_file", "apply_patch", "git_branch", "git_stage", "git_commit", "restore_file",
+        "git_clone", "git_fetch", "git_push", "git_merge", "git_merge_abort",
+        "project_create", "project_select", "workflow_draft_create", "workflow_draft_update", "workflow_draft_save", "workflow_run",
+    }:
+        return {"error": {"code": "project_write_declined", "message": "用户已选择本次不保存或修改项目文件"}}
+    if agent.get("_project_save") is False and name == "browser" and arguments.get("action") == "screenshot":
+        return {"error": {"code": "project_write_declined", "message": "用户已选择本次不保存截图"}}
     mode = sandbox_mode(agent)
+    if agent.get("_project_save") is False:
+        mode = "read-only"
     auto_approve = agent.get("auto_approve") is True or approved
     policy = tool_policy_decision(agent, name)
     if policy == "deny":
@@ -337,13 +477,87 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
         return {"prompts": await mcp_manager.list_prompts(route[1])}
     if route[0] == "mcp_prompt_get":
         return await mcp_manager.get_prompt(route[1], arguments["name"], arguments.get("arguments"))
+    if name == "project_list":
+        return {"projects": list_project_tools()}
+    if name == "project_artifacts":
+        result = domain_result(name, list_project_artifacts_tool, arguments["project_id"])
+        return result if "error" in result else {"artifacts": result}
+    if name == "project_create":
+        if mode == "read-only":
+            raise PermissionError("只读智能体不能创建项目")
+        if agent.get("_project_save") and agent.get("_project_id"):
+            return {"error": {"code": "project_already_selected", "message": "本次任务已选择项目；请复用当前项目，不要重复创建"}}
+        if not approved:
+            return approval_required(name)
+        project = domain_result(name, create_project_tool, arguments["name"], arguments.get("description", ""), thread_id=thread_id, turn_id=turn_id)
+        if "error" in project:
+            return project
+        agent["_project_id"], agent["_project_save"] = project["id"], True
+        agent["memory_project_id"] = project["id"]
+        return project
+    if name == "project_select":
+        if mode == "read-only":
+            raise PermissionError("只读智能体不能选择可写项目")
+        if agent.get("_project_save") and agent.get("_project_id") and arguments.get("project_id") != agent["_project_id"]:
+            return {"error": {"code": "project_scope_mismatch", "message": "本次任务已确认另一个项目，不能擅自切换"}}
+        if not approved:
+            return approval_required(name)
+        project = domain_result(name, select_project_tool, arguments["project_id"], thread_id=thread_id, turn_id=turn_id)
+        if "error" in project:
+            return project
+        agent["_project_id"], agent["_project_save"] = project["id"], True
+        agent["memory_project_id"] = project["id"]
+        return project
+    if name == "workflow_list":
+        return {"workflows": list_workflow_tools()}
+    if name == "workflow_get":
+        workflow = resource_get("workflows", arguments["workflow_id"])
+        if not workflow:
+            return {"error": {"code": "workflow_not_found", "message": "Workflow 不存在"}}
+        return workflow
+    if name == "workflow_versions":
+        versions = list_workflow_versions(arguments["workflow_id"])
+        return {"versions": versions} if versions is not None else {"error": {"code": "workflow_not_found", "message": "Workflow 不存在"}}
+    if name == "workflow_version_get":
+        version = get_workflow_version(arguments["workflow_id"], int(arguments["version"]))
+        return version if version is not None else {"error": {"code": "workflow_version_not_found", "message": "Workflow 版本不存在"}}
+    if name == "workflow_run_get":
+        return domain_result(name, get_workflow_run, arguments["run_id"])
+    if name in {"workflow_draft_create", "workflow_draft_update", "workflow_draft_save", "workflow_draft_discard", "workflow_run"}:
+        if mode == "read-only":
+            raise PermissionError("只读智能体不能修改或执行 Workflow")
+        if name in {"workflow_draft_save", "workflow_run"} and not approved:
+            return approval_required(name)
+        if name == "workflow_draft_create":
+            values = dict(arguments)
+            if agent.get("_project_id") and values.get("project_id") not in (None, agent["_project_id"]):
+                return {"error": {"code": "project_scope_mismatch", "message": "Workflow 草稿只能关联本次选择的项目"}}
+            if not values.get("project_id"):
+                values["project_id"] = agent.get("_project_id")
+            return domain_result(name, create_workflow_draft, values, thread_id=thread_id, turn_id=turn_id)
+        if name == "workflow_draft_update":
+            draft = get_workflow_draft(arguments["draft_id"])
+            if agent.get("_project_id") and draft and draft.get("project_id") != agent["_project_id"]:
+                return {"error": {"code": "project_scope_mismatch", "message": "不能修改其他项目的 Workflow 草稿"}}
+            return domain_result(name, update_workflow_draft, arguments["draft_id"], arguments)
+        if name == "workflow_draft_save":
+            draft = get_workflow_draft(arguments["draft_id"])
+            if not draft or draft["thread_id"] != thread_id:
+                return {"error": {"code": "workflow_draft_scope", "message": "只能保存当前对话创建的 Workflow 草稿"}}
+            if agent.get("_project_id") and draft.get("project_id") != agent["_project_id"]:
+                return {"error": {"code": "project_scope_mismatch", "message": "不能把 Workflow 保存到其他项目"}}
+            return domain_result(name, save_workflow_draft, arguments["draft_id"], thread_id=thread_id, turn_id=turn_id)
+        if name == "workflow_draft_discard":
+            return domain_result(name, discard_workflow_draft, arguments["draft_id"])
+        return domain_result(name, enqueue_workflow_run, arguments["workflow_id"], arguments.get("input", ""), thread_id=thread_id, turn_id=turn_id)
     if name == "knowledge_search":
         return await search(arguments["query"], agent.get("knowledge_ids", []), min(int(arguments.get("limit", 5)), 10))
     if name == "list_files":
-        target = safe_path(arguments.get("path", "."))
-        return [{"name": p.name, "path": str(p.relative_to(_workspace_root())), "directory": p.is_dir()} for p in list(target.iterdir())[:200]]
+        target, root = project_tool_path(arguments.get("path", "."), agent)
+        return [{"name": p.name, "path": str(p.relative_to(root)), "directory": p.is_dir()} for p in list(target.iterdir())[:200]]
     if name == "read_file":
-        return {"content": safe_path(arguments["path"]).read_text(encoding="utf-8")[:100000]}
+        target, _ = project_tool_path(arguments["path"], agent)
+        return {"content": target.read_text(encoding="utf-8")[:100000]}
     if name == "search_code":
         path = str(safe_path(arguments.get("path", ".")).relative_to(_workspace_root())) or "."
         command = ["rg", "--line-number", "--hidden", "--glob", "!.git/**"]
@@ -352,14 +566,20 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
         command.extend(["--", str(arguments["query"]), path])
         return await run_command(shlex.join(command), "read-only", sandbox_cwd())
     if name in ("write_file", "apply_patch"):
+        if thread_id and turn_id and agent.get("_project_save") is None:
+            return {"error": {"code": "project_choice_required", "message": "本次对话尚未确认项目；请先列出项目并让用户选择，再调用 project_select 或 project_create"}}
         if mode == "read-only":
             return approval_required(name)
         if not auto_approve:
             return approval_required(name)
     if name == "write_file":
-        target = safe_path(arguments["path"])
-        backup = atomic_write(target, arguments["content"])
-        return {"written": str(target.relative_to(_workspace_root())), "bytes": len(arguments["content"].encode()), "backup": str(backup.relative_to(_workspace_root()))}
+        target, root = project_tool_path(arguments["path"], agent)
+        if target == root:
+            raise ValueError("必须提供文件名")
+        backup = atomic_write(target, arguments["content"], sandbox_root=root if agent.get("_project_id") and agent.get("_project_save") else None)
+        if agent.get("_project_id") and agent.get("_project_save"):
+            record_artifact(agent["_project_id"], thread_id, turn_id, target, "file")
+        return {"written": str(target.relative_to(root)), "project_id": agent.get("_project_id") if agent.get("_project_save") else None, "bytes": len(arguments["content"].encode()), "backup": str(backup.relative_to(_workspace_root()))}
     if name == "apply_patch":
         if "patch" in arguments:
             patch = str(arguments.get("patch") or "")
@@ -368,15 +588,19 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
                 raise ValueError("补丁必须包含工作区内的安全目标路径")
             backups = []
             for path in paths:
-                target = safe_path(path)
+                target, _ = project_tool_path(path, agent)
                 backups.append(str(snapshot_file(target).relative_to(_workspace_root())))
             encoded = base64.b64encode(patch.encode()).decode()
             script = f"echo {shlex.quote(encoded)} | base64 -d > /tmp/codezzn.patch && git apply --check /tmp/codezzn.patch && git apply /tmp/codezzn.patch"
-            result = await run_command(script, "workspace-write", sandbox_cwd())
+            result = await run_command(script, "workspace-write", project_sandbox_cwd(agent))
             if result.get("exit_code"):
                 raise RuntimeError(result.get("stderr") or result.get("stdout") or "git apply failed")
+            if agent.get("_project_id") and agent.get("_project_save"):
+                for path in paths:
+                    target, _ = project_tool_path(path, agent)
+                    record_artifact(agent["_project_id"], thread_id, turn_id, target, "file")
             return {"changed": True, "paths": paths, "backups": backups, "result": result}
-        target = safe_path(arguments["path"])
+        target, root = project_tool_path(arguments["path"], agent)
         original = target.read_text(encoding="utf-8") if target.exists() else ""
         if "old" in arguments:
             old, new = arguments.get("old", ""), arguments.get("new", "")
@@ -386,8 +610,10 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
         else:
             raise ValueError("Unified diff patches are not supported; use exact old/new replacements")
         target.parent.mkdir(parents=True, exist_ok=True)
-        backup = atomic_write(target, updated)
-        return {"path": str(target.relative_to(_workspace_root())), "changed": original != updated, "backup": str(backup.relative_to(_workspace_root())), "diff": "".join(difflib.unified_diff(original.splitlines(True), updated.splitlines(True), fromfile=str(target), tofile=str(target)))}
+        backup = atomic_write(target, updated, sandbox_root=root if agent.get("_project_id") and agent.get("_project_save") else None)
+        if agent.get("_project_id") and agent.get("_project_save"):
+            record_artifact(agent["_project_id"], thread_id, turn_id, target, "file")
+        return {"path": str(target.relative_to(root)), "project_id": agent.get("_project_id") if agent.get("_project_save") else None, "changed": original != updated, "backup": str(backup.relative_to(_workspace_root())), "diff": "".join(difflib.unified_diff(original.splitlines(True), updated.splitlines(True), fromfile=str(target), tofile=str(target)))}
     if name == "run_shell":
         if not agent.get("allow_shell", False):
             raise PermissionError("此智能体未启用 shell 权限")
@@ -395,13 +621,19 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
             raise PermissionError("danger-full-access is not supported; use read-only or workspace-write")
         if not auto_approve:
             return approval_required(name)
-        return await run_command(arguments["command"], mode, sandbox_cwd())
+        before = project_file_state(agent)
+        result = await run_command(arguments["command"], mode, project_sandbox_cwd(agent))
+        changed = record_changed_project_files(agent, before, thread_id, turn_id)
+        return {**result, "project_artifacts": changed} if changed else result
     if name == "run_tests":
         if not agent.get("allow_shell", False):
             raise PermissionError("此智能体未启用 shell 权限")
         if not auto_approve:
             return approval_required(name)
-        return await run_command(arguments["command"], mode, sandbox_cwd())
+        before = project_file_state(agent)
+        result = await run_command(arguments["command"], mode, project_sandbox_cwd(agent))
+        changed = record_changed_project_files(agent, before, thread_id, turn_id)
+        return {**result, "project_artifacts": changed} if changed else result
     if name == "git_status":
         return await _run_git(["status", "--short"])
     if name == "git_diff":
@@ -549,12 +781,21 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
         runner = {".py":"python", ".sh":"sh"}.get(extension)
         if not runner: raise ValueError("只允许执行 .py 或 .sh Skill 脚本")
         args = [str(value) for value in (arguments.get("args") or [])]
-        package_relative = path.relative_to(BASE_WORKSPACE).as_posix()
+        package_relative = path.relative_to(tenant_workspace()).as_posix()
         return await run_command(shlex.join([runner, package_relative, *args]), mode, ".")
     if name == "browser":
         if not agent.get("allow_browser", False): raise PermissionError("当前智能体未启用浏览器能力")
         if not auto_approve and arguments.get("action") in {"click","mouse_click","mouse_move","scroll","hover","type","press","evaluate"}: return approval_required(name)
         values = dict(arguments); action = values.pop("action"); session = values.pop("session", thread_id or "default")
+        if action == "screenshot" and agent.get("_project_save") and agent.get("_project_id"):
+            root = project_root(agent["_project_id"])
+            token = use_workspace(root)
+            try:
+                result = await browser_manager.execute(action, session, **values)
+            finally:
+                reset_workspace(token)
+            record_artifact(agent["_project_id"], thread_id, turn_id, root / result["path"], "screenshot")
+            return {**result, "project_id": agent["_project_id"]}
         return await browser_manager.execute(action, session, **values)
     raise ValueError(name)
 
@@ -563,6 +804,8 @@ SIDE_EFFECT_TOOLS = {
     "write_file", "apply_patch", "run_shell", "run_tests", "git_branch", "git_stage", "git_commit",
     "restore_file", "memory_save", "delegate_task", "git_clone", "git_fetch", "git_push", "git_merge",
     "git_merge_abort", "github_create_pr", "github_review_comment", "skill_run_script", "browser",
+    "project_create", "project_select", "workflow_draft_create", "workflow_draft_update", "workflow_draft_save",
+    "workflow_draft_discard", "workflow_run",
 }
 
 
@@ -731,7 +974,8 @@ async def _run_responses_agent(agent, provider, selected_model, candidates, hist
             await _emit(events, on_event, "tool_started", name=name)
             approved = bool(approval_decision and approval_decision.get("tool_call_id") == call["id"] and approval_decision.get("decision") == "approved")
             denied = bool(approval_decision and approval_decision.get("tool_call_id") == call["id"] and approval_decision.get("decision") == "denied")
-            result = {"error":{"code":"approval_denied","message":approval_decision.get("reason") or "Approval denied"}} if denied else await execute_tool_once(call.get("id"), name, arguments, agent, routes, approved=approved, thread_id=thread_id, turn_id=turn_id, depth=depth, current_task_id=current_task_id)
+            tool_agent = {**agent, "_user_answer": approval_decision.get("reason", "")} if approved and name == "ask_user" else agent
+            result = {"error":{"code":"approval_denied","message":approval_decision.get("reason") or "Approval denied"}} if denied else await execute_tool_once(call.get("id"), name, arguments, tool_agent, routes, approved=approved, thread_id=thread_id, turn_id=turn_id, depth=depth, current_task_id=current_task_id)
             return call, name, arguments, result
         completed = await asyncio.gather(*(invoke(call) for call in pending), return_exceptions=True) if agent.get("parallel_tools", True) and agent.get("auto_approve") else [await invoke(call) for call in pending]
         outputs = list(next_input)
@@ -754,6 +998,13 @@ async def _run_responses_agent(agent, provider, selected_model, candidates, hist
 
 
 async def run_agent(agent, history, user_message, on_event=None, streaming=False, thread_id=None, turn_id=None, resume_state=None, approval_decision=None, depth=0, current_task_id=None):
+    project_choice = get_turn_project(turn_id) if turn_id else None
+    if project_choice is not None:
+        agent = dict(agent)
+        agent["_project_save"] = bool(project_choice["save_to_project"])
+        agent["_project_id"] = project_choice.get("project_id")
+        if agent["_project_id"]:
+            agent["memory_project_id"] = agent["_project_id"]
     if agent.get("team_id"):
         team = resource_get("agent_teams", agent["team_id"])
         if team and team.get("enabled", True):
@@ -885,7 +1136,8 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
                     approval_decision = None
                     await _emit(events, on_event, "tool_failed", name=name, reason="approval_denied")
                 else:
-                    result = await execute_tool_once(call.get("id"), name, arguments, agent, routes, approved=approved, thread_id=thread_id, turn_id=turn_id, depth=depth, current_task_id=current_task_id)
+                    tool_agent = {**agent, "_user_answer": approval_decision.get("reason", "")} if approved and name == "ask_user" else agent
+                    result = await execute_tool_once(call.get("id"), name, arguments, tool_agent, routes, approved=approved, thread_id=thread_id, turn_id=turn_id, depth=depth, current_task_id=current_task_id)
                     if approved:
                         approval_decision = None
                     if isinstance(result, dict) and isinstance(result.get("error"), dict) and result["error"].get("code") == "approval_required":

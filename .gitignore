@@ -1,5 +1,6 @@
 .env
 data/
+workspace/.codezzn-users/
 __pycache__/
 .pytest_cache/
 *.pyc

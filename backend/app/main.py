@@ -1,11 +1,12 @@
 import json
 import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from datetime import datetime
 import asyncio
 import zipfile
@@ -13,8 +14,8 @@ from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 
 from .agent import load_agent_run, persist_event, run_agent
-from .capabilities import ROLE_TEMPLATES
-from .db import connect, init_db, migrate_bailian_providers, new_id, now, resource_delete, resource_get, resource_list, resource_save, seed_defaults
+from .capabilities import ROLE_TEMPLATES, tool_policy_decision
+from .db import connect, current_tenant, ensure_tenant, init_db, migrate_bailian_providers, new_id, now, reset_tenant, resource_delete, resource_get, resource_list, resource_save, seed_defaults, tenant_ids, use_tenant
 from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, drop_knowledge_index, rag_status
 from .knowledge_eval import evaluate as evaluate_knowledge_backends
 from .knowledge_service import delete_document as delete_knowledge_document, ensure_remote_dataset, health as knowledge_health, reindex as reindex_knowledge_service, search as search_knowledge_service, status as knowledge_status, upload as upload_knowledge_document
@@ -26,13 +27,17 @@ from .sandbox import sandbox_status
 from .tasks import cancel_task, enqueue_task, get_task, list_tasks, task_events, task_queue
 from .workflows import create_run
 from .worktrees import ensure_worktree, list_worktrees, remove_worktree, worktree_path
-from .workspace import reset_workspace, use_workspace, BASE_WORKSPACE
+from .workspace import reset_workspace, use_workspace, tenant_workspace
+from .projects import artifact_path, create_project, get_artifact as get_project_artifact, get_artifact_version_content, get_project, list_artifact_versions, list_artifacts, list_projects, update_project
+from .domain_tools import discard_workflow_draft, get_workflow_draft, get_workflow_version, list_workflow_versions, save_workflow_draft
+from .intent import classify_intent
 from .skill_packages import import_package, read_package_file
 from .code_intelligence import rebuild_index, symbols as code_symbols, references as code_references, graph as code_graph
 from .lsp import lsp_manager
 from .browser import browser_manager
+from .tenant_migration import migrate_legacy_owner
 from .auth import (
-    clear_session, create_session, github_authorize_url, github_callback,
+    OAUTH_STATE_COOKIE, clear_session, create_session, github_authorize_url, github_callback,
     github_configured, login_user, register_user, request_user, set_session_cookie,
 )
 
@@ -146,14 +151,25 @@ async def lifespan(_app: FastAPI):
     init_db()
     seed_defaults()
     migrate_bailian_providers()
-    expire_memories()
-    backfill_memory_embeddings()
-    with connect() as db:
-        interrupted = db.execute("SELECT * FROM agent_runs WHERE status='running' AND task_id IS NULL").fetchall()
-    for row in interrupted:
-        state = json.loads(row["state"] or "{}")
-        enqueue_task("agent_resume", "恢复中断的智能体任务", {"agent_id":row["agent_id"],"thread_id":row["thread_id"],"turn_id":row["turn_id"],"prompt":state.get("user_message", "")}, max_attempts=3)
-        with connect() as db: db.execute("UPDATE agent_runs SET status='recovering',updated_at=? WHERE id=?", (now(), row["id"]))
+    legacy_owner = os.getenv("CODEZZN_LEGACY_OWNER_GITHUB_ID", "").strip()
+    if legacy_owner:
+        migrate_legacy_owner(legacy_owner)
+    for user_id in ([None] if not legacy_owner else []) + tenant_ids():
+        if user_id:
+            ensure_tenant(user_id)
+            tenant_workspace(user_id).mkdir(parents=True, exist_ok=True)
+        token = use_tenant(user_id)
+        try:
+            expire_memories()
+            backfill_memory_embeddings()
+            with connect() as db:
+                interrupted = db.execute("SELECT * FROM agent_runs WHERE status='running' AND task_id IS NULL").fetchall()
+            for row in interrupted:
+                state = json.loads(row["state"] or "{}")
+                enqueue_task("agent_resume", "恢复中断的智能体任务", {"agent_id":row["agent_id"],"thread_id":row["thread_id"],"turn_id":row["turn_id"],"prompt":state.get("user_message", "")}, max_attempts=3)
+                with connect() as db: db.execute("UPDATE agent_runs SET status='recovering',updated_at=? WHERE id=?", (now(), row["id"]))
+        finally:
+            reset_tenant(token)
     await task_queue.start(execute_persistent_task, int(os.getenv("CODEZZN_TASK_WORKERS", "4")))
     try:
         yield
@@ -177,7 +193,7 @@ async def access_control(request: Request, call_next):
     key = os.getenv("CODEZZN_ADMIN_KEY")
     path = request.url.path
     public = path in PUBLIC_PATHS or path.startswith("/assets/") or path.startswith("/api/auth/")
-    user = request_user(request)
+    user = request_user(request) if not public or path == "/api/auth/me" else None
     request.state.user = user
     supplied = request.headers.get("X-Codezzn-Key") or request.query_params.get("api_key")
     key_valid = bool(key and supplied == key)
@@ -186,7 +202,14 @@ async def access_control(request: Request, call_next):
         if path in {"/", "/workbench.html"}:
             return RedirectResponse("/login?next=/workbench.html", status_code=303)
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
-    return await call_next(request)
+    token = use_tenant(user["id"] if user else None)
+    try:
+        if user:
+            ensure_tenant(user["id"])
+            tenant_workspace().mkdir(parents=True, exist_ok=True)
+        return await call_next(request)
+    finally:
+        reset_tenant(token)
 
 
 @app.get("/")
@@ -232,33 +255,74 @@ def auth_login(payload: dict = Body(...)):
 def auth_logout(request: Request):
     response = JSONResponse({"ok": True})
     clear_session(request, response)
+    response.delete_cookie(OAUTH_STATE_COOKIE, path="/", samesite="lax")
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
 @app.get("/api/auth/github/start")
 def auth_github_start(next: str = "/workbench.html"):
-    return RedirectResponse(github_authorize_url(next), status_code=303)
+    url, state = github_authorize_url(next)
+    response = RedirectResponse(url, status_code=303)
+    response.set_cookie(
+        OAUTH_STATE_COOKIE, state, max_age=600, httponly=True,
+        secure=os.getenv("CODEZZN_COOKIE_SECURE", "false").lower() == "true",
+        samesite="lax", path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/api/auth/github/callback")
-async def auth_github_callback(code: str = "", state: str = "", error: str = ""):
+async def auth_github_callback(request: Request, code: str = "", state: str = "", error: str = ""):
     if error:
-        return RedirectResponse("/login?error=github_denied", status_code=303)
-    if not code or not state:
-        return RedirectResponse("/login?error=github_invalid", status_code=303)
-    try:
-        user, next_path = await github_callback(code, state)
-    except HTTPException as exc:
-        return RedirectResponse(f"/login?error=github_{exc.status_code}", status_code=303)
-    token, expires = create_session(user["id"])
-    response = RedirectResponse(next_path, status_code=303)
-    set_session_cookie(response, token, expires)
+        response = RedirectResponse("/login?error=github_denied", status_code=303)
+    elif not code or not state or not secrets.compare_digest(request.cookies.get(OAUTH_STATE_COOKIE) or "", state):
+        response = RedirectResponse("/login?error=github_invalid", status_code=303)
+    else:
+        try:
+            user, next_path = await github_callback(code, state)
+        except HTTPException as exc:
+            response = RedirectResponse(f"/login?error=github_{exc.status_code}", status_code=303)
+        else:
+            response = RedirectResponse(next_path, status_code=303)
+            clear_session(request, response)
+            token, expires = create_session(user["id"])
+            set_session_cookie(response, token, expires)
+    response.delete_cookie(OAUTH_STATE_COOKIE, path="/", samesite="lax")
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
 @app.get("/healthz")
 def health():
     return {"status": "ok", "name": "codezzn", "version": app.version}
+
+
+@app.post("/api/agent/intent")
+async def agent_intent(payload: dict = Body(...)):
+    agent_id = payload.get("agent_id")
+    content = payload.get("content")
+    if not isinstance(agent_id, str) or not isinstance(content, str):
+        raise HTTPException(400, "必须提供 agent_id 和 content")
+    agent = resource_get("agents", agent_id)
+    if not agent or agent.get("enabled") is False:
+        raise HTTPException(404, "智能体不存在")
+    thread_id = payload.get("thread_id")
+    history = []
+    if thread_id:
+        with connect() as db:
+            thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
+            history = [dict(row) for row in db.execute(
+                "SELECT role,content FROM messages WHERE thread_id=? ORDER BY created_at DESC LIMIT 6", (thread_id,),
+            ).fetchall()]
+        if not thread:
+            raise HTTPException(404, "对话不存在")
+        agent = _agent_for_thread(agent, thread)
+    try:
+        return await classify_intent(agent, content, list(reversed(history)))
+    except ValueError as exc:
+        raise HTTPException(503, str(exc)) from exc
 
 
 def valid_kind(kind):
@@ -583,6 +647,49 @@ async def run_workflow_endpoint(workflow_id: str, payload: dict = Body(...)):
     return await create_run(workflow, payload.get("input", ""))
 
 
+@app.get("/api/workflow-drafts/{draft_id}")
+def read_workflow_draft(draft_id: str):
+    draft = get_workflow_draft(draft_id)
+    if not draft:
+        raise HTTPException(404, "Workflow 草稿不存在")
+    return draft
+
+
+@app.get("/api/workflows/{workflow_id}/versions")
+def workflow_versions_endpoint(workflow_id: str):
+    versions = list_workflow_versions(workflow_id)
+    if versions is None:
+        raise HTTPException(404, "Workflow 不存在")
+    return {"data": versions}
+
+
+@app.get("/api/workflows/{workflow_id}/versions/{version}")
+def workflow_version_endpoint(workflow_id: str, version: int):
+    definition = get_workflow_version(workflow_id, version)
+    if definition is None:
+        raise HTTPException(404, "Workflow 版本不存在")
+    return definition
+
+
+@app.post("/api/workflow-drafts/{draft_id}/save")
+def save_workflow_draft_endpoint(draft_id: str):
+    draft = get_workflow_draft(draft_id)
+    if not draft:
+        raise HTTPException(404, "Workflow 草稿不存在")
+    try:
+        return save_workflow_draft(draft_id, thread_id=draft["thread_id"], turn_id=draft["turn_id"])
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/workflow-drafts/{draft_id}/discard")
+def discard_workflow_draft_endpoint(draft_id: str):
+    try:
+        return discard_workflow_draft(draft_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @app.post("/api/workflows/{workflow_id}/enqueue")
 def enqueue_workflow_endpoint(workflow_id: str, payload: dict = Body(default={})):
     workflow = resource_get("workflows", workflow_id)
@@ -701,28 +808,199 @@ async def delete_worktree(worktree_id: str): return {"removed": await remove_wor
 
 
 @app.post("/api/code-index/rebuild")
-async def rebuild_code_index(): return await asyncio.to_thread(rebuild_index, BASE_WORKSPACE)
+async def rebuild_code_index(): return await asyncio.to_thread(rebuild_index, tenant_workspace())
 
 
 @app.get("/api/code-index/symbols")
-def query_code_symbols(query: str = "", limit: int = 100): return {"data": code_symbols(BASE_WORKSPACE, query, limit)}
+def query_code_symbols(query: str = "", limit: int = 100): return {"data": code_symbols(tenant_workspace(), query, limit)}
 
 
 @app.get("/api/code-index/references")
-def query_code_references(symbol: str, limit: int = 200): return {"data": code_references(BASE_WORKSPACE, symbol, limit)}
+def query_code_references(symbol: str, limit: int = 200): return {"data": code_references(tenant_workspace(), symbol, limit)}
 
 
 @app.get("/api/code-index/graph")
 def query_code_graph(kind: str = "call", symbol: str = "", limit: int = 300):
     if kind not in {"call", "import"}: raise HTTPException(400, "kind 必须为 call 或 import")
-    return {"data": code_graph(BASE_WORKSPACE, kind, symbol, limit)}
+    return {"data": code_graph(tenant_workspace(), kind, symbol, limit)}
 
 
 @app.get("/api/artifacts")
 def get_artifact(path: str):
-    target = (BASE_WORKSPACE / path).resolve()
-    if BASE_WORKSPACE not in target.parents or not target.is_file(): raise HTTPException(404, "产物不存在")
+    root = tenant_workspace().resolve()
+    target = (root / path).resolve()
+    if root not in target.parents or not target.is_file(): raise HTTPException(404, "产物不存在")
     return FileResponse(target)
+
+
+@app.get("/api/projects")
+def projects_list():
+    return {"data": list_projects()}
+
+
+@app.post("/api/projects")
+def projects_create(payload: dict = Body(...)):
+    try:
+        return create_project(payload.get("name"), payload.get("description", ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/projects/{project_id}")
+def projects_read(project_id: str):
+    try:
+        project = get_project(project_id)
+    except ValueError:
+        project = None
+    if not project:
+        raise HTTPException(404, "项目不存在")
+    return project
+
+
+@app.patch("/api/projects/{project_id}")
+def projects_update(project_id: str, payload: dict = Body(...)):
+    try:
+        project = update_project(project_id, payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not project:
+        raise HTTPException(404, "项目不存在")
+    return project
+
+
+@app.get("/api/projects/{project_id}/artifacts")
+def projects_artifacts(project_id: str):
+    try:
+        artifacts = list_artifacts(project_id)
+    except ValueError:
+        artifacts = None
+    if artifacts is None:
+        raise HTTPException(404, "项目不存在")
+    return {"data": artifacts}
+
+
+@app.get("/api/projects/{project_id}/resources")
+def projects_resources(project_id: str):
+    try:
+        project = get_project(project_id)
+    except ValueError:
+        project = None
+    if not project:
+        raise HTTPException(404, "项目不存在")
+    workflows = [
+        {"id": item["id"], "name": item["name"], "description": item.get("description", ""),
+         "version": item.get("version", 0), "updated_at": item["updated_at"]}
+        for item in resource_list("workflows") if item.get("project_id") == project_id
+    ]
+    return {"workflows": workflows}
+
+
+@app.get("/api/projects/{project_id}/artifacts/{artifact_id}/download")
+def projects_artifact_download(project_id: str, artifact_id: str):
+    try:
+        artifact = get_project_artifact(project_id, artifact_id)
+        target = artifact_path(project_id, artifact["path"]) if artifact else None
+    except ValueError:
+        target = None
+    if not target or not target.is_file():
+        raise HTTPException(404, "产物不存在")
+    return FileResponse(target, filename=target.name, headers={"X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/api/projects/{project_id}/artifacts/{artifact_id}/versions")
+def projects_artifact_versions(project_id: str, artifact_id: str):
+    try:
+        versions = list_artifact_versions(project_id, artifact_id)
+    except ValueError:
+        versions = None
+    if versions is None:
+        raise HTTPException(404, "产物不存在")
+    return {"data": versions}
+
+
+@app.get("/api/projects/{project_id}/artifacts/{artifact_id}/versions/{version}/download")
+def projects_artifact_version_download(project_id: str, artifact_id: str, version: int):
+    try:
+        artifact = get_project_artifact(project_id, artifact_id)
+        content = get_artifact_version_content(project_id, artifact_id, version) if artifact else None
+    except ValueError:
+        artifact, content = None, None
+    if artifact is None or content is None:
+        raise HTTPException(404, "该版本不存在或文件过大，未保存版本快照")
+    filename = Path(artifact["path"]).name.replace('"', "")
+    return Response(content, media_type="application/octet-stream", headers={
+        "Content-Disposition": f'attachment; filename="{filename}"', "X-Content-Type-Options": "nosniff",
+    })
+
+
+@app.get("/api/projects/{project_id}/artifacts/{artifact_id}/content")
+def projects_artifact_content(project_id: str, artifact_id: str):
+    try:
+        artifact = get_project_artifact(project_id, artifact_id)
+        target = artifact_path(project_id, artifact["path"]) if artifact else None
+    except ValueError:
+        target = None
+    if not target or not target.is_file():
+        raise HTTPException(404, "产物不存在")
+    if target.stat().st_size > 1024 * 1024:
+        raise HTTPException(413, "文件过大，请下载后查看")
+    try:
+        content = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(415, "该产物不是 UTF-8 文本，请下载后查看") from exc
+    return {"artifact": artifact, "content": content}
+
+
+def _agent_can_save_project_files(agent: dict | None, intent_kind: str = "file") -> bool:
+    """A project choice may cover files or domain assets, but never bypass policy."""
+    if not agent or agent.get("enabled") is False:
+        return False
+    if agent.get("sandbox_mode") not in {"workspace-write", "danger-full-access"}:
+        return False
+    file_writer = any(
+        name in (agent.get("builtin_tools") or [])
+        and tool_policy_decision(agent, name) != "deny"
+        for name in ("write_file", "apply_patch")
+    )
+    if intent_kind == "workflow":
+        return all(tool_policy_decision(agent, name) != "deny" for name in (
+            "workflow_draft_create", "workflow_draft_save",
+        ))
+    if intent_kind == "project":
+        return tool_policy_decision(agent, "project_create") != "deny"
+    return file_writer
+
+
+def _validate_turn_project_choice(db, payload: dict, agent: dict | None = None):
+    project_id = payload.get("project_id")
+    save = payload.get("save_to_project", False)
+    if not isinstance(save, bool):
+        raise HTTPException(400, "save_to_project 必须是布尔值")
+    if project_id is not None:
+        if not isinstance(project_id, str) or not db.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+            raise HTTPException(404, "项目不存在")
+    if save and not project_id:
+        raise HTTPException(400, "保存产物前必须选择项目")
+    if save and agent is not None and not _agent_can_save_project_files(agent, str(payload.get("intent_kind") or "file")):
+        raise HTTPException(409, "当前智能体没有项目或文件写入能力；请检查工具策略和沙箱模式")
+    return project_id, save
+
+
+def _turn_project_choice(db, thread_id: str, turn_id: str, payload: dict, timestamp: int, agent: dict | None = None):
+    """Persist explicit turn intent before the agent starts or streams."""
+    if "project_id" not in payload and "save_to_project" not in payload:
+        return
+    project_id, save = _validate_turn_project_choice(db, payload, agent)
+    db.execute(
+        "INSERT INTO turn_projects(turn_id,thread_id,project_id,save_to_project,created_at) VALUES(?,?,?,?,?)",
+        (turn_id, thread_id, project_id, int(save), timestamp),
+    )
+    if project_id:
+        db.execute(
+            "INSERT OR IGNORE INTO thread_projects(thread_id,project_id,created_at) VALUES(?,?,?)",
+            (thread_id, project_id, timestamp),
+        )
+        db.execute("UPDATE threads SET active_project_id=? WHERE id=?", (project_id, thread_id))
 
 
 @app.post("/api/threads")
@@ -730,7 +1008,7 @@ def create_thread(payload: dict = Body(default={})):
     thread_id, timestamp = new_id("thr"), now()
     with connect() as db:
         db.execute("INSERT INTO threads(id,name,agent_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (thread_id, payload.get("name", "新对话"), payload.get("agent_id"), "idle", timestamp, timestamp))
-    return {"id": thread_id, "name": payload.get("name", "新对话"), "agent_id": payload.get("agent_id"), "status": "idle", "capability_overrides": {}, "created_at": timestamp, "updated_at": timestamp}
+    return {"id": thread_id, "name": payload.get("name", "新对话"), "agent_id": payload.get("agent_id"), "status": "idle", "capability_overrides": {}, "active_project_id": None, "created_at": timestamp, "updated_at": timestamp}
 
 
 @app.get("/api/threads")
@@ -749,10 +1027,11 @@ def fork_thread(thread_id: str, payload: dict = Body(default={} )):
         raise HTTPException(404, "对话不存在")
     new_thread, timestamp = new_id("thr"), now()
     with connect() as db:
-        db.execute("INSERT INTO threads(id,name,agent_id,status,capability_overrides,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (new_thread, payload.get("name") or f"{source['name']} (fork)", source["agent_id"], "idle", source["capability_overrides"], timestamp, timestamp))
+        db.execute("INSERT INTO threads(id,name,agent_id,status,capability_overrides,active_project_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (new_thread, payload.get("name") or f"{source['name']} (fork)", source["agent_id"], "idle", source["capability_overrides"], source["active_project_id"], timestamp, timestamp))
+        db.execute("INSERT INTO thread_projects(thread_id,project_id,created_at) SELECT ?,project_id,? FROM thread_projects WHERE thread_id=?", (new_thread, timestamp, thread_id))
         for message in messages:
             db.execute("INSERT INTO messages(id,thread_id,turn_id,role,type,content,meta,created_at) VALUES(?,?,?,?,?,?,?,?)", (new_id("msg"), new_thread, message["turn_id"], message["role"], message["type"], message["content"], message["meta"], message["created_at"]))
-    return {"id": new_thread, "name": payload.get("name") or f"{source['name']} (fork)", "agent_id": source["agent_id"], "status": "idle", "capability_overrides": json.loads(source["capability_overrides"] or "{}")}
+    return {"id": new_thread, "name": payload.get("name") or f"{source['name']} (fork)", "agent_id": source["agent_id"], "status": "idle", "capability_overrides": json.loads(source["capability_overrides"] or "{}"), "active_project_id": source["active_project_id"]}
 
 
 @app.get("/api/threads/{thread_id}")
@@ -760,10 +1039,34 @@ def read_thread(thread_id: str):
     with connect() as db:
         thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
         messages = db.execute("SELECT * FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
+        project_rows = db.execute("SELECT project_id FROM thread_projects WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
+        turn_choices = db.execute("SELECT turn_id,project_id,save_to_project FROM turn_projects WHERE thread_id=?", (thread_id,)).fetchall()
+        artifacts = db.execute("SELECT * FROM project_artifacts WHERE thread_id=? ORDER BY created_at,id", (thread_id,)).fetchall()
+        resource_assets = db.execute("SELECT * FROM resource_assets WHERE thread_id=? ORDER BY created_at,id", (thread_id,)).fetchall()
+        run_status = {row["id"]: row["status"] for row in db.execute(
+            "SELECT id,status FROM workflow_runs WHERE id IN (SELECT resource_id FROM resource_assets WHERE thread_id=? AND kind='workflow_run')",
+            (thread_id,),
+        )}
     if not thread:
         raise HTTPException(404, "对话不存在")
     result = _thread_payload(thread)
-    result["messages"] = [{**dict(row), "meta": json.loads(row["meta"])} for row in messages]
+    choices_by_turn = {row["turn_id"]: {"project_id": row["project_id"], "save_to_project": bool(row["save_to_project"])} for row in turn_choices}
+    artifacts_by_turn = {}
+    for row in artifacts:
+        artifacts_by_turn.setdefault(row["turn_id"], []).append(dict(row))
+    resources_by_turn = {}
+    for row in resource_assets:
+        item = dict(row)
+        if item["kind"] == "workflow_run":
+            item["status"] = run_status.get(item["resource_id"], item["status"])
+        resources_by_turn.setdefault(row["turn_id"], []).append(item)
+    result["messages"] = [{
+        **dict(row), "meta": json.loads(row["meta"]),
+        "project_choice": choices_by_turn.get(row["turn_id"]) if row["role"] == "assistant" else None,
+        "project_artifacts": artifacts_by_turn.get(row["turn_id"], []) if row["role"] == "assistant" else [],
+        "resource_assets": resources_by_turn.get(row["turn_id"], []) if row["role"] == "assistant" else [],
+    } for row in messages]
+    result["project_ids"] = [row["project_id"] for row in project_rows]
     return result
 
 
@@ -803,6 +1106,17 @@ def update_thread(thread_id: str, payload: dict = Body(...)):
             cleaned["mcp_server_ids"] = _capability_ids(overrides["mcp_server_ids"], "mcp_servers")
         updates.append("capability_overrides=?")
         values.append(json.dumps(cleaned, ensure_ascii=False))
+    if "active_project_id" in payload:
+        project_id = payload["active_project_id"]
+        if project_id is not None:
+            try:
+                valid_project = isinstance(project_id, str) and get_project(project_id)
+            except ValueError:
+                valid_project = False
+            if not valid_project:
+                raise HTTPException(404, "项目不存在")
+        updates.append("active_project_id=?")
+        values.append(project_id)
     if not updates:
         raise HTTPException(400, "没有可更新的会话字段")
     updates.append("updated_at=?")
@@ -810,6 +1124,8 @@ def update_thread(thread_id: str, payload: dict = Body(...)):
     values.append(thread_id)
     with connect() as db:
         cur = db.execute(f"UPDATE threads SET {', '.join(updates)} WHERE id=?", values)
+        if cur.rowcount and payload.get("active_project_id"):
+            db.execute("INSERT OR IGNORE INTO thread_projects(thread_id,project_id,created_at) VALUES(?,?,?)", (thread_id, payload["active_project_id"], now()))
         thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
     if not cur.rowcount or not thread:
         raise HTTPException(404, "会话不存在")
@@ -835,6 +1151,10 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
         raise HTTPException(404, "审批不存在")
     if approval["status"] != "pending":
         raise HTTPException(409, "审批已处理")
+    if approval["tool_name"] == "ask_user" and decision == "approved" and not reason.strip():
+        raise HTTPException(400, "请填写或选择一个回答")
+    if len(reason) > 4000:
+        raise HTTPException(400, "回答不能超过 4000 个字符")
     if not approval["resumable"] or not approval["tool_call_id"]:
         raise HTTPException(409, "该审批由旧版本创建，无法自动续跑")
     thread_id, turn_id = approval["thread_id"], approval["turn_id"]
@@ -947,14 +1267,21 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
     agent = resource_get("agents", agent_id)
     if not agent or not content: raise HTTPException(400, "请选择有效的智能体并提供消息")
     agent = _agent_for_thread(agent, thread)
+    with connect() as db:
+        _validate_turn_project_choice(db, payload, agent)
     lock = await thread_lock(thread_id)
     if lock.locked():
         raise HTTPException(409, "该会话已有任务正在运行")
     await lock.acquire()
     turn_id, timestamp = new_id("turn"), now()
-    with connect() as db:
-        db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
-        db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
+    try:
+        with connect() as db:
+            db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
+            _turn_project_choice(db, thread_id, turn_id, payload, timestamp, agent)
+            db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
+    except Exception:
+        lock.release()
+        raise
     queue = asyncio.Queue()
     event_sequence = 0
     async def emit(event):
@@ -1047,14 +1374,21 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
     content = payload.get("content", "").strip()
     if not content:
         raise HTTPException(400, "消息不能为空")
+    with connect() as db:
+        _validate_turn_project_choice(db, payload, agent)
     lock = await thread_lock(thread_id)
     if lock.locked():
         raise HTTPException(409, "该会话已有任务正在运行")
     await lock.acquire()
     turn_id, timestamp = new_id("turn"), now()
-    with connect() as db:
-        db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
-        db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
+    try:
+        with connect() as db:
+            db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
+            _turn_project_choice(db, thread_id, turn_id, payload, timestamp, agent)
+            db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
+    except Exception:
+        lock.release()
+        raise
     try:
         result = await run_agent_isolated(agent, [dict(item) for item in history], content, thread_id=thread_id, turn_id=turn_id)
         if result["status"] == "waiting_for_approval":

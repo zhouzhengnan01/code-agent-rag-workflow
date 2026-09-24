@@ -62,8 +62,8 @@ def test_python_ast_index_symbols_references_and_graph(monkeypatch, tmp_path):
 
 def test_skill_zip_import_and_integrity(monkeypatch, tmp_path):
     isolated_db(monkeypatch, tmp_path)
-    from backend.app import skill_packages
-    monkeypatch.setattr(skill_packages, "PACKAGE_ROOT", tmp_path / "skills")
+    from backend.app import skill_packages, workspace
+    monkeypatch.setattr(workspace, "BASE_WORKSPACE", tmp_path)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("demo/SKILL.md", "---\nname: Demo\nversion: 1.2.3\n---\nUse the script.")

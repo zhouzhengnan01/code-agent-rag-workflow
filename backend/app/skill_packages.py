@@ -6,11 +6,14 @@ import zipfile
 from pathlib import Path
 
 from .db import new_id, resource_save
-from .workspace import BASE_WORKSPACE
+from .workspace import tenant_workspace
 
 
-PACKAGE_ROOT = BASE_WORKSPACE / ".codezzn-skills"
 MAX_FILES, MAX_UNPACKED = 500, 20 * 1024 * 1024
+
+
+def package_root():
+    return tenant_workspace() / ".codezzn-skills"
 
 
 def _frontmatter(text):
@@ -24,7 +27,7 @@ def _frontmatter(text):
 
 
 def import_package(filename, raw):
-    package_id = new_id("skillpkg"); destination = PACKAGE_ROOT / package_id
+    package_id = new_id("skillpkg"); destination = package_root() / package_id
     destination.mkdir(parents=True, exist_ok=False)
     try:
         if filename.lower().endswith(".zip"):
@@ -72,7 +75,7 @@ def import_package(filename, raw):
 def package_path(skill, relative=""):
     package_id = str(skill.get("package_id") or "")
     if not re.fullmatch(r"skillpkg_[a-f0-9]{16}", package_id): raise ValueError("该技能不是已安装的 Skill 包")
-    root = (PACKAGE_ROOT / package_id).resolve(); target = (root / relative).resolve()
+    root = (package_root() / package_id).resolve(); target = (root / relative).resolve()
     if target != root and root not in target.parents: raise ValueError("Skill 路径越界")
     return target
 

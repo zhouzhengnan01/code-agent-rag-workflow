@@ -1,10 +1,14 @@
 import re
 import shlex
+import logging
 from pathlib import Path
 
 from .db import connect, new_id, now
 from .sandbox import run_command
-from .workspace import BASE_WORKSPACE
+from .workspace import tenant_workspace
+
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_name(value): return re.sub(r"[^A-Za-z0-9._-]+", "-", str(value))[:80].strip(".-") or new_id("task")
@@ -16,10 +20,19 @@ async def ensure_worktree(task_id=None, thread_id=None, base_ref="HEAD"):
         row = db.execute("SELECT * FROM worktrees WHERE (task_id=? OR thread_id=?) AND status='active' ORDER BY created_at DESC LIMIT 1", (task_id, thread_id)).fetchone()
     if row: return dict(row)
     name = _safe_name(owner); relative = f".codezzn-worktrees/{name}"; branch = f"codezzn/{name}"
-    probe = await run_command("git -c safe.directory=* rev-parse --is-inside-work-tree", "read-only")
-    if probe.get("exit_code") != 0: return None
+    # git init creates an unborn HEAD. It is a repository, but worktree add
+    # cannot branch from HEAD until there is a first commit. Treat it like a
+    # non-Git workspace instead of failing every chat before the model runs.
+    probe = await run_command(
+        "git -c safe.directory=* rev-parse --is-inside-work-tree "
+        "&& git -c safe.directory=* rev-parse --verify --quiet 'HEAD^{commit}'",
+        "read-only",
+    )
+    if probe.get("exit_code") != 0:
+        logger.warning("Git worktree unavailable (no committed HEAD or no repository); task uses tenant workspace without per-task file isolation")
+        return None
     result = await run_command(f"git -c safe.directory=* worktree add -b {shlex.quote(branch)} {shlex.quote(relative)} {shlex.quote(base_ref)}", "workspace-write")
-    if result.get("exit_code") != 0 and not (BASE_WORKSPACE / relative).exists():
+    if result.get("exit_code") != 0 and not (tenant_workspace() / relative).exists():
         raise RuntimeError("创建任务 worktree 失败: " + result.get("output", "")[-2000:])
     timestamp, item_id = now(), new_id("wt")
     with connect() as db:
@@ -28,7 +41,7 @@ async def ensure_worktree(task_id=None, thread_id=None, base_ref="HEAD"):
     return dict(row)
 
 
-def worktree_path(item): return (BASE_WORKSPACE / item["path"]).resolve()
+def worktree_path(item): return (tenant_workspace() / item["path"]).resolve()
 
 
 def list_worktrees():

@@ -11,7 +11,10 @@ SUPPORTED_NODE_TYPES = {"input", "prompt", "agent", "knowledge", "mcp", "output"
 
 
 def validate_workflow(workflow):
-    nodes = {node["id"]: node for node in workflow.get("nodes", [])}
+    raw_nodes = workflow.get("nodes", [])
+    if not isinstance(raw_nodes, list) or any(not isinstance(node, dict) or not isinstance(node.get("id"), str) or not node["id"] for node in raw_nodes):
+        raise ValueError("工作流节点必须具有非空字符串 ID")
+    nodes = {node["id"]: node for node in raw_nodes}
     if not nodes:
         raise ValueError("工作流至少需要一个节点")
     if len(nodes) != len(workflow.get("nodes", [])):
@@ -19,9 +22,27 @@ def validate_workflow(workflow):
     for node in nodes.values():
         if node.get("type", "prompt") not in SUPPORTED_NODE_TYPES:
             raise ValueError(f"不支持的节点类型: {node.get('type')}")
-    for edge in workflow.get("edges", []):
+    edges = workflow.get("edges", [])
+    if not isinstance(edges, list) or any(not isinstance(edge, dict) for edge in edges):
+        raise ValueError("工作流连线必须是对象数组")
+    successors = {node_id: [] for node_id in nodes}
+    indegree = {node_id: 0 for node_id in nodes}
+    for edge in edges:
         if edge.get("source") not in nodes or edge.get("target") not in nodes:
             raise ValueError("工作流边引用了不存在的节点")
+        successors[edge["source"]].append(edge["target"])
+        indegree[edge["target"]] += 1
+    ready = [node_id for node_id, count in indegree.items() if count == 0]
+    visited = 0
+    while ready:
+        node_id = ready.pop()
+        visited += 1
+        for target in successors[node_id]:
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                ready.append(target)
+    if visited != len(nodes):
+        raise ValueError("工作流不能包含环")
     return nodes
 
 

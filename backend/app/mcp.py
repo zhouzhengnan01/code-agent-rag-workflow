@@ -3,6 +3,8 @@ import json
 
 import httpx
 
+from .db import current_tenant
+
 
 class McpError(RuntimeError):
     pass
@@ -143,6 +145,8 @@ class McpManager:
         return result
 
     async def _stdio(self, config, method, params):
+        if current_tenant() is not None:
+            raise McpError("多用户模式下 stdio MCP 暂不可用；请使用 HTTP MCP 服务")
         key = config["id"]
         lock = self.locks.setdefault(key, asyncio.Lock())
         async with lock:

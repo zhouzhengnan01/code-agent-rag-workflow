@@ -1,15 +1,41 @@
 import json
 import os
+import contextvars
+import re
 import sqlite3
 import threading
 import time
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 
 
 DATA_DIR = os.getenv("CODEZZN_DATA_DIR", os.path.join(os.getcwd(), "data"))
 DB_PATH = os.path.join(DATA_DIR, "codezzn.db")
 _lock = threading.RLock()
+_tenant = contextvars.ContextVar("codezzn_tenant", default=None)
+_initialized_tenants = set()
+_tenant_lock = threading.RLock()
+
+
+def current_tenant():
+    return _tenant.get()
+
+
+def use_tenant(user_id):
+    if user_id is not None and not re.fullmatch(r"usr_[0-9a-f]{16}", user_id):
+        raise ValueError("Invalid user id")
+    return _tenant.set(user_id)
+
+
+def reset_tenant(token):
+    _tenant.reset(token)
+
+
+def tenant_db_path(user_id):
+    if not re.fullmatch(r"usr_[0-9a-f]{16}", user_id):
+        raise ValueError("Invalid user id")
+    return Path(DB_PATH).parent / "users" / user_id / "codezzn.db"
 
 
 def now():
@@ -21,22 +47,48 @@ def new_id(prefix):
 
 
 @contextmanager
-def connect():
-    os.makedirs(DATA_DIR, exist_ok=True)
+def connect(*, global_db=False):
+    target = Path(DB_PATH) if global_db or current_tenant() is None else tenant_db_path(current_tenant())
+    target.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
-        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn = sqlite3.connect(target, timeout=30)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         try:
             yield conn
             conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
 
+def tenant_ids():
+    with connect(global_db=True) as db:
+        return [row["id"] for row in db.execute("SELECT id FROM users ORDER BY created_at")]
+
+
+def ensure_tenant(user_id):
+    """Create one account's private store on first use; never copy shared legacy data."""
+    if user_id in _initialized_tenants and tenant_db_path(user_id).is_file():
+        return
+    with _tenant_lock:
+        if user_id in _initialized_tenants and tenant_db_path(user_id).is_file():
+            return
+        token = use_tenant(user_id)
+        try:
+            init_db()
+            seed_defaults()
+            migrate_bailian_providers()
+            _initialized_tenants.add(user_id)
+        finally:
+            reset_tenant(token)
+
+
 def init_db():
     with connect() as db:
+        db.execute("PRAGMA journal_mode=WAL")
         db.executescript(
             """
             CREATE TABLE IF NOT EXISTS resources (
@@ -49,7 +101,60 @@ def init_db():
               id TEXT PRIMARY KEY, name TEXT NOT NULL, agent_id TEXT,
               status TEXT NOT NULL DEFAULT 'idle', archived INTEGER NOT NULL DEFAULT 0,
               capability_overrides TEXT NOT NULL DEFAULT '{}',
+              active_project_id TEXT,
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS projects (
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS thread_projects (
+              thread_id TEXT NOT NULL, project_id TEXT NOT NULL, created_at INTEGER NOT NULL,
+              PRIMARY KEY(thread_id, project_id),
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+              FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS turn_projects (
+              turn_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, project_id TEXT,
+              save_to_project INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+              FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE SET NULL
+            );
+            CREATE TABLE IF NOT EXISTS project_artifacts (
+              id TEXT PRIMARY KEY, project_id TEXT NOT NULL, thread_id TEXT NOT NULL,
+              turn_id TEXT NOT NULL, path TEXT NOT NULL, kind TEXT NOT NULL,
+              created_at INTEGER NOT NULL, UNIQUE(project_id,path),
+              FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_project_artifacts_project ON project_artifacts(project_id,created_at DESC);
+            CREATE TABLE IF NOT EXISTS project_artifact_versions (
+              artifact_id TEXT NOT NULL, version INTEGER NOT NULL, turn_id TEXT NOT NULL,
+              sha256 TEXT NOT NULL, size_bytes INTEGER NOT NULL, content BLOB,
+              created_at INTEGER NOT NULL, PRIMARY KEY(artifact_id,version),
+              FOREIGN KEY(artifact_id) REFERENCES project_artifacts(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS resource_assets (
+              id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+              kind TEXT NOT NULL, resource_id TEXT NOT NULL, name TEXT NOT NULL,
+              project_id TEXT, status TEXT NOT NULL DEFAULT 'ready',
+              created_at INTEGER NOT NULL,
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_resource_assets_thread ON resource_assets(thread_id,turn_id,created_at);
+            CREATE TABLE IF NOT EXISTS workflow_drafts (
+              id TEXT PRIMARY KEY, workflow_id TEXT, base_updated_at INTEGER,
+              base_fingerprint TEXT,
+              name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+              definition TEXT NOT NULL, project_id TEXT,
+              status TEXT NOT NULL DEFAULT 'draft', thread_id TEXT, turn_id TEXT,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_workflow_drafts_workflow ON workflow_drafts(workflow_id,status);
+            CREATE TABLE IF NOT EXISTS workflow_versions (
+              workflow_id TEXT NOT NULL, version INTEGER NOT NULL,
+              definition TEXT NOT NULL, created_at INTEGER NOT NULL,
+              PRIMARY KEY(workflow_id,version)
             );
             CREATE TABLE IF NOT EXISTS messages (
               id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
@@ -190,11 +295,16 @@ def init_db():
         thread_columns = {row["name"] for row in db.execute("PRAGMA table_info(threads)")}
         if "capability_overrides" not in thread_columns:
             db.execute("ALTER TABLE threads ADD COLUMN capability_overrides TEXT NOT NULL DEFAULT '{}'")
+        if "active_project_id" not in thread_columns:
+            db.execute("ALTER TABLE threads ADD COLUMN active_project_id TEXT")
         workflow_columns = {row["name"] for row in db.execute("PRAGMA table_info(workflow_runs)")}
         if "state" not in workflow_columns:
             db.execute("ALTER TABLE workflow_runs ADD COLUMN state TEXT NOT NULL DEFAULT '{}'")
         if "error" not in workflow_columns:
             db.execute("ALTER TABLE workflow_runs ADD COLUMN error TEXT")
+        draft_columns = {row["name"] for row in db.execute("PRAGMA table_info(workflow_drafts)")}
+        if "base_fingerprint" not in draft_columns:
+            db.execute("ALTER TABLE workflow_drafts ADD COLUMN base_fingerprint TEXT")
         memory_columns = {row["name"] for row in db.execute("PRAGMA table_info(memories)")}
         for name, definition in {
             "embedding": "TEXT NOT NULL DEFAULT '[]'", "confidence": "REAL NOT NULL DEFAULT 0.7",

@@ -156,7 +156,7 @@ class Broker:
         with self.db() as db:
             return [dict(row) for row in db.execute("SELECT * FROM tasks ORDER BY created DESC LIMIT 100")]
 
-    def workspace(self):
+    def workspace(self, tenant=None):
         source = self.docker.request("GET", "/containers/" + quote(self.config.workspace_container, safe="") + "/json")
         matches = [m for m in source.get("Mounts", []) if m.get("Destination") == "/workspace"]
         if len(matches) != 1 or matches[0].get("Type") not in ("bind", "volume"):
@@ -166,8 +166,18 @@ class Broker:
         if not mount_source or mount_source in ("/", "/var/run", "/var/run/docker.sock"):
             raise RuntimeError("Refusing unsafe workspace source")
         if item["Type"] == "bind":
+            if tenant is not None:
+                if not re.fullmatch(r"usr_[0-9a-f]{16}", tenant):
+                    raise ValueError("Invalid sandbox tenant")
+                # The Docker daemon sees this host path, but the broker container
+                # deliberately does not mount the workspace and cannot stat it.
+                root = Path(mount_source)
+                private = root / ".codezzn-users" / tenant
+                mount_source = str(private)
             # Docker recursive bind mounts can otherwise inherit nested host mounts.
             return {"Type": "bind", "Source": mount_source, "BindOptions": {"Propagation": "rprivate", "NonRecursive": True}}
+        if tenant is not None:
+            raise RuntimeError("Per-user sandboxing requires a bind-mounted workspace")
         return {"Type": "volume", "Source": mount_source, "VolumeOptions": {"NoCopy": True}}
 
     def image(self):
@@ -183,10 +193,13 @@ class Broker:
     def submit(self, payload):
         if self.stop.is_set():
             raise RuntimeError("Broker is stopping")
-        if set(payload) - {"id", "command", "mode", "cwd", "network"}:
+        if set(payload) - {"id", "command", "mode", "cwd", "network", "tenant"}:
             raise ValueError("Unknown fields; container policy is administrator-controlled")
         task_id, command, mode = payload.get("id"), payload.get("command"), payload.get("mode", "read-only")
         cwd = str(payload.get("cwd") or ".").replace("\\", "/")
+        tenant = payload.get("tenant")
+        if tenant is not None and (not isinstance(tenant, str) or not re.fullmatch(r"usr_[0-9a-f]{16}", tenant)):
+            raise ValueError("Invalid sandbox tenant")
         network = bool(payload.get("network", False))
         if not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{32}", task_id):
             raise ValueError("Invalid task id")
@@ -214,7 +227,7 @@ class Broker:
                 db.execute("INSERT INTO tasks(id,name,status,mode,created,deadline) VALUES(?,?,?,?,?,?)",
                            (task_id, name, "queued", mode, now, now + self.config.timeout))
             cancel = threading.Event()
-            thread = threading.Thread(target=self.execute, args=(task_id, command, cancel, cwd, network), daemon=True)
+            thread = threading.Thread(target=self.execute, args=(task_id, command, cancel, cwd, network, tenant), daemon=True)
             self.running[task_id] = (thread, cancel)
             thread.start()
         return self.get(task_id)
@@ -228,12 +241,12 @@ class Broker:
                 return True
             raise
 
-    def execute(self, task_id, command, cancel, cwd=".", network=False):
+    def execute(self, task_id, command, cancel, cwd=".", network=False, tenant=None):
         row = self.get(task_id)
         status, error, output, exit_code = "failed", "", "", None
         try:
             self.update(task_id, status="creating")
-            mount, image_id = self.workspace(), self.image()
+            mount, image_id = self.workspace(tenant), self.image()
             if cancel.is_set():
                 status = "cancelled"
                 return
@@ -286,7 +299,7 @@ class Broker:
         return self.get(task_id)
 
     def recover(self):
-        """Run at startup and every 2 seconds; never prune unrelated containers."""
+        """Run at startup and periodically; never prune unrelated containers."""
         try:
             filters = json.dumps({"label": [LABEL + "=" + self.config.instance]})
             containers = self.docker.request("GET", "/containers/json?all=true&" + urlencode({"filters": filters}))
@@ -315,7 +328,7 @@ class Broker:
             self.recovery_error = str(exc)
 
     def reap(self):
-        while not self.stop.wait(2):
+        while not self.stop.wait(15):
             self.recover()
 
     def close(self):

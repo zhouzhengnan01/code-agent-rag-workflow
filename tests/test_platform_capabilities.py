@@ -1,6 +1,8 @@
 import asyncio
+import threading
 import time
 
+from backend.app import db
 from backend.app.capabilities import model_candidates, tool_policy_decision
 from backend.app.db import init_db, resource_save
 from backend.app.memory import memory_context, save_memory, search_memories
@@ -96,7 +98,9 @@ def test_persistent_queue_completes_and_records_result():
             return {"echo": task["payload"]["value"]}
 
         task = enqueue_task("test", "queue capability", {"value": 7}, max_attempts=1)
-        await queue.start(handler, concurrency=1)
+        await queue.start(handler, concurrency=4)
+        assert len(queue.workers) == 1
+        assert queue.concurrency == 4
         try:
             for _ in range(40):
                 current = get_task(task["id"])
@@ -109,3 +113,109 @@ def test_persistent_queue_completes_and_records_result():
 
     completed = asyncio.run(scenario())
     assert completed["result"] == {"echo": 7}
+
+
+def test_persistent_queue_polling_does_not_block_event_loop():
+    async def scenario():
+        queue = PersistentTaskQueue()
+        queue.handler = lambda _task: None
+        queue._claim = lambda: time.sleep(0.2)
+        queue.workers = [asyncio.create_task(queue._loop())]
+        try:
+            started = time.monotonic()
+            await asyncio.sleep(0.02)
+            return time.monotonic() - started
+        finally:
+            await queue.close()
+
+    assert asyncio.run(scenario()) < 0.1
+
+
+def test_persistent_queue_does_not_run_task_cancelled_during_claim():
+    async def scenario():
+        queue = PersistentTaskQueue()
+        claimed = threading.Event()
+        release = threading.Event()
+        handled = []
+        task = enqueue_task("test", "cancel race", {}, max_attempts=1)
+        original_claim = queue._claim
+
+        def delayed_claim():
+            result = original_claim()
+            if result and result[0]["id"] == task["id"]:
+                claimed.set()
+                release.wait(1)
+            return result
+
+        async def handler(item):
+            handled.append(item["id"])
+
+        queue._claim = delayed_claim
+        await queue.start(handler, concurrency=1)
+        try:
+            assert await asyncio.to_thread(claimed.wait, 1)
+            assert await queue.cancel(task["id"])
+            release.set()
+            await asyncio.sleep(0.1)
+            return handled, get_task(task["id"])
+        finally:
+            release.set()
+            await queue.close()
+
+    handled, task = asyncio.run(scenario())
+    assert handled == []
+    assert task["status"] == "cancelled"
+
+
+def test_persistent_queue_waits_for_claim_before_closing():
+    async def scenario():
+        queue = PersistentTaskQueue()
+        started = threading.Event()
+        release = threading.Event()
+
+        def delayed_claim():
+            started.set()
+            release.wait(1)
+
+        queue._claim = delayed_claim
+        queue.workers = [asyncio.create_task(queue._loop())]
+        assert await asyncio.to_thread(started.wait, 1)
+        closing = asyncio.create_task(queue.close())
+        await asyncio.sleep(0.02)
+        still_waiting = not closing.done()
+        release.set()
+        await closing
+        return still_waiting
+
+    assert asyncio.run(scenario())
+
+
+def test_persistent_queue_claims_tenants_round_robin(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "queue.db"))
+    monkeypatch.delenv("CODEZZN_LEGACY_OWNER_GITHUB_ID", raising=False)
+    db.init_db()
+    first_user = "usr_1111111111111111"
+    second_user = "usr_2222222222222222"
+    with db.connect(global_db=True) as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,name,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (first_user, "first@example.com", "First", 1, 1),
+        )
+        connection.execute(
+            "INSERT INTO users(id,email,name,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (second_user, "second@example.com", "Second", 2, 2),
+        )
+    for user_id, count in ((first_user, 2), (second_user, 1)):
+        db.ensure_tenant(user_id)
+        token = db.use_tenant(user_id)
+        try:
+            for index in range(count):
+                enqueue_task("test", f"{user_id}-{index}", {}, max_attempts=1)
+        finally:
+            db.reset_tenant(token)
+
+    queue = PersistentTaskQueue()
+    first_claim = queue._claim()
+    second_claim = queue._claim()
+    assert first_claim[1] == first_user
+    assert second_claim[1] == second_user

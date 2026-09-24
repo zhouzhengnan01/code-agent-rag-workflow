@@ -55,9 +55,10 @@
     } catch (_) { /* Keep authentication usable if the session probe fails. */ }
   }
 
-  const callbackErrors = { github_denied: '你已取消 GitHub 授权，请重试或使用邮箱登录。', github_invalid: 'GitHub 登录状态已失效，请重新尝试。', github_400: 'GitHub 登录请求无效，请重新尝试。', github_503: 'GitHub 登录尚未配置，请联系管理员或使用邮箱登录。' };
+  const callbackErrors = { github_denied: '你已取消 GitHub 授权，请重试或使用邮箱登录。', github_invalid: 'GitHub 登录状态已失效，请重新尝试。', github_400: 'GitHub 登录请求无效，请重新尝试。', github_409: '此邮箱已绑定其他 GitHub 账号，请使用原账号登录或联系管理员。', github_502: '暂时无法连接 GitHub，请稍后重新登录。', github_503: 'GitHub 登录尚未配置，请联系管理员或使用邮箱登录。', github_504: 'GitHub 响应超时，请稍后重新登录。' };
   const callbackError = params.get('error');
   if (callbackError) setFeedback(callbackErrors[callbackError] || 'GitHub 登录未完成，请重试或使用邮箱登录。');
+  else if (params.get('logged_out') === '1') setFeedback('已退出 Codezzn。再次使用 GitHub 时请在账号选择器中确认账号；共用设备还应退出 GitHub 本身。');
   githubButton.addEventListener('click', event => { if (githubConfigured) return; event.preventDefault(); setFeedback('GitHub 登录尚未配置，请联系管理员或使用邮箱登录。'); });
   document.querySelector('[data-provider="google"]').addEventListener('click', () => setFeedback('Google 登录尚未配置。请使用 GitHub 或邮箱继续。'));
   document.querySelector('[data-provider="email"]').addEventListener('click', () => { selectedProvider = 'email'; show('email'); });

@@ -4,6 +4,8 @@ import os
 
 import httpx
 
+from .db import current_tenant
+
 
 def settings():
     url = os.getenv("CODEZZN_SANDBOX_URL", "").rstrip("/")
@@ -32,7 +34,7 @@ async def run_command(command, mode="read-only", cwd=".", network=False):
             import uuid
             task_id = uuid.uuid4().hex
             response = await client.post(url + "/tasks", headers=headers,
-                                         json={"id": task_id, "command": command, "mode": mode, "cwd": cwd, "network": bool(network)})
+                                         json={"id": task_id, "command": command, "mode": mode, "cwd": cwd, "network": bool(network), "tenant": current_tenant()})
             response.raise_for_status()
             while True:
                 response = await client.get(url + "/tasks/" + task_id, headers=headers)

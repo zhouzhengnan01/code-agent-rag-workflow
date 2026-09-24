@@ -1,6 +1,8 @@
 import asyncio
 from pathlib import Path
+from urllib.parse import urlparse
 
+from .db import current_tenant
 from .workspace import current_workspace
 
 
@@ -26,8 +28,12 @@ class BrowserManager:
         return self.contexts[session][1]
 
     async def execute(self, action, session="default", **args):
+        if current_tenant():
+            session = f"{current_tenant()}:{session}"
         page = await self.page(session)
         if action == "navigate":
+            if current_tenant() and urlparse(str(args["url"])).scheme not in {"http", "https"}:
+                raise ValueError("浏览器仅允许打开 HTTP 或 HTTPS 页面")
             response = await page.goto(str(args["url"]), wait_until=args.get("wait_until", "domcontentloaded"), timeout=min(int(args.get("timeout", 30000)), 120000))
             return {"url":page.url,"title":await page.title(),"status":response.status if response else None}
         if action == "inspect":

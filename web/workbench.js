@@ -1,6 +1,7 @@
 const pages = [
   { id: 'dashboard', label: '概览', short: 'HOME' },
   { id: 'chat', label: '对话调试', short: 'CHAT' },
+  { id: 'projects', label: '项目', short: 'PROJECT' },
   { id: 'tasks', label: '任务', short: 'TASK' },
   { id: 'agents', label: '智能体', short: 'AGENT' },
   { id: 'agent_teams', label: '智能体团队', short: 'TEAM' },
@@ -14,7 +15,7 @@ const pages = [
 ];
 
 const navGroups = [
-  ['工作区', ['dashboard', 'chat', 'tasks']],
+  ['工作区', ['dashboard', 'chat', 'projects', 'tasks']],
   ['构建', ['agents', 'agent_teams', 'providers', 'skills', 'mcp_servers', 'lsp_servers', 'knowledge', 'memories']],
   ['编排', ['workflows']],
 ];
@@ -22,6 +23,7 @@ const navGroups = [
 const navIcons = {
   dashboard: '<path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/>',
   chat: '<path d="M21 11.5a8.4 8.4 0 0 1-9 8.5 9 9 0 0 1-4-.9L3 21l1.9-5A9 9 0 1 1 21 11.5Z"/>',
+  projects: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M3 10h18"/>',
   tasks: '<path d="M8 4h11a2 2 0 0 1 2 2v14H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1m1-2h7v4H7zM8 11h9M8 15h6"/>',
   agents: '<rect x="4" y="7" width="16" height="13" rx="3"/><path d="M12 3v4M9 3h6M8 13h.01M16 13h.01M9 17h6"/>',
   agent_teams: '<circle cx="8" cy="8" r="3"/><circle cx="17" cy="9" r="2.5"/><path d="M2 20v-2a6 6 0 0 1 12 0v2zM15 15a5 5 0 0 1 7 4v1h-5"/>',
@@ -49,6 +51,7 @@ const resourceKinds = Object.keys(labels);
 let state = {
   page: 'dashboard', cache: {}, thread: null, threadScope: 'active', chatThreads: [],
   chatCapabilities: { skill_ids: [], mcp_server_ids: [] }, activeTurn: null,
+  projects: [], activeProjectId: null, pendingProjectTurn: null, projectDetailId: null, intentPending: false,
 };
 
 const $ = selector => document.querySelector(selector);
@@ -197,7 +200,7 @@ async function logoutSession() {
   try {
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
   } finally {
-    location.assign('/login');
+    location.assign('/login?logged_out=1');
   }
 }
 
@@ -219,17 +222,19 @@ function nav() {
 }
 
 function go(page) {
+  if (state.page === 'chat' && page !== 'chat' && state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   state.page = page;
   toggleRail(false);
   document.body.classList.toggle('page-dashboard', page === 'dashboard');
   if (location.hash !== `#${page}`) history.replaceState(null, '', `#${page}`);
   nav();
   $('#pageTitle').textContent = pages.find(item => item.id === page)?.label || page;
-  loadPage();
+  return loadPage();
 }
 
 function quickCreate() {
   if (state.page === 'chat') return newThread();
+  if (state.page === 'projects') return startProjectCreation();
   if (state.page === 'tasks') return createAgentTask();
   if (state.page === 'memories') return createMemory();
   if (resourceKinds.includes(state.page)) return editResource(state.page);
@@ -253,6 +258,7 @@ function loading() {
 }
 
 async function loadPage() {
+  if (state.page === 'chat' && state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   const content = $('#content');
   document.body.classList.toggle('page-dashboard', state.page === 'dashboard');
   content.classList.toggle('viewport-chat', state.page === 'chat');
@@ -260,6 +266,7 @@ async function loadPage() {
   try {
     if (state.page === 'dashboard') return dashboard();
     if (state.page === 'chat') return chat();
+    if (state.page === 'projects') return projectsPage();
     if (state.page === 'tasks') return tasksPage();
     if (state.page === 'memories') return memoriesPage();
     return resources(state.page);
@@ -510,7 +517,7 @@ function resourceCard(kind, item) {
         ${kind === 'providers' ? `<button class="button button-quiet button-small" type="button" onclick="testProvider('${item.id}')">测试连接</button>` : ''}
         ${kind === 'knowledge' ? `${item.backend === 'ragflow' && !item.ragflow_dataset_id ? `<button class="button button-quiet button-small" type="button" onclick="provisionRagflow('${item.id}')">创建数据集</button>` : ''}<button class="button button-quiet button-small" type="button" onclick="uploadDoc('${item.id}')">上传文档</button><button class="button button-quiet button-small" type="button" onclick="showKnowledgeStatus('${item.id}')">文档状态</button><button class="button button-quiet button-small" type="button" onclick="testKnowledge('${item.id}')">测试检索</button>` : ''}
         ${kind === 'mcp_servers' ? `<button class="button button-quiet button-small" type="button" onclick="testMcp('${item.id}')">测试服务</button>` : ''}
-        ${kind === 'workflows' ? `<button class="button button-quiet button-small" type="button" onclick="runWorkflow('${item.id}')">前台运行</button><button class="button button-quiet button-small" type="button" onclick="enqueueWorkflow('${item.id}')">后台运行</button>` : ''}
+        ${kind === 'workflows' ? `<button class="button button-quiet button-small" type="button" onclick="runWorkflow('${item.id}')">前台运行</button><button class="button button-quiet button-small" type="button" onclick="enqueueWorkflow('${item.id}')">后台运行</button><button class="button button-quiet button-small" type="button" data-workflow-id="${esc(item.id)}" data-workflow-name="${esc(item.name)}" onclick="showWorkflowHistory(this)">历史</button>` : ''}
         <button class="button button-danger button-small" type="button" onclick="removeResource('${kind}','${item.id}')">删除</button>
       </div>
     </article>`;
@@ -735,8 +742,13 @@ async function agentForm(item) {
     { id: 'git_merge', name: 'Git Merge' }, { id: 'git_merge_abort', name: '中止 Merge' },
     { id: 'github_create_pr', name: '创建 PR' }, { id: 'github_ci_status', name: 'CI 状态' }, { id: 'github_review_comment', name: 'PR Review 评论' },
     { id: 'skill_read_file', name: '读取 Skill 包文件' }, { id: 'skill_run_script', name: '执行 Skill 脚本' }, { id: 'browser', name: '浏览器 / 截图' },
+    { id: 'project_list', name: '列出项目' }, { id: 'project_create', name: '创建项目' }, { id: 'project_select', name: '选择已有项目' }, { id: 'project_artifacts', name: '查看项目产物' },
+    { id: 'workflow_list', name: '列出工作流' }, { id: 'workflow_get', name: '查看工作流' }, { id: 'workflow_versions', name: '查看工作流版本' }, { id: 'workflow_version_get', name: '查看工作流历史定义' }, { id: 'workflow_run_get', name: '查看运行状态' },
+    { id: 'workflow_draft_create', name: '创建工作流草稿' }, { id: 'workflow_draft_update', name: '更新工作流草稿' },
+    { id: 'workflow_draft_save', name: '保存工作流草稿' }, { id: 'workflow_draft_discard', name: '丢弃工作流草稿' }, { id: 'workflow_run', name: '运行工作流' },
   ];
-  const defaultPolicy = { default: 'inherit', tools: { write_file: 'ask', apply_patch: 'ask', restore_file: 'ask', run_shell: 'ask', run_tests: 'ask', git_branch: 'ask', git_stage: 'ask', git_commit: 'ask', git_clone: 'ask', git_fetch: 'ask', git_push: 'ask', git_merge: 'ask', git_merge_abort: 'ask', github_create_pr: 'ask', github_review_comment: 'ask', skill_run_script: 'ask', browser: 'ask', 'mcp:*': 'ask' } };
+  const defaultPolicy = { default: 'inherit', tools: { write_file: 'ask', apply_patch: 'ask', restore_file: 'ask', run_shell: 'ask', run_tests: 'ask', git_branch: 'ask', git_stage: 'ask', git_commit: 'ask', git_clone: 'ask', git_fetch: 'ask', git_push: 'ask', git_merge: 'ask', git_merge_abort: 'ask', github_create_pr: 'ask', github_review_comment: 'ask', skill_run_script: 'ask', browser: 'ask', project_create: 'ask', project_select: 'ask', workflow_draft_create: 'ask', workflow_draft_update: 'ask', workflow_draft_save: 'ask', workflow_draft_discard: 'ask', workflow_run: 'ask', 'mcp:*': 'ask' } };
+  const policyForForm = { ...defaultPolicy, ...(item.tool_policy || {}), tools: { ...defaultPolicy.tools, ...(item.tool_policy?.tools || {}) } };
   modal(item.id ? '编辑智能体' : '新建智能体', `
     <form id="editForm" class="form-layout">
       <section class="form-section control-full"><header><h3>身份与模型</h3><p>定义智能体的职责和推理模型。</p></header></section>
@@ -760,7 +772,7 @@ async function agentForm(item) {
       ${field('最大并行子智能体', 'max_concurrent_subagents', item.max_concurrent_subagents || 4, 'number')}${field('最大委派深度', 'max_subagent_depth', item.max_subagent_depth || 2, 'number')}
       <section class="form-section control-full"><header><h3>记忆与工具策略</h3><p>长期记忆按用户、项目和会话分层；工具策略支持 allow / ask / deny / inherit。</p></header></section>
       ${field('记忆项目 ID', 'memory_project_id', item.memory_project_id || 'default')}${field('记忆用户 ID', 'memory_user_id', item.memory_user_id || 'default')}
-      ${field('工具策略 JSON', 'tool_policy', JSON.stringify(item.tool_policy || defaultPolicy, null, 2), 'textarea', true)}
+      ${field('工具策略 JSON', 'tool_policy', JSON.stringify(policyForForm, null, 2), 'textarea', true)}
       ${toggleField('启用长期记忆', 'memory_enabled', item.memory_enabled === true)}${toggleField('自动沉淀任务经验', 'auto_memory', item.auto_memory === true)}
       <section class="form-section control-full"><header><h3>执行权限与沙箱</h3><p>沙箱模式不会自动开启 Shell、自动批准或启动沙箱服务。</p></header></section>
       ${selectField('沙箱模式', 'sandbox_mode', sandboxOptions, true, '只读：容器不能写入工作区；工作区可写：容器可修改工作区文件。普通命令禁止联网；Git 远端操作需要单独启用 broker 的受控网络。MCP 和浏览器不受 Shell 沙箱隔离。旧配置未指定模式时，保存会设为只读；不支持 danger-full-access。')}
@@ -935,6 +947,31 @@ function threadStatus(status) {
   return ({ idle: '就绪', running: '运行中', waiting_for_approval: '等待审批', error: '出错' })[status] || status || '就绪';
 }
 
+async function showWorkflowHistory(button) {
+  const { workflowId, workflowName } = button.dataset;
+  try {
+    const result = await api(`/api/workflows/${encodeURIComponent(workflowId)}/versions`);
+    const versions = Array.isArray(result.data) ? result.data : [];
+    const rows = versions.map(item => {
+      const version = Number(item.version);
+      const timestamp = Number(item.created_at);
+      const date = Number.isFinite(timestamp) ? new Date(timestamp * 1000).toLocaleString() : '';
+      return `<article class="project-history-row"><div><strong>版本 ${version}</strong><small>${esc(date)}</small></div><button type="button" class="button button-quiet button-small" data-workflow-id="${esc(workflowId)}" data-workflow-name="${esc(workflowName)}" data-version="${version}" onclick="viewWorkflowVersion(this)">查看定义</button></article>`;
+    }).join('');
+    modal(`${workflowName} · 版本历史`, rows || '<p>尚无历史版本。</p>', null, true);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function viewWorkflowVersion(button) {
+  const { workflowId, workflowName } = button.dataset;
+  const version = Number(button.dataset.version);
+  if (!Number.isSafeInteger(version) || version < 1) return toast('版本号无效', true);
+  try {
+    const definition = await api(`/api/workflows/${encodeURIComponent(workflowId)}/versions/${version}`);
+    modal(`${workflowName} · 版本 ${version}`, `<pre class="project-file-preview">${esc(JSON.stringify(definition, null, 2))}</pre><div class="project-card-actions"><button type="button" class="button button-quiet button-small" data-workflow-id="${esc(workflowId)}" data-workflow-name="${esc(workflowName)}" onclick="showWorkflowHistory(this)">返回历史</button></div>`, null, true);
+  } catch (error) { toast(error.message, true); }
+}
+
 function closeSessionMenus() {
   const root = $('#sessionMenuRoot');
   if (root) { root.innerHTML = ''; delete root.dataset.threadId; }
@@ -970,6 +1007,7 @@ function toggleSessionMenu(event, threadId) {
 }
 
 function setThreadScope(scope) {
+  if (state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   closeSessionMenus();
   state.threadScope = scope === 'archived' ? 'archived' : 'active';
   state.thread = null;
@@ -977,6 +1015,7 @@ function setThreadScope(scope) {
 }
 
 function selectThread(threadId) {
+  if (state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   closeSessionMenus();
   state.thread = threadId;
   loadPage();
@@ -1038,10 +1077,218 @@ function deleteThread(threadId) {
   $('#modalSave')?.classList.add('button-danger-solid');
 }
 
+function projectName(projectId) {
+  return state.projects.find(item => item.id === projectId)?.name || '未选择项目';
+}
+
+async function refreshProjects() {
+  const result = await api('/api/projects');
+  state.projects = Array.isArray(result.data) ? result.data : [];
+  return state.projects;
+}
+
+function projectChipHtml() {
+  return `<button class="project-active-chip" type="button" onclick="openProjectPicker('activate')" aria-label="选择当前项目">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+    <span>${esc(projectName(state.activeProjectId))}</span><span aria-hidden="true">⌄</span>
+  </button>`;
+}
+
+function renderProjectChip() {
+  const target = $('#projectChip');
+  if (target) target.innerHTML = projectChipHtml();
+}
+
+async function setActiveProject(projectId) {
+  const threadId = await ensureChatThread();
+  await api(`/api/threads/${encodeURIComponent(threadId)}`, {
+    method: 'PATCH', body: JSON.stringify({ active_project_id: projectId }),
+  });
+  state.activeProjectId = projectId;
+  if (state.currentThread) state.currentThread.active_project_id = projectId;
+  renderProjectChip();
+}
+
+function projectPickerItems(tab = 'recent', search = '') {
+  const query = search.trim().toLocaleLowerCase();
+  const projects = [...state.projects]
+    .sort((a, b) => Number(b.updated_at || b.created_at || 0) - Number(a.updated_at || a.created_at || 0))
+    .filter(item => !query || `${item.name} ${item.description || ''}`.toLocaleLowerCase().includes(query));
+  const visible = tab === 'recent' ? projects.slice(0, 8) : projects;
+  return visible.length ? visible.map(item => `
+    <button class="project-picker-item" type="button" onclick="selectProjectFromPicker('${esc(item.id)}')">
+      <span class="project-picker-thumb" aria-hidden="true">▣</span>
+      <span class="project-picker-copy"><strong>${esc(item.name)}</strong><small>${esc(item.description || `项目 ID：${item.id}`)}</small></span>
+      <span class="project-picker-arrow" aria-hidden="true">→</span>
+    </button>`).join('') : '<div class="project-picker-empty">没有匹配的项目。可以新建一个项目。</div>';
+}
+
+function renderProjectPickerItems() {
+  const list = $('#projectPickerList');
+  if (!list) return;
+  const tab = $('#projectPickerTabs .is-active')?.dataset.tab || 'recent';
+  list.innerHTML = projectPickerItems(tab, $('#projectPickerSearch')?.value || '');
+}
+
+function switchProjectPickerTab(tab) {
+  $$('#projectPickerTabs button').forEach(button => {
+    const selected = button.dataset.tab === tab;
+    button.classList.toggle('is-active', selected);
+    button.setAttribute('aria-selected', String(selected));
+  });
+  renderProjectPickerItems();
+}
+
+async function openProjectPicker(purpose = 'activate') {
+  try { await refreshProjects(); } catch (error) { toast(error.message, true); return; }
+  state.projectPickerPurpose = purpose;
+  $('#modalRoot').innerHTML = `
+    <div class="project-picker-layer" onclick="if(event.target===this)closeModal()">
+      <section class="project-picker" role="dialog" aria-modal="true" aria-labelledby="projectPickerTitle">
+        <header class="project-picker-header">
+          <span class="project-picker-header-icon" aria-hidden="true">▣</span>
+          <div><h2 id="projectPickerTitle">打开项目</h2><p>选择一个项目，关联本次对话与生成的文件。</p></div>
+          <button class="project-picker-close" type="button" onclick="closeModal()" aria-label="关闭项目选择">×</button>
+        </header>
+        <div class="project-picker-toolbar"><input id="projectPickerSearch" type="search" placeholder="搜索项目" aria-label="搜索项目" oninput="renderProjectPickerItems()"></div>
+        <div class="project-picker-tabs" id="projectPickerTabs" role="tablist" aria-label="项目列表范围">
+          <button type="button" class="is-active" data-tab="recent" role="tab" aria-selected="true" onclick="switchProjectPickerTab('recent')">最近</button>
+          <button type="button" data-tab="all" role="tab" aria-selected="false" onclick="switchProjectPickerTab('all')">所有项目</button>
+        </div>
+        <div class="project-picker-list" id="projectPickerList">${projectPickerItems()}</div>
+        <footer class="project-picker-footer"><button class="button button-quiet" type="button" onclick="closeModal()">取消</button><button class="button button-primary" type="button" onclick="closeModal();startProjectCreation()">+ 新建项目</button></footer>
+      </section>
+    </div>`;
+  $('#projectPickerSearch')?.focus();
+}
+
+async function selectProjectFromPicker(projectId) {
+  try {
+    await setActiveProject(projectId);
+    closeModal();
+    if (state.projectPickerPurpose === 'pending' && state.pendingProjectTurn) renderProjectDecision('save');
+    else toast(`已选择项目：${projectName(projectId)}`);
+  } catch (error) { toast(error.message, true); }
+}
+
+function startProjectCreation() {
+  if (state.pendingProjectTurn) return renderProjectDecision('create');
+  modal('创建项目', `<form id="projectCreateForm" class="form-layout">${field('项目名称', 'name', '', 'text', true)}${field('描述（可选）', 'description', '', 'textarea', true)}</form>`, async () => {
+    const data = formData($('#projectCreateForm'));
+    if (!data.name.trim()) return toast('请输入项目名称', true);
+    const button = $('#modalSave'); button.disabled = true;
+    try {
+      const project = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name: data.name.trim(), description: data.description.trim() }) });
+      await refreshProjects();
+      if (state.page === 'chat') await setActiveProject(project.id);
+      closeModal();
+      toast('项目已创建');
+      if (state.page === 'projects') { state.projectDetailId = project.id; await projectsPage(); }
+    } catch (error) { button.disabled = false; toast(error.message, true); }
+  }, false, '创建项目');
+}
+
+async function projectsPage() {
+  await refreshProjects();
+  const selected = state.projects.find(item => item.id === state.projectDetailId) || state.projects[0] || null;
+  state.projectDetailId = selected?.id || null;
+  const [artifacts, projectResources] = selected ? await Promise.all([
+    api(`/api/projects/${encodeURIComponent(selected.id)}/artifacts`).then(result => result.data || []),
+    api(`/api/projects/${encodeURIComponent(selected.id)}/resources`),
+  ]) : [[], { workflows: [] }];
+  const linkedWorkflows = Array.isArray(projectResources.workflows) ? projectResources.workflows : [];
+  $('#content').innerHTML = `<div class="project-page page-enter">
+    <header class="collection-header"><div><span class="overline">工作区资产</span><h1>项目</h1><p>将对话生成的真实文件归档到独立项目，按项目查看与下载。</p></div><div class="header-actions"><button class="button button-quiet" type="button" onclick="loadPage()">刷新</button><button class="button button-primary" type="button" onclick="startProjectCreation()">新建项目</button></div></header>
+    <div class="project-page-layout"><aside class="project-sidebar"><h2>我的项目 <span>${state.projects.length}</span></h2>
+      ${state.projects.length ? state.projects.map(item => `<button type="button" class="project-nav-item ${selected?.id === item.id ? 'is-active' : ''}" onclick="openProjectDetail('${esc(item.id)}')"><span aria-hidden="true">▣</span><span><strong>${esc(item.name)}</strong><small>${esc(item.description || item.id)}</small></span></button>`).join('') : '<p class="project-empty-note">还没有项目。创建一个项目后，Agent 就可以将产物保存进去。</p>'}
+    </aside><section class="project-detail">
+      ${selected ? `<header class="project-detail-head"><span class="project-detail-icon" aria-hidden="true">▣</span><div><span>PROJECT</span><h2>${esc(selected.name)}</h2><p>${esc(selected.description || '此项目尚无描述')}</p></div><button class="button button-quiet button-small" type="button" onclick="editProject('${esc(selected.id)}')">编辑</button></header>
+        <div class="project-detail-meta"><span>项目 ID <code>${esc(selected.id)}</code></span><span>${artifacts.length} 个文件</span></div>
+        <div class="project-artifacts"><h3>项目文件</h3>${artifacts.length ? artifacts.map(item => `<article class="project-artifact"><span class="project-artifact-icon" aria-hidden="true">${/\.(py|js|ts|tsx|jsx|html|css|json|md|txt)$/i.test(item.path) ? '⌘' : '▤'}</span><div><strong>${esc(item.path)}</strong><small>${esc(item.kind || 'file')} · ${esc(item.thread_id || '')} <span class="project-version-badge">v${Number(item.version) || 1}</span></small></div><button type="button" class="button button-quiet button-small" onclick="viewProjectArtifact('${esc(selected.id)}','${esc(item.id)}')">查看</button><button type="button" class="button button-quiet button-small" onclick="downloadProjectArtifact('${esc(selected.id)}','${esc(item.id)}',decodeURIComponent('${encodeURIComponent(item.path).replace(/'/g, '%27')}'))">下载</button><button type="button" class="button button-quiet button-small" data-project-id="${esc(selected.id)}" data-artifact-id="${esc(item.id)}" data-file-name="${esc(item.path)}" onclick="showProjectArtifactHistory(this)">历史</button></article>`).join('') : '<div class="project-empty-files"><strong>尚无文件</strong><p>在对话中选择此项目，并确认保存 Agent 的输出。</p><button type="button" class="button button-primary button-small" onclick="go(\'chat\')">开始对话</button></div>'}</div><div class="project-artifacts"><h3>关联工作流 <span>${linkedWorkflows.length}</span></h3>${linkedWorkflows.length ? linkedWorkflows.map(item => `<article class="project-artifact"><span class="project-artifact-icon" aria-hidden="true">◇</span><div><strong>${esc(item.name)}</strong><small>${esc(item.description || '')} <span class="project-version-badge">v${Number(item.version) || 1}</span></small></div><button type="button" class="button button-quiet button-small" data-kind="workflow" data-id="${esc(item.id)}" onclick="openResourceAsset(this)">打开</button></article>`).join('') : '<p class="project-empty-note">暂无关联工作流。</p>'}</div>` : '<div class="project-empty-files"><strong>创建第一个项目</strong><p>项目隔离存放代码与其他产物，方便按任务管理。</p></div>'}
+    </section></div></div>`;
+}
+
+function openProjectDetail(projectId) { state.projectDetailId = projectId; projectsPage().catch(error => toast(error.message, true)); }
+
+function editProject(projectId) {
+  const project = state.projects.find(item => item.id === projectId);
+  if (!project) return;
+  modal('编辑项目', `<form id="projectEditForm" class="form-layout">${field('项目名称', 'name', project.name, 'text', true)}${field('描述', 'description', project.description || '', 'textarea', true)}</form>`, async () => {
+    const data = formData($('#projectEditForm'));
+    if (!data.name.trim()) return toast('项目名称不能为空', true);
+    const button = $('#modalSave'); button.disabled = true;
+    try {
+      await api(`/api/projects/${encodeURIComponent(projectId)}`, { method: 'PATCH', body: JSON.stringify({ name: data.name.trim(), description: data.description.trim() }) });
+      closeModal(); await projectsPage(); toast('项目已更新');
+    } catch (error) { button.disabled = false; toast(error.message, true); }
+  }, false, '保存');
+}
+
+async function projectArtifactResponse(projectId, artifactId) {
+  const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/download`, { headers: headers(false) });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
+  return response;
+}
+
+async function viewProjectArtifact(projectId, artifactId) {
+  const item = (await api(`/api/projects/${encodeURIComponent(projectId)}/artifacts`)).data.find(value => value.id === artifactId);
+  if (!item) return toast('文件不存在', true);
+  if (!/\.(py|js|ts|tsx|jsx|html|css|json|md|txt|yaml|yml|toml|sh|ps1|sql)$/i.test(item.path)) return downloadProjectArtifact(projectId, artifactId, item.path);
+  try {
+    const result = await api(`/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/content`);
+    modal(item.path, `<pre class="project-file-preview">${esc(result.content)}</pre>`, null, true);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function downloadProjectArtifact(projectId, artifactId, path) {
+  try {
+    const blob = await (await projectArtifactResponse(projectId, artifactId)).blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = String(path).split(/[\\/]/).pop() || 'artifact';
+    document.body.appendChild(anchor); anchor.click(); anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function showProjectArtifactHistory(button) {
+  const { projectId, artifactId, fileName } = button.dataset;
+  try {
+    const result = await api(`/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/versions`);
+    const versions = Array.isArray(result.data) ? result.data : [];
+    const rows = versions.map(item => {
+      const version = Number(item.version);
+      const timestamp = Number(item.created_at);
+      const date = Number.isFinite(timestamp) ? new Date(timestamp * 1000).toLocaleString() : '';
+      const size = Number.isFinite(Number(item.size_bytes)) ? `${Number(item.size_bytes)} B` : '';
+      return `<article class="project-history-row"><div><strong>版本 ${version}</strong><small>${esc(date)}${size ? ` · ${esc(size)}` : ''}${item.turn_id ? ` · 会话 ${esc(item.turn_id)}` : ''}</small></div>${item.downloadable && Number.isSafeInteger(version) && version > 0 ? `<button type="button" class="button button-quiet button-small" data-project-id="${esc(projectId)}" data-artifact-id="${esc(artifactId)}" data-version="${version}" data-file-name="${esc(fileName)}" onclick="downloadProjectArtifactVersion(this)">下载</button>` : '<span class="project-history-unavailable">无快照</span>'}</article>`;
+    }).join('');
+    modal(`${fileName} · 版本历史`, rows || '<p>尚无历史版本。</p>', null, true);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function downloadProjectArtifactVersion(button) {
+  const { projectId, artifactId, fileName } = button.dataset;
+  const version = Number(button.dataset.version);
+  if (!Number.isSafeInteger(version) || version < 1) return toast('版本号无效', true);
+  try {
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/versions/${version}/download`, { headers: headers(false) });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
+    const url = URL.createObjectURL(await response.blob());
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    const name = String(fileName).split(/[\\/]/).pop() || 'artifact';
+    const dot = name.lastIndexOf('.');
+    anchor.download = dot > 0 ? `${name.slice(0, dot)}.v${version}${name.slice(dot)}` : `${name}.v${version}`;
+    document.body.appendChild(anchor); anchor.click(); anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { toast(error.message, true); }
+}
+
 async function chat() {
   const archived = state.threadScope === 'archived';
   const [agents, skills, mcps, threadResult] = await Promise.all([
-    load('agents'), load('skills'), load('mcp_servers'), api(`/api/threads?archived=${archived}`),
+    load('agents'), load('skills'), load('mcp_servers'), api(`/api/threads?archived=${archived}`), refreshProjects(),
   ]);
   const threads = threadResult.data;
   state.chatThreads = threads;
@@ -1058,6 +1305,7 @@ async function chat() {
     mcp_server_ids: Array.isArray(overrides.mcp_server_ids) ? overrides.mcp_server_ids : (selectedAgentConfig.mcp_server_ids || []),
   };
   state.currentThread = current;
+  state.activeProjectId = current?.active_project_id || null;
   $('#content').innerHTML = `
     <div class="chat-studio page-enter">
       <aside class="session-browser">
@@ -1086,6 +1334,8 @@ async function chat() {
             <label class="agent-selector"><span>运行智能体</span><select id="chatAgent" aria-label="选择智能体" onchange="changeChatAgent(this.value)">${agents.map(agent => `<option value="${agent.id}" ${selectedAgent === agent.id ? 'selected' : ''}>${esc(agent.name)}</option>`).join('')}</select></label>
           </header>
           <div class="capability-strip" id="capabilityStrip">${capabilityBarHtml(skills, mcps)}</div>
+          <div class="project-context-bar"><span>当前项目</span><div id="projectChip">${projectChipHtml()}</div><span class="project-context-help">代码与文件仅在确认后写入项目</span></div>
+          ${assetStripHtml(current?.messages || [])}
         </div>
         <div class="message-stream" id="messages" aria-live="polite">
           ${current?.messages?.length || approvals.length ? `${(current?.messages || []).map(messageHtml).join('')}${approvals.map(approvalHtml).join('')}` : `
@@ -1238,28 +1488,113 @@ function messageHtml(message) {
   const sources = message.meta?.sources || [];
   const model = message.meta?.runtime?.model;
   const assistant = message.role !== 'user';
+  const choice = assistant ? message.project_choice : null;
+  const artifacts = assistant ? (message.project_artifacts || []) : [];
+  const decision = choice ? `<section class="project-decision-summary" aria-label="本次项目选择"><span class="project-decision-check" aria-hidden="true">✓</span><span><strong>${choice.save_to_project ? '已确认保存到项目' : '已选择仅回答，不保存'}</strong>${choice.project_id ? `<small>${esc(projectName(choice.project_id))}</small>` : ''}</span></section>` : '';
+  const artifactCards = artifacts.map(item => `<section class="project-result-card" aria-label="项目文件 ${esc(item.path)}"><span class="project-result-icon" aria-hidden="true">⌘</span><span class="project-result-copy"><strong>${esc(item.path)}</strong><small>已保存到 ${esc(projectName(item.project_id))}</small></span><button type="button" onclick="viewProjectArtifact('${esc(item.project_id)}','${esc(item.id)}')">打开</button><button type="button" onclick="downloadProjectArtifact('${esc(item.project_id)}','${esc(item.id)}',decodeURIComponent('${encodeURIComponent(item.path).replace(/'/g, '%27')}'))">下载</button></section>`).join('');
+  const resourceCards = assistant ? (Array.isArray(message.resource_assets) ? message.resource_assets : []).map(resourceAssetHtml).join('') : '';
   return `
     <article class="message-turn ${assistant ? 'assistant' : 'user'} ${message.error ? 'is-error' : ''}">
       <div class="turn-avatar" aria-hidden="true">${assistant ? 'Z' : '你'}</div>
       <div class="turn-content">
         <header><strong>${assistant ? 'Codezzn' : '你'}</strong>${model ? `<span>${esc(model)}</span>` : ''}</header>
+        ${decision}
         <div class="message-copy">${richText(message.content)}</div>
+        ${artifactCards}
+        ${resourceCards}
         ${events.filter(event => event.type.startsWith('tool_')).map(event => `<div class="tool-call"><span>${event.type === 'tool_started' ? '调用工具' : event.type === 'tool_failed' ? '工具失败' : '工具完成'}</span><strong>${esc(event.name)}</strong></div>`).join('')}
         ${sources.length ? `<div class="source-list"><span>知识来源</span><div>${sources.map((source, index) => `<button type="button">[${index + 1}] ${esc(source.source)} #片段${Number(source.position) + 1}</button>`).join('')}</div></div>` : ''}
       </div>
     </article>`;
 }
 
+function assetStripHtml(messages) {
+  const unique = new Set();
+  messages.filter(message => message.role === 'assistant').forEach(message => {
+    (Array.isArray(message.resource_assets) ? message.resource_assets : []).forEach(item => {
+      if (item && item.status !== 'failed') unique.add(`resource:${item.kind}:${item.resource_id || item.id}`);
+    });
+    (Array.isArray(message.project_artifacts) ? message.project_artifacts : []).forEach(item => {
+      if (item?.id) unique.add(`file:${item.project_id}:${item.id}`);
+    });
+  });
+  return unique.size ? `<div class="conversation-assets" id="conversationAssets" aria-label="会话资产">▣ ${unique.size} Assets</div>` : '<div class="conversation-assets" id="conversationAssets" hidden></div>';
+}
+
+function resourceAssetHtml(asset) {
+  if (!asset || !asset.kind) return '';
+  const kind = String(asset.kind);
+  const id = String(asset.resource_id || asset.id || '');
+  const projectId = String(asset.project_id || (kind === 'project' ? id : ''));
+  const label = { project: '项目', workflow: '工作流', workflow_draft: '工作流草稿', workflow_run: '工作流运行' }[kind] || '资源';
+  const name = String(asset.name || label);
+  const status = String(asset.status || '已创建');
+  const action = kind === 'project' && projectId ? '打开项目' : kind === 'workflow' && id ? '打开工作流' : kind === 'workflow_draft' && id ? '查看草稿' : '';
+  return `<section class="project-result-card resource-result-card" aria-label="${esc(label)} ${esc(name)}"><span class="project-result-icon" aria-hidden="true">${kind === 'project' ? '▣' : '◇'}</span><span class="project-result-copy"><strong>${esc(name)}</strong><small>${esc(label)} · ${esc(status)}</small></span>${action ? `<button type="button" data-kind="${esc(kind)}" data-id="${esc(id)}" data-project-id="${esc(projectId)}" onclick="openResourceAsset(this)">${action}</button>` : ''}</section>`;
+}
+
+async function openResourceAsset(button) {
+  const kind = button.dataset.kind;
+  if (kind === 'project') {
+    state.projectDetailId = button.dataset.projectId;
+    await go('projects');
+  } else if (kind === 'workflow') {
+    await go('workflows');
+    if ((state.cache.workflows || []).some(item => item.id === button.dataset.id)) editResource('workflows', button.dataset.id);
+  } else if (kind === 'workflow_draft') {
+    await viewWorkflowDraft(button.dataset.id);
+  }
+}
+
+async function viewWorkflowDraft(draftId) {
+  try {
+    const draft = await api(`/api/workflow-drafts/${encodeURIComponent(draftId)}`);
+    const definition = draft.definition || {};
+    const editable = draft.status === 'draft';
+    modal(draft.name || '工作流草稿', `<div class="workflow-draft-summary"><p>${esc(draft.description || '检查草稿内容，然后选择保存或丢弃。')}</p><p>状态：${esc(draft.status || 'draft')}</p><pre class="code-output">${esc(JSON.stringify(definition, null, 2))}</pre>${editable ? `<div class="project-card-actions"><button class="button button-quiet button-small" type="button" data-draft-id="${esc(draftId)}" onclick="decideWorkflowDraft(this,'discard')">丢弃草稿</button><button class="button button-primary button-small" type="button" data-draft-id="${esc(draftId)}" onclick="decideWorkflowDraft(this,'save')">保存为工作流</button></div>` : ''}</div>`, null, true);
+  } catch (error) { toast(error.message, true); }
+}
+
+async function decideWorkflowDraft(button, action) {
+  const draftId = button.dataset.draftId;
+  const controls = $$('.workflow-draft-summary button');
+  controls.forEach(item => { item.disabled = true; });
+  try {
+    await api(`/api/workflow-drafts/${encodeURIComponent(draftId)}/${action}`, { method: 'POST', body: '{}' });
+    closeModal();
+    toast(action === 'save' ? '工作流已保存' : '草稿已丢弃');
+    if (state.page === 'chat') await loadPage();
+  } catch (error) {
+    controls.forEach(item => { item.disabled = false; });
+    toast(error.message, true);
+  }
+}
+
 function approvalHtml(approval) {
   const args = JSON.stringify(approval.arguments || {}, null, 2);
+  if (approval.tool_name === 'ask_user') {
+    const question = String(approval.arguments?.question || '请选择下一步');
+    const options = Array.isArray(approval.arguments?.options) ? approval.arguments.options.slice(0, 4) : [];
+    return `<article class="message-turn assistant project-confirm-turn approval-turn" id="approval_${esc(approval.id)}"><div class="turn-avatar" aria-hidden="true">Z</div><div class="turn-content"><header><strong>Codezzn</strong><span>等待你的回答</span></header>
+      <section class="project-confirm-card" role="group" aria-label="${esc(question)}"><div class="project-confirm-head"><span class="project-question-icon" aria-hidden="true">?</span><strong>${esc(question)}</strong></div>
+      <div class="project-confirm-body">${options.map(item => {
+        const label = String(item?.label || '').slice(0, 120);
+        if (!label) return '';
+        const encoded = encodeURIComponent(label).replace(/'/g, '%27');
+        return `<button class="project-choice" type="button" data-answer="${encoded}" onclick="resolveApproval('${esc(approval.id)}','approved',decodeURIComponent(this.dataset.answer))"><span class="project-choice-number" aria-hidden="true">✓</span><span><strong>${esc(label)}</strong><small>${esc(String(item?.description || '').slice(0, 300))}</small></span></button>`;
+      }).join('')}
+      <div class="project-custom-answer"><span aria-hidden="true">✎</span><input id="askAnswer_${esc(approval.id)}" type="text" maxlength="4000" aria-label="自定义回答" placeholder="或者输入你的回答" onkeydown="if(event.key==='Enter'){event.preventDefault();answerUserQuestion('${esc(approval.id)}')}" /><button class="project-answer-send" type="button" onclick="answerUserQuestion('${esc(approval.id)}')">发送</button></div>
+      <button class="project-choice project-choice-subtle" type="button" onclick="resolveApproval('${esc(approval.id)}','denied','用户取消本次提问')"><span class="project-choice-number" aria-hidden="true">×</span><span><strong>取消这次提问</strong></span></button></div></section></div></article>`;
+  }
+  const details = approvalActionDetails(approval);
   return `
     <article class="message-turn assistant approval-turn" id="approval_${esc(approval.id)}">
       <div class="turn-avatar" aria-hidden="true">!</div>
       <div class="turn-content">
         <header><strong>需要审批</strong><span>${esc(approval.tool_name)}</span></header>
         <div class="approval-card">
-          <div class="approval-heading"><span>工具准备执行</span><strong>${esc(approval.tool_name)}</strong></div>
-          <pre>${esc(args)}</pre>
+          <div class="approval-heading"><span>${details ? '确认操作' : '工具准备执行'}</span><strong>${esc(details?.title || approval.tool_name)}</strong></div>
+          ${details ? `<p class="approval-impact">${esc(details.description)}</p><details class="approval-technical"><summary>查看工具参数</summary><pre>${esc(args)}</pre></details>` : `<pre>${esc(args)}</pre>`}
           <div class="approval-actions">
             <button class="button button-quiet button-small" type="button" onclick="resolveApproval('${approval.id}','denied')">拒绝</button>
             <button class="button button-primary button-small" type="button" onclick="resolveApproval('${approval.id}','approved')">允许并继续</button>
@@ -1269,23 +1604,41 @@ function approvalHtml(approval) {
     </article>`;
 }
 
-async function resolveApproval(approvalId, decision) {
+function approvalActionDetails(approval) {
+  const args = approval.arguments || {};
+  const target = String(args.name || args.project_name || args.workflow_name || args.project_id || args.workflow_id || args.draft_id || '未命名');
+  if (approval.tool_name === 'project_create') return { title: `创建项目「${target}」`, description: '允许后将在工作区建立新项目，可供后续文件和工作流关联。' };
+  if (approval.tool_name === 'project_select') return { title: `关联已有项目「${target}」`, description: '允许后会将本次对话绑定到该项目，后续确认写入的文件产物将保存在该项目中。' };
+  if (approval.tool_name === 'workflow_draft_save') return { title: `保存工作流「${target}」`, description: '允许后会将草稿变更写入正式工作流，后续运行将使用新版本。' };
+  if (approval.tool_name === 'workflow_run') return { title: `运行工作流「${target}」`, description: '允许后会按当前定义执行工作流节点，可能调用已配置的模型和工具。' };
+  if (approval.tool_name === 'workflow_draft_discard') return { title: `丢弃工作流草稿「${target}」`, description: '允许后将移除未保存的草稿变更，正式工作流保持原样。' };
+  return null;
+}
+
+function answerUserQuestion(approvalId) {
+  const answer = document.getElementById(`askAnswer_${approvalId}`)?.value.trim();
+  if (!answer) return toast('请输入回答', true);
+  resolveApproval(approvalId, 'approved', answer);
+}
+
+async function resolveApproval(approvalId, decision, reason = '') {
   const card = document.getElementById(`approval_${approvalId}`);
   const buttons = card ? [...card.querySelectorAll('button')] : [];
   buttons.forEach(button => { button.disabled = true; });
   const action = decision === 'approved' ? '正在执行并继续对话' : '正在拒绝并继续对话';
-  const heading = card?.querySelector('.approval-heading span');
+  const heading = card?.querySelector('.approval-heading span, .project-confirm-head strong');
+  const originalHeading = heading?.textContent;
   if (heading) heading.textContent = action;
   try {
     await api(`/api/approvals/${approvalId}`, {
       method: 'POST',
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify({ decision, reason: reason || decision }),
     });
-    toast(decision === 'approved' ? '已允许工具调用' : '已拒绝工具调用');
+    toast(card?.querySelector('.project-confirm-card') ? '回答已提交，智能体继续执行' : decision === 'approved' ? '已允许工具调用' : '已拒绝工具调用');
     await loadPage();
   } catch (error) {
     buttons.forEach(button => { button.disabled = false; });
-    if (heading) heading.textContent = '工具准备执行';
+    if (heading) heading.textContent = originalHeading;
     toast(error.message, true);
   }
 }
@@ -1310,6 +1663,7 @@ function bindComposer() {
 }
 
 async function newThread() {
+  if (state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   try {
     state.threadScope = 'active';
     const agent = $('#chatAgent')?.value || state.cache.agents?.[0]?.id;
@@ -1389,21 +1743,173 @@ function createStreamTextAnimator(onFrame) {
   };
 }
 
-async function sendMessage() {
+function selectedAgentWriteCapability(agentId, kind = '') {
+  const agent = (state.cache.agents || []).find(item => item.id === agentId);
+  if (!agent || agent.enabled === false) return { allowed: false, reason: '当前智能体不可用' };
+  const tools = agent.builtin_tools || [];
+  const policy = agent.tool_policy || {};
+  const rules = policy.tools || {};
+  const allows = name => tools.includes(name)
+    && rules[name] !== 'deny' && (rules[name] || policy.default) !== 'deny';
+  const domainAllows = name => rules[name] !== 'deny' && (rules[name] || policy.default) !== 'deny';
+  const projectAllowed = ['project_create', 'project_select'].some(domainAllows);
+  const workflowAllowed = ['workflow_draft_create', 'workflow_draft_update', 'workflow_draft_save', 'workflow_run'].some(domainAllows);
+  const fileToolsAllowed = ['write_file', 'apply_patch'].some(allows);
+  const fileAllowed = fileToolsAllowed && ['workspace-write', 'danger-full-access'].includes(agent.sandbox_mode);
+  if (kind === 'project' && !projectAllowed) return { allowed: false, reason: '项目创建与选择工具均被策略禁止' };
+  if (kind === 'workflow' && !workflowAllowed) return { allowed: false, reason: '尚未启用工作流创建、修改或运行工具，或工具策略禁止这些操作' };
+  if (['file', 'other_artifact'].includes(kind) && !fileToolsAllowed) return { allowed: false, reason: '尚未启用 write_file / apply_patch，或工具策略禁止写入文件' };
+  if (['file', 'other_artifact'].includes(kind) && !fileAllowed) return { allowed: false, reason: '沙箱模式为只读，不能创建真实文件' };
+  if (!kind && !projectAllowed && !workflowAllowed && !fileAllowed) return { allowed: false, reason: '尚未启用项目、工作流或写文件工具，或工具策略禁止写入' };
+  return { allowed: true, reason: '' };
+}
+
+function projectDecisionCardHtml(step = 'project') {
+  const pending = state.pendingProjectTurn;
+  if (!pending) return '';
+  const name = projectName(state.activeProjectId);
+  const capability = selectedAgentWriteCapability(pending.agent, pending.kind);
+  const target = pending.kind === 'workflow' ? '工作流' : pending.kind === 'project' ? '项目' : '代码和文件';
+  const title = step === 'permission' ? `当前智能体还不能创建或修改${target}`
+    : step === 'save' ? `是否将本次${target}任务关联到“${name}”？`
+    : step === 'create' ? '为这次任务创建项目' : '是否为这次任务关联一个项目？';
+  let body = '';
+  if (step === 'permission') body = `
+    <p class="project-permission-note" role="status">${esc(capability.reason)}。请在智能体配置中开启所需工具${['file', 'other_artifact'].includes(pending.kind) ? '并选择“工作区可写”' : ''}。项目确认与工具审批仍会分别执行。</p>
+    <button class="project-choice" type="button" onclick="openPendingAgentSettings()"><span class="project-choice-number" aria-hidden="true">⚙</span><span><strong>配置智能体</strong><small>保留这次任务文本，前往智能体设置。</small></span></button>
+    <button class="project-choice" type="button" onclick="continuePendingProject(false)"><span class="project-choice-number" aria-hidden="true">↪</span><span><strong>仅回答，不保存</strong><small>继续生成答案，但不会创建文件。</small></span></button>`;
+  else if (step === 'save') body = `
+    <button class="project-choice" type="button" onclick="continuePendingProject(true)"><span class="project-choice-number">1</span><span><strong>关联当前项目</strong><small>Agent 将把本次${target}任务归入“${esc(name)}”。写操作仍遵守工具审批。</small></span></button>
+    <button class="project-choice" type="button" onclick="continuePendingProject(false)"><span class="project-choice-number">2</span><span><strong>仅回答，不保存</strong><small>继续生成答案，但不创建持久产物。</small></span></button>
+    <button class="project-choice project-choice-subtle" type="button" onclick="openProjectPicker('pending')"><span class="project-choice-number">⌕</span><span><strong>改选项目</strong><small>将本次任务关联到另一个已有项目。</small></span></button>`;
+  else if (step === 'create') body = `
+    <label class="project-inline-label" for="projectInlineName">项目名称</label>
+    <input class="project-inline-input" id="projectInlineName" type="text" maxlength="100" value="${esc(pending.suggestedName)}" placeholder="例如：快速排序脚本" onkeydown="if(event.key==='Enter'){event.preventDefault();createPendingProject()}">
+    <div class="project-card-actions"><button class="button button-quiet button-small" type="button" onclick="renderProjectDecision('project')">返回</button><button class="button button-primary button-small" type="button" onclick="createPendingProject()">创建项目</button></div>`;
+  else body = `
+    <button class="project-choice" type="button" onclick="renderProjectDecision('create')"><span class="project-choice-number">1</span><span><strong>创建新项目</strong><small>为此任务建立独立目录，再由你确认是否保存生成内容。</small></span></button>
+    <button class="project-choice" type="button" onclick="openProjectPicker('pending')"><span class="project-choice-number">2</span><span><strong>打开已有项目</strong><small>选择一个项目作为本次任务的目标。</small></span></button>
+    <button class="project-choice project-choice-subtle" type="button" onclick="continuePendingProject(false)"><span class="project-choice-number">3</span><span><strong>仅回答，不保存</strong><small>Agent 会继续回答，不写入文件。</small></span></button>`;
+  return `<article class="message-turn assistant project-confirm-turn" id="${pending.cardId}"><div class="turn-avatar" aria-hidden="true">Z</div><div class="turn-content"><header><strong>Codezzn</strong><span>需要你的确认</span></header>
+    <section class="project-confirm-card" aria-label="项目与保存确认"><header class="project-confirm-head"><span class="project-question-icon" aria-hidden="true">?</span><strong>${esc(title)}</strong><div class="project-confirm-controls"><button type="button" onclick="toggleProjectDecision()" aria-label="收起确认">−</button><button type="button" onclick="cancelPendingProject()" aria-label="取消这次任务">×</button></div></header>
+    <div class="project-confirm-body">${pending.intentError ? `<p class="project-permission-note" role="status">意图检查暂时不可用，请明确选择是否关联项目。</p>` : ''}${body}${step === 'project' ? `<div class="project-custom-answer"><span aria-hidden="true">✎</span><input type="text" id="projectCustomAnswer" aria-label="输入项目名称" placeholder="或者输入新项目名称，按 Enter 继续" onkeydown="if(event.key==='Enter'){event.preventDefault();createPendingProjectFromCustom()}" /></div>` : ''}</div></section></div></article>`;
+}
+
+function renderProjectDecision(step = 'project') {
+  const pending = state.pendingProjectTurn;
+  if (!pending) return;
+  pending.step = step;
+  const old = document.getElementById(pending.cardId);
+  if (old) old.outerHTML = projectDecisionCardHtml(step);
+  else $('#messages')?.insertAdjacentHTML('beforeend', projectDecisionCardHtml(step));
+  scrollMessages(true);
+  if (step === 'create') $('#projectInlineName')?.focus();
+}
+
+function toggleProjectDecision() {
+  const card = document.querySelector('.project-confirm-card');
+  card?.classList.toggle('is-collapsed');
+  const control = card?.querySelector('.project-confirm-controls button');
+  if (control) { control.textContent = card.classList.contains('is-collapsed') ? '+' : '−'; control.setAttribute('aria-label', card.classList.contains('is-collapsed') ? '展开确认' : '收起确认'); }
+}
+
+function cancelPendingProject() {
+  const pending = state.pendingProjectTurn;
+  if (!pending) return;
+  document.getElementById(pending.cardId)?.remove();
+  document.getElementById(pending.userId)?.remove();
+  const input = $('#chatInput');
+  if (input) { input.value = pending.content; input.focus(); input.dispatchEvent(new Event('input')); }
+  state.pendingProjectTurn = null;
+}
+
+function openPendingAgentSettings() {
+  cancelPendingProject();
+  go('agents');
+}
+
+function createPendingProjectFromCustom() {
+  const value = $('#projectCustomAnswer')?.value.trim();
+  if (!value) return;
+  renderProjectDecision('create');
+  const input = $('#projectInlineName');
+  if (input) input.value = value;
+}
+
+async function createPendingProject() {
+  const pending = state.pendingProjectTurn;
+  const name = $('#projectInlineName')?.value.trim();
+  if (!pending || !name) return toast('请输入项目名称', true);
+  const button = $('.project-card-actions .button-primary');
+  if (button) button.disabled = true;
+  try {
+    const project = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name }) });
+    await refreshProjects();
+    await setActiveProject(project.id);
+    renderProjectDecision('save');
+  } catch (error) { if (button) button.disabled = false; toast(error.message, true); }
+}
+
+async function continuePendingProject(saveToProject) {
+  const pending = state.pendingProjectTurn;
+  if (!pending) return;
+  if (saveToProject && !state.activeProjectId) return toast('请先选择项目', true);
+  if (saveToProject && !selectedAgentWriteCapability(pending.agent, pending.kind).allowed) {
+    renderProjectDecision('permission');
+    return;
+  }
+  state.pendingProjectTurn = null;
+  document.getElementById(pending.cardId)?.remove();
+  await sendMessage({ content: pending.content, agent: pending.agent, project_id: saveToProject ? state.activeProjectId : null, save_to_project: saveToProject, intent_kind: pending.kind, preRendered: true });
+}
+
+async function sendMessage(decision = null) {
   let input = $('#chatInput');
   let button = $('#sendBtn');
   let agentSelect = $('#chatAgent');
   if (state.activeTurn) return stopGeneration();
+  if (state.intentPending) return;
   if (!input || !button || button.disabled) return;
-  const content = input.value.trim();
-  const agent = agentSelect?.value;
+  if (state.pendingProjectTurn && !decision) return toast('请先选择如何处理上一个项目确认', true);
+  const content = decision?.content || input.value.trim();
+  const agent = decision?.agent || agentSelect?.value;
   if (!content) return;
   if (!agent) { toast('请先创建并选择智能体', true); return; }
   if (!state.thread) await ensureChatThread();
   const messages = $('#messages');
+  let intent = null;
+  let intentError = false;
+  if (!decision) {
+    state.intentPending = true;
+    button.disabled = true;
+    try {
+      intent = await api('/api/agent/intent', { method: 'POST', body: JSON.stringify({ content, agent_id: agent, thread_id: state.thread }) });
+      if (typeof intent?.requires_project !== 'boolean') throw new Error('意图检查返回无效结果');
+    } catch (error) {
+      intentError = true;
+      if (!selectedAgentWriteCapability(agent).allowed) {
+        toast(`无法检查任务意图：${error.message}`, true);
+        return;
+      }
+    } finally {
+      state.intentPending = false;
+      button.disabled = false;
+    }
+  }
+  if (!decision && (intent?.requires_project || intentError)) {
+    const suffix = Date.now();
+    const kind = intent?.kind || '';
+    const step = !selectedAgentWriteCapability(agent, kind).allowed ? 'permission' : state.activeProjectId ? 'save' : 'project';
+    state.pendingProjectTurn = { content, agent, kind, cardId: `projectConfirm_${suffix}`, userId: `projectUser_${suffix}`, suggestedName: String(intent?.suggested_name || content).replace(/[。！!？?].*$/, '').slice(0, 32), step, intentError };
+    messages?.querySelector('.conversation-empty')?.remove();
+    messages?.insertAdjacentHTML('beforeend', `<div id="${state.pendingProjectTurn.userId}">${messageHtml({ role: 'user', content })}</div>`);
+    input.value = ''; input.style.height = '54px';
+    renderProjectDecision(state.pendingProjectTurn.step);
+    return;
+  }
   const pendingId = `pending_${Date.now()}`;
   messages?.querySelector('.conversation-empty')?.remove();
-  messages?.insertAdjacentHTML('beforeend', messageHtml({ role: 'user', content }) + `
+  messages?.insertAdjacentHTML('beforeend', `${decision?.preRendered ? '' : messageHtml({ role: 'user', content })}
     <article class="message-turn assistant is-pending" id="${pendingId}"><div class="turn-avatar" aria-hidden="true">Z</div><div class="turn-content"><header><strong>Codezzn</strong></header><div class="thinking-line"><span></span><span></span><span></span><b>正在检索知识并运行</b></div></div></article>`);
   input.value = '';
   input.style.height = '54px';
@@ -1417,11 +1923,19 @@ async function sendMessage() {
   input.disabled = true;
   scrollMessages(true);
   try {
+    const turnPayload = { content, agent_id: agent };
+    if (decision) {
+      turnPayload.project_id = decision.project_id ?? null;
+      turnPayload.save_to_project = decision.save_to_project === true;
+      if (decision.intent_kind) turnPayload.intent_kind = decision.intent_kind;
+    } else if (state.activeProjectId) {
+      turnPayload.project_id = state.activeProjectId;
+    }
     const response = await fetch(`/api/threads/${state.thread}/turns/stream`, {
-      method: 'POST', headers: headers(), body: JSON.stringify({ content, agent_id: agent }), signal: controller.signal,
+      method: 'POST', headers: headers(), body: JSON.stringify(turnPayload), signal: controller.signal,
     });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
-    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let renderedAnswer = ''; const events = []; let streamError = ''; let resultStatus = ''; let approvalId = '';
+    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let renderedAnswer = ''; const events = []; let streamError = ''; let resultStatus = ''; let approvalId = ''; let completedTurnId = '';
     const renderPending = () => { const pending = document.getElementById(pendingId); if (pending) pending.querySelector('.turn-content').innerHTML = `<header><strong>Codezzn</strong></header><div class="message-copy">${richText(renderedAnswer)}</div><div class="thinking-line"><b>${esc(events.at(-1)?.status || events.at(-1)?.type || '运行中')}</b></div>`; scrollMessages(); };
     const animator = createStreamTextAnimator(text => { renderedAnswer = text; renderPending(); });
     activeTurn.animator = animator;
@@ -1444,6 +1958,7 @@ async function sendMessage() {
             answer = event.content || answer;
             resultStatus = event.status || '';
             approvalId = event.approval_id || '';
+            completedTurnId = event.turn_id || '';
             animator.replace(answer);
           }
           if (event.type === 'turn_error') streamError = event.message || event.reason || '运行失败';
@@ -1463,7 +1978,17 @@ async function sendMessage() {
         ? approvalHtml(approval)
         : messageHtml({ role: 'assistant', content: '工具调用正在等待审批，请刷新页面后处理。', meta: { events, usage: {}, runtime: {}, sources: [] } });
     } else if (pending) {
-      pending.outerHTML = messageHtml({ role: 'assistant', content: activeTurn.cancelled ? '已停止生成。' : (answer || '模型返回了空响应。'), meta: { events, usage: {}, runtime: {}, sources: [] } });
+      const persisted = completedTurnId && resultStatus === 'completed'
+        ? (await api(`/api/threads/${state.thread}`).catch(() => null))?.messages?.find(item => item.turn_id === completedTurnId && item.role === 'assistant')
+        : null;
+      pending.outerHTML = persisted
+        ? messageHtml(persisted)
+        : messageHtml({ role: 'assistant', content: activeTurn.cancelled ? '已停止生成。' : (answer || '模型返回了空响应。'), meta: { events, usage: {}, runtime: {}, sources: [] } });
+      if (persisted) {
+        const prior = state.currentThread?.messages || [];
+        const strip = $('#conversationAssets');
+        if (strip) strip.outerHTML = assetStripHtml([...prior, persisted]);
+      }
     }
     scrollMessages(true);
   } catch (error) {

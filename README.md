@@ -56,6 +56,10 @@ CODEZZN_COOKIE_SECURE=false
 
 修改后运行 `docker compose up -d --build`。未配置 GitHub OAuth 时，本地邮箱注册/登录仍可正常使用，GitHub 按钮会返回明确的配置提示。
 
+退出 Codezzn 会撤销当前应用会话并清除 Cookie；再次通过 GitHub 登录会要求显示账号选择器，OAuth `state` 也绑定到发起登录的浏览器。**这不会退出 github.com，也不能保证 GitHub 每次要求输入密码或二次验证**——认证挑战由 GitHub 控制。共用设备应同时退出 GitHub；若业务合规要求每次都进行密码/MFA 挑战，需要另行接入能实施该策略的身份提供方或添加应用级二次验证。生产环境请使用 HTTPS 并设置 `CODEZZN_COOKIE_SECURE=true`。
+
+如果宿主机访问 GitHub 必须走代理，而容器直连 GitHub 超时，可设置 `CODEZZN_GITHUB_PROXY_URL` 为**容器实际可访问**的 HTTP 代理地址（例如 `http://host.docker.internal:7897`，但需先从容器验证连通）。该代理只用于 GitHub OAuth，不影响内网 RAGFlow 请求。代理不可达时，登录页会显示连接失败/超时，而不会暴露授权码或返回空白 500 页面。
+
 ### 可选 RAGFlow 检索后端
 
 RAGFlow 必须作为独立服务部署，不要把其源码或 Compose 服务直接合并到 Codezzn 主容器。Codezzn 通过 RAGFlow `/api/v1` REST API 接入。将以下设置添加到现有 `.env`；`CODEZZN_RAGFLOW_URL` 可以是服务根地址或已经带 `/api/v1` 的地址：
@@ -116,6 +120,7 @@ Install any other trusted dependencies into a custom image at build time and set
 - Each Shell or Git tool invocation gets a **separate execution container**, not one container for a whole Turn. Execution runs as UID/GID `10001:10001` in the task worktree, without inherited application secrets or Docker socket. Network is off except explicitly approved Git remote calls when `CODEZZN_SANDBOX_GIT_NETWORK=true`. Defaults are 1 CPU, 512 MiB memory, 64 PIDs, and a 60-second timeout.
 - Only Shell/Git execution is container-sandboxed. MCP/LSP servers, Playwright, and native Python file tools are **out of scope** and execute in the main application's trust boundary. Browser sessions can reach networks available to the main container; enable them only for trusted agents.
 - When `/workspace` is a Git work tree, each persistent task or conversation receives an independent branch and `git worktree` below `.codezzn-worktrees/`. A non-Git workspace cannot provide branch isolation and falls back to the base workspace.
+- A repository created with `git init` but no first commit also has no usable `HEAD`: chats fall back to that account's own workspace instead of failing at startup. This mode has no per-task file isolation. For concurrent coding tasks, make a deliberate first commit containing only files you intend to track; Codezzn does not create a commit on your behalf.
 
 ### Tool permissions and Linux bind mounts
 
@@ -174,7 +179,9 @@ docker run --rm --name codezzn-sandbox-verification --user 0:0 --network none --
 
 预期输出 count=8。任务完成后可查看 `docker ps -a --filter label=io.codezzn.sandbox.instance=codezzn-local`；没有活动任务时不应残留本实例执行容器。
 
-安全限制：共享工作区没有磁盘容量/文件数量配额，也没有多租户隔离。CPU/内存限制不等于磁盘配额，workspace-write 仍能修改或删除工作区内容。主服务的原生文件工具与 MCP 不在本次容器隔离边界内，仍存在并发文件路径竞态；只在可信单机环境启用，关闭不需要的 MCP/原生写文件工具，工作区不要保存密钥。不要将本方案称为完整 Codex 沙箱等价实现。
+安全限制：登录账号的业务数据库与工作区已按用户分开，Shell/Git 沙箱只挂载该用户工作区；但还没有磁盘容量/文件数量配额，也不是完整的恶意租户安全边界。CPU/内存限制不等于磁盘配额，workspace-write 仍能修改该用户工作区。登录用户的本地 stdio MCP 和本地 LSP 暂时禁用，HTTP MCP 可用；不要将本方案称为完整 Codex 沙箱等价实现。
+
+现有共享数据迁移：升级前，在 `.env` 设置 `CODEZZN_LEGACY_OWNER_GITHUB_ID` 为历史数据归属账号的**数字 GitHub ID**。该账号必须已登录过一次。首次启动会通过 SQLite 在线备份将旧业务库复制到 `./data/users/<user-id>/codezzn.db`，清除副本中的账号与会话记录，并将旧 `./workspace` 内容复制到 `./workspace/.codezzn-users/<user-id>/`；原库及原文件保留，不会删除。其他账号首次使用时创建独立空业务库和工作区。迁移后不要继续通过管理员密钥修改旧共享业务库，否则后续改动不会自动同步。升级期间应停止旧版本服务的写入。
 
 ## 配置
 
@@ -190,6 +197,7 @@ docker run --rm --name codezzn-sandbox-verification --user 0:0 --network none --
 | `CODEZZN_PUBLIC_URL` | `http://127.0.0.1:8080` | GitHub OAuth 回调所使用的外部地址 |
 | `CODEZZN_GITHUB_CLIENT_ID` | 空 | GitHub OAuth App Client ID |
 | `CODEZZN_GITHUB_CLIENT_SECRET` | 空 | GitHub OAuth App Client Secret |
+| `CODEZZN_GITHUB_PROXY_URL` | 空 | 仅 GitHub OAuth 使用的容器可达 HTTP 代理 |
 | `CODEZZN_SESSION_DAYS` | `14` | 登录会话有效天数 |
 | `CODEZZN_COOKIE_SECURE` | `false` | HTTPS 生产环境应设为 `true` |
 | `CODEZZN_BASE_IMAGE` | `python:3.12-slim` | Docker Hub 不可用时可换成内部 Python 3.12 基础镜像 |
