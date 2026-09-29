@@ -1,0 +1,47 @@
+.cz-help-widget,
+.cz-help-widget * { box-sizing: border-box; }
+.cz-help-widget [hidden] { display: none !important; }
+.cz-help-widget { position: fixed; z-index: 29; right: 24px; bottom: 24px; color: #17191f; font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.cz-help-toggle { width: 58px; height: 58px; display: grid; place-items: center; border: 0; border-radius: 50%; background: #ff7900; color: #111; box-shadow: 0 8px 28px rgb(0 0 0 / 24%); cursor: pointer; transition: transform .18s ease, box-shadow .18s ease; }
+.cz-help-toggle:hover { transform: translateY(-2px); box-shadow: 0 12px 32px rgb(0 0 0 / 30%); }
+.cz-help-toggle svg { width: 22px; height: 22px; }
+.cz-help-toggle.is-open svg { transform: rotate(180deg); }
+.cz-help-toggle[hidden] { display: none; }
+.cz-help-panel { position: absolute; right: 0; bottom: 76px; width: min(382px, calc(100vw - 28px)); height: min(360px, calc(100dvh - 112px)); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid #e1e3e8; border-radius: 14px; background: #fff; box-shadow: 0 20px 64px rgb(11 15 26 / 24%); transform-origin: bottom right; animation: cz-help-open .18s ease-out; }
+.cz-help-panel.is-chat-open { height: min(520px, calc(100dvh - 112px)); }
+.cz-help-panel[hidden] { display: none; }
+@keyframes cz-help-open { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.cz-help-head { position: relative; min-height: 164px; display: grid; grid-template-columns: 42px minmax(0,1fr) 34px; grid-template-rows: 42px auto; align-content: start; align-items: start; column-gap: 12px; padding: 20px 18px 18px; background: #f1f1f2; }
+.cz-help-brand { width: 40px; height: 40px; display: grid; place-items: center; overflow: hidden; border-radius: 7px; background: #0c0e12; }
+.cz-help-brand img { width: 100%; height: 100%; object-fit: cover; }
+.cz-help-head h2 { grid-column: 1 / 3; margin: 16px 0 0; color: #111216; font-size: 24px; line-height: 1.28; font-weight: 680; letter-spacing: -.035em; }
+.cz-help-close { width: 34px; height: 34px; grid-column: 3; grid-row: 1; border: 0; border-radius: 7px; background: transparent; color: #15161a; font-size: 20px; cursor: pointer; }
+.cz-help-close:hover { background: rgb(0 0 0 / 7%); }
+.cz-help-body { min-height: 0; overflow: auto; padding: 12px 18px; }
+.cz-help-label { display: block; margin: 0 0 8px; color: #1e2026; font-weight: 560; }
+.cz-help-search { width: 100%; min-height: 34px; border: 1px solid #dadce2; border-radius: 7px; outline: 0; background: white; color: #181a20; padding: 6px 10px; font: inherit; }
+.cz-help-search:focus, .cz-help-input:focus { border-color: #9d85eb; box-shadow: 0 0 0 3px rgb(128 92 220 / 12%); }
+.cz-help-results { display: grid; gap: 3px; margin-top: 10px; }
+.cz-help-result { width: 100%; border: 0; border-radius: 7px; background: transparent; color: #22242a; padding: 9px 10px; text-align: left; cursor: pointer; }
+.cz-help-result:hover { background: #f4f2fa; }
+.cz-help-answer { margin-top: 11px; border: 1px solid #e7e5ee; border-radius: 8px; background: #faf9fc; padding: 11px 12px; color: #41434a; white-space: pre-wrap; }
+.cz-help-divider { height: 1px; margin: 10px 0; background: #eaebef; }
+.cz-help-chat-link { width: 100%; min-height: 58px; display: grid; grid-template-columns: 36px minmax(0,1fr) 24px; align-items: center; gap: 10px; border: 0; border-radius: 8px; background: transparent; color: #191b20; padding: 6px 2px; text-align: left; cursor: pointer; }
+.cz-help-chat-link:hover { background: #f6f5f8; }
+.cz-help-chat-link img { width: 34px; height: 34px; border-radius: 7px; background: #111318; }
+.cz-help-chat-link strong, .cz-help-chat-link small { display: block; }
+.cz-help-chat-link small { margin-top: 2px; color: #767982; font-size: 11px; }
+.cz-help-chat-link > span:last-child { color: #777983; font-size: 19px; }
+.cz-help-chat { display: grid; gap: 10px; }
+.cz-help-messages { display: grid; align-content: start; gap: 8px; max-height: 240px; overflow: auto; }
+.cz-help-message { max-width: 94%; justify-self: start; border-radius: 9px; background: #f2f1f4; padding: 9px 11px; color: #272930; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cz-help-message.is-user { justify-self: end; background: #eee9fb; }
+.cz-help-input-row { display: grid; grid-template-columns: minmax(0,1fr) 42px; gap: 8px; }
+.cz-help-input { width: 100%; min-height: 42px; border: 1px solid #dadce2; border-radius: 7px; outline: 0; padding: 9px 11px; font: inherit; }
+.cz-help-send { min-width: 42px; border: 0; border-radius: 7px; background: #805cdc; color: white; font-size: 18px; cursor: pointer; }
+.cz-help-send:disabled { cursor: wait; opacity: .55; }
+.cz-help-footer { min-height: 31px; display: grid; place-items: center; border-top: 1px solid #ececf0; background: #fafafa; color: #858790; font-size: 10px; }
+.cz-help-offline { color: #858790; font-size: 11px; }
+.cz-help-widget button:focus-visible { outline: 3px solid rgb(128 92 220 / 42%); outline-offset: 2px; }
+@media (max-width: 520px) { .cz-help-widget { right: 14px; bottom: 14px; } .cz-help-panel { right: 0; bottom: 72px; width: min(382px, calc(100vw - 24px)); height: min(360px, calc(100dvh - 100px)); } .cz-help-panel.is-chat-open { height: min(520px, calc(100dvh - 100px)); } }
+@media (prefers-reduced-motion: reduce) { .cz-help-panel { animation: none; } .cz-help-toggle { transition: none; } }

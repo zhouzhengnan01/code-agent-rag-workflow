@@ -10,6 +10,8 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from datetime import datetime
 import asyncio
 import zipfile
+import tempfile
+import mimetypes
 from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 
@@ -30,7 +32,7 @@ from .worktrees import ensure_worktree, list_worktrees, remove_worktree, worktre
 from .workspace import reset_workspace, use_workspace, tenant_workspace
 from .projects import artifact_path, create_project, get_artifact as get_project_artifact, get_artifact_version_content, get_project, list_artifact_versions, list_artifacts, list_projects, update_project
 from .domain_tools import discard_workflow_draft, get_workflow_draft, get_workflow_version, list_workflow_versions, save_workflow_draft
-from .intent import classify_intent
+from .intent import classify_intent, parse_project_directive
 from .skill_packages import import_package, read_package_file
 from .code_intelligence import rebuild_index, symbols as code_symbols, references as code_references, graph as code_graph
 from .lsp import lsp_manager
@@ -38,8 +40,12 @@ from .browser import browser_manager
 from .tenant_migration import migrate_legacy_owner
 from .auth import (
     OAUTH_STATE_COOKIE, clear_session, create_session, github_authorize_url, github_callback,
-    github_configured, login_user, register_user, request_user, set_session_cookie,
+    github_configured, google_authorize_url, google_callback, google_configured,
+    login_user, register_user, request_user, set_session_cookie,
 )
+from .email_auth import send_email_code, smtp_configured, verify_email_code
+from .help import asks_for_own_projects, search_faq
+from .model import chat_completion
 
 
 THREAD_LOCKS = {}
@@ -74,6 +80,11 @@ def _capability_ids(value, kind):
 
 def _agent_for_thread(agent, thread):
     scoped = dict(agent)
+    # A selected project is context, not permission to modify its files.
+    active_project_id = thread["active_project_id"] if "active_project_id" in thread.keys() else None
+    if active_project_id:
+        scoped["_project_id"] = active_project_id
+        scoped["memory_project_id"] = active_project_id
     raw = thread["capability_overrides"] if "capability_overrides" in thread.keys() else "{}"
     try:
         overrides = json.loads(raw or "{}") if isinstance(raw, str) else (raw or {})
@@ -88,6 +99,8 @@ def _agent_for_thread(agent, thread):
 ROOT = Path(__file__).resolve().parents[2]
 WEB = ROOT / "web"
 RESOURCE_KINDS = {"agents", "agent_teams", "skills", "providers", "mcp_servers", "lsp_servers", "knowledge", "workflows"}
+mimetypes.add_type("image/webp", ".webp")
+mimetypes.add_type("font/woff2", ".woff2")
 
 
 async def run_agent_isolated(agent, history, prompt, *, task_id=None, thread_id=None, **kwargs):
@@ -183,23 +196,29 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Codezzn", version="0.3.0", description="可部署的智能体开发与运行平台", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
+LANDING_ASSETS = ROOT / "public" / "sites" / "browser-use-com-ef244017" / "web-agents-4de235c6"
+app.mount(
+    "/site-assets",
+    StaticFiles(directory=LANDING_ASSETS),
+    name="browser-use-landing-assets",
+)
 
 
-PUBLIC_PATHS = {"/healthz", "/login", "/register"}
+PUBLIC_PATHS = {"/", "/healthz", "/login", "/register", "/api/help/faq", "/api/help/ask"}
 
 
 @app.middleware("http")
 async def access_control(request: Request, call_next):
     key = os.getenv("CODEZZN_ADMIN_KEY")
     path = request.url.path
-    public = path in PUBLIC_PATHS or path.startswith("/assets/") or path.startswith("/api/auth/")
-    user = request_user(request) if not public or path == "/api/auth/me" else None
+    public = path in PUBLIC_PATHS or path.startswith("/assets/") or path.startswith("/site-assets/") or path.startswith("/api/auth/")
+    user = request_user(request) if not public or path in {"/api/auth/me", "/api/help/faq", "/api/help/ask"} else None
     request.state.user = user
     supplied = request.headers.get("X-Codezzn-Key") or request.query_params.get("api_key")
     key_valid = bool(key and supplied == key)
     auth_required = os.getenv("CODEZZN_AUTH_REQUIRED", "false").lower() == "true"
     if not public and (auth_required or key) and not user and not key_valid:
-        if path in {"/", "/workbench.html"}:
+        if path == "/workbench.html":
             return RedirectResponse("/login?next=/workbench.html", status_code=303)
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     token = use_tenant(user["id"] if user else None)
@@ -213,6 +232,10 @@ async def access_control(request: Request, call_next):
 
 
 @app.get("/")
+def public_home():
+    return FileResponse(WEB / "home.html")
+
+
 @app.get("/workbench.html")
 def workbench():
     return FileResponse(WEB / "workbench.html")
@@ -230,11 +253,61 @@ def register_page():
 
 @app.get("/api/auth/me")
 def auth_me(request: Request):
-    return {"authenticated": bool(request.state.user), "user": request.state.user, "github_configured": github_configured()}
+    return {"authenticated": bool(request.state.user), "user": request.state.user,
+            "github_configured": github_configured(), "google_configured": google_configured(),
+            "email_code_configured": smtp_configured()}
+
+
+@app.get("/api/help/faq")
+def help_faq(q: str = ""):
+    return {"data": search_faq(q)}
+
+
+@app.post("/api/help/ask")
+async def help_ask(request: Request, payload: dict = Body(...)):
+    question = str(payload.get("question") or "").strip()
+    if not question or len(question) > 2000:
+        raise HTTPException(400, "问题长度须为 1–2000 个字符")
+    matches = search_faq(question, 4)
+    # Public/login pages remain useful without exposing a provider or spending
+    # model tokens. Authenticated workbench sessions may ask their tenant's
+    # configured model, but the help endpoint never exposes agent tools.
+    user = getattr(request.state, "user", None)
+    if not user:
+        answer = matches[0]["answer"] if matches else "暂时没有匹配到帮助条目。登录工作台后，可以向 Codezzn 助手询问更多产品使用问题。"
+        return {"answer": answer, "source": "faq", "matches": matches}
+    if asks_for_own_projects(question):
+        projects = list_projects()
+        if projects:
+            names = "\n".join(f"{index}. {item['name']}（ID：{item['id']}）" for index, item in enumerate(projects, 1))
+            answer = f"你当前有 {len(projects)} 个项目：\n{names}\n\n在左侧「项目」页面可以打开项目；在对话顶部的「当前项目」可以切换项目。"
+        else:
+            answer = "你当前还没有项目。可以在左侧「项目」页面创建，或在对话中创建并选择项目。"
+        return {"answer": answer, "source": "workspace", "matches": []}
+    agents = [item for item in resource_list("agents") if item.get("enabled", True)]
+    agent = next((item for item in agents if item.get("role_template") == "general"), agents[0] if agents else None)
+    provider = resource_get("providers", agent.get("provider_id")) if agent else None
+    if not provider or not provider.get("api_key"):
+        answer = matches[0]["answer"] if matches else "当前没有可用的模型提供方。请先在“模型接入”配置模型；你也可以搜索上方的帮助问题。"
+        return {"answer": answer, "source": "faq", "matches": matches}
+    context = "\n\n".join(f"Q: {item['question']}\nA: {item['answer']}" for item in matches)
+    try:
+        response, _ = await chat_completion(provider, agent.get("model") or provider.get("default_model"), [
+            {"role": "system", "content": "你是 Codezzn 的产品帮助助手。使用用户当前 Codezzn 部署中的 FAQ 作为依据，用简体中文简洁回答产品使用问题。不要调用工具，不要承诺你已经执行了操作，也不要索取密码、API Key、验证码或其他凭据。如果 FAQ 无法回答，明确说目前没有找到依据，并建议用户在智能体工作台继续询问。\n\nCodezzn FAQ:\n" + context},
+            {"role": "user", "content": question},
+        ], tools=None, temperature=0.2)
+        answer = str(response.get("content") or "").strip()
+        if answer:
+            return {"answer": answer, "source": "agent", "matches": matches}
+    except Exception:
+        pass
+    return {"answer": matches[0]["answer"] if matches else "暂时无法生成回答，请稍后重试。", "source": "faq", "matches": matches}
 
 
 @app.post("/api/auth/register")
 def auth_register(payload: dict = Body(...)):
+    if smtp_configured():
+        raise HTTPException(403, "请通过邮箱验证码注册账号")
     user = register_user(payload.get("name"), payload.get("email"), payload.get("password"))
     token, expires = create_session(user["id"])
     response = JSONResponse({"user": user})
@@ -248,6 +321,24 @@ def auth_login(payload: dict = Body(...)):
     token, expires = create_session(user["id"])
     response = JSONResponse({"user": user})
     set_session_cookie(response, token, expires)
+    return response
+
+
+@app.post("/api/auth/email/code")
+def auth_email_code(payload: dict = Body(...)):
+    response = JSONResponse(send_email_code(payload.get("email")))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/auth/email/verify")
+def auth_email_verify(request: Request, payload: dict = Body(...)):
+    user = verify_email_code(payload.get("email"), payload.get("code"))
+    response = JSONResponse({"user": user})
+    clear_session(request, response)
+    token, expires = create_session(user["id"])
+    set_session_cookie(response, token, expires)
+    response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -294,6 +385,40 @@ async def auth_github_callback(request: Request, code: str = "", state: str = ""
     return response
 
 
+@app.get("/api/auth/google/start")
+def auth_google_start(next: str = "/workbench.html"):
+    url, state = google_authorize_url(next)
+    response = RedirectResponse(url, status_code=303)
+    response.set_cookie(
+        OAUTH_STATE_COOKIE, state, max_age=600, httponly=True,
+        secure=os.getenv("CODEZZN_COOKIE_SECURE", "false").lower() == "true",
+        samesite="lax", path="/",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.get("/api/auth/google/callback")
+async def auth_google_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+    if error:
+        response = RedirectResponse("/login?error=google_denied", status_code=303)
+    elif not code or not state or not secrets.compare_digest(request.cookies.get(OAUTH_STATE_COOKIE) or "", state):
+        response = RedirectResponse("/login?error=google_invalid", status_code=303)
+    else:
+        try:
+            user, next_path = await google_callback(code, state)
+        except HTTPException as exc:
+            response = RedirectResponse(f"/login?error=google_{exc.status_code}", status_code=303)
+        else:
+            response = RedirectResponse(next_path, status_code=303)
+            clear_session(request, response)
+            token, expires = create_session(user["id"])
+            set_session_cookie(response, token, expires)
+    response.delete_cookie(OAUTH_STATE_COOKIE, path="/", samesite="lax")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/healthz")
 def health():
     return {"status": "ok", "name": "codezzn", "version": app.version}
@@ -320,7 +445,7 @@ async def agent_intent(payload: dict = Body(...)):
             raise HTTPException(404, "对话不存在")
         agent = _agent_for_thread(agent, thread)
     try:
-        return await classify_intent(agent, content, list(reversed(history)))
+        return await classify_intent(agent, content, list(reversed(history)), projects=list_projects())
     except ValueError as exc:
         raise HTTPException(503, str(exc)) from exc
 
@@ -879,6 +1004,69 @@ def projects_artifacts(project_id: str):
     return {"data": artifacts}
 
 
+@app.get("/api/projects/{project_id}/artifacts/archive")
+def projects_artifacts_archive(project_id: str, prefix: str = ""):
+    """Download a ZIP made only from this tenant's registered project artifacts."""
+    if len(prefix) > 500 or prefix.startswith("/") or prefix.endswith("/"):
+        raise HTTPException(400, "文件夹路径无效")
+    prefix = prefix.strip("/")
+    if prefix and ("\\" in prefix or any(part in {"", ".", ".."} for part in prefix.split("/"))):
+        raise HTTPException(400, "文件夹路径无效")
+    try:
+        artifacts = list_artifacts(project_id)
+    except ValueError:
+        artifacts = None
+    if artifacts is None:
+        raise HTTPException(404, "项目不存在")
+    if prefix:
+        artifacts = [item for item in artifacts if item["path"].startswith(prefix + "/")]
+        if not artifacts:
+            raise HTTPException(404, "文件夹中没有已登记的文件")
+    if len(artifacts) > 1000:
+        raise HTTPException(413, "项目文件超过 1000 个，无法打包下载")
+
+    total_bytes = 0
+    files = []
+    for artifact in artifacts:
+        try:
+            target = artifact_path(project_id, artifact["path"])
+        except ValueError:
+            continue
+        if not target.is_file():
+            continue
+        size = target.stat().st_size
+        total_bytes += size
+        if total_bytes > 128 * 1024 * 1024:
+            raise HTTPException(413, "项目文件总大小超过 128 MiB，无法打包下载")
+        files.append((target, artifact["path"]))
+
+    archive = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024, mode="w+b")
+    try:
+        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as bundle:
+            for target, relative_path in files:
+                bundle.write(target, arcname=relative_path)
+        archive.seek(0)
+    except Exception:
+        archive.close()
+        raise
+
+    def chunks():
+        try:
+            while chunk := archive.read(1024 * 1024):
+                yield chunk
+        finally:
+            archive.close()
+
+    return StreamingResponse(
+        chunks(), media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="project-{project_id}.zip"',
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
 @app.get("/api/projects/{project_id}/resources")
 def projects_resources(project_id: str):
     try:
@@ -958,7 +1146,7 @@ def _agent_can_save_project_files(agent: dict | None, intent_kind: str = "file")
     if agent.get("sandbox_mode") not in {"workspace-write", "danger-full-access"}:
         return False
     file_writer = any(
-        name in (agent.get("builtin_tools") or [])
+        (name in (agent.get("builtin_tools") or []) or agent.get("role_template") == "coding")
         and tool_policy_decision(agent, name) != "deny"
         for name in ("write_file", "apply_patch")
     )
@@ -1016,6 +1204,41 @@ def list_threads(archived: bool = False):
     with connect() as db:
         rows = db.execute("SELECT * FROM threads WHERE archived=? ORDER BY updated_at DESC", (1 if archived else 0,)).fetchall()
     return {"data": [_thread_payload(row) for row in rows]}
+
+
+@app.post("/api/threads/{thread_id}/project-switch")
+def switch_thread_project(thread_id: str, payload: dict = Body(...)):
+    """Bind an existing project without treating the switch as file-write consent."""
+    project_name = payload.get("project_name")
+    content = payload.get("content")
+    if not isinstance(project_name, str) or not project_name.strip() or len(project_name.strip()) > 100:
+        raise HTTPException(400, "项目名称无效")
+    if not isinstance(content, str) or not content.strip() or len(content) > 8000:
+        raise HTTPException(400, "消息内容无效")
+    project_name = project_name.strip()
+    directive = parse_project_directive(content, [{"id": "requested", "name": project_name}])
+    if not directive or directive["remaining_task"] or directive["project_name"].casefold() != project_name.casefold():
+        raise HTTPException(400, "此接口只接受单独的项目切换指令；复合任务必须继续处理剩余步骤")
+    timestamp = now()
+    turn_id = new_id("turn")
+    with connect() as db:
+        thread = db.execute("SELECT id,status FROM threads WHERE id=?", (thread_id,)).fetchone()
+        if not thread:
+            raise HTTPException(404, "对话不存在")
+        if thread["status"] in {"running", "waiting_for_approval"}:
+            raise HTTPException(409, "请先完成当前运行或审批，再切换项目")
+        projects = db.execute("SELECT id,name FROM projects WHERE name=? COLLATE NOCASE", (project_name,)).fetchall()
+        if not projects:
+            raise HTTPException(404, f"找不到项目「{project_name}」，请从当前项目菜单选择或创建项目")
+        if len(projects) > 1:
+            raise HTTPException(409, f"存在多个同名项目「{project_name}」，请从当前项目菜单选择具体项目")
+        project = dict(projects[0])
+        reply = f"已切换到项目「{project['name']}」（ID: {project['id']}）。这次操作只切换对话项目，不授权写入文件。"
+        db.execute("INSERT OR IGNORE INTO thread_projects(thread_id,project_id,created_at) VALUES(?,?,?)", (thread_id, project["id"], timestamp))
+        db.execute("UPDATE threads SET active_project_id=?,updated_at=? WHERE id=?", (project["id"], timestamp, thread_id))
+        db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content.strip(), timestamp))
+        db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", reply, timestamp))
+    return {"project": project, "content": reply, "turn_id": turn_id}
 
 
 @app.post("/api/threads/{thread_id}/fork")
@@ -1135,8 +1358,11 @@ def update_thread(thread_id: str, payload: dict = Body(...)):
 @app.get("/api/threads/{thread_id}/approvals")
 def list_approvals(thread_id: str, status: str = "pending"):
     with connect() as db:
-        rows = db.execute("SELECT * FROM approvals WHERE thread_id=? AND status=? ORDER BY created_at", (thread_id, status)).fetchall()
-    return {"data": [{**dict(row), "arguments": json.loads(row["arguments"])} for row in rows]}
+        rows = db.execute("""SELECT a.*, EXISTS(
+            SELECT 1 FROM turn_checkpoints c WHERE c.turn_id=a.turn_id AND c.status='waiting'
+        ) AS has_checkpoint FROM approvals a WHERE a.thread_id=? AND a.status=? ORDER BY a.created_at""", (thread_id, status)).fetchall()
+    return {"data": [{**dict(row), "resumable": bool(row["resumable"] and row["tool_call_id"] and row["has_checkpoint"]),
+                      "arguments": json.loads(row["arguments"])} for row in rows]}
 
 
 @app.get("/api/threads/{thread_id}/approvals/inbox")
@@ -1156,7 +1382,7 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
     if len(reason) > 4000:
         raise HTTPException(400, "回答不能超过 4000 个字符")
     if not approval["resumable"] or not approval["tool_call_id"]:
-        raise HTTPException(409, "该审批由旧版本创建，无法自动续跑")
+        raise HTTPException(409, "该审批缺少可恢复状态，不能执行旧工具调用；请使用「重新填写任务」发起新任务")
     thread_id, turn_id = approval["thread_id"], approval["turn_id"]
     lock = await thread_lock(thread_id)
     if lock.locked():
@@ -1230,6 +1456,23 @@ async def resolve_approval(approval_id: str, payload: dict = Body(...)):
     if decision not in ("approved", "denied"):
         raise HTTPException(400, "decision 必须是 approved 或 denied")
     return await continue_approval(approval_id, decision, str(payload.get("reason") or decision))
+
+
+@app.post("/api/approvals/{approval_id}/dismiss")
+def dismiss_stale_approval(approval_id: str):
+    """Retire a pre-checkpoint approval without executing its old tool call."""
+    with connect() as db:
+        approval = db.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
+        if not approval:
+            raise HTTPException(404, "审批不存在")
+        if approval["status"] != "pending":
+            raise HTTPException(409, "审批已处理")
+        checkpoint = db.execute("SELECT 1 FROM turn_checkpoints WHERE turn_id=? AND status='waiting'", (approval["turn_id"],)).fetchone()
+        if approval["resumable"] and approval["tool_call_id"] and checkpoint:
+            raise HTTPException(409, "这是可续跑的审批，请选择允许或拒绝")
+        user_message = db.execute("SELECT content FROM messages WHERE thread_id=? AND turn_id=? AND role='user' ORDER BY created_at LIMIT 1", (approval["thread_id"], approval["turn_id"])).fetchone()
+        db.execute("UPDATE approvals SET status='expired',resolution='旧版本审批缺少续跑检查点，未执行工具',resolved_at=? WHERE id=? AND status='pending'", (now(), approval_id))
+    return {"status": "expired", "content": user_message["content"] if user_message else "", "thread_id": approval["thread_id"]}
 
 
 @app.post("/api/threads/{thread_id}/resume")

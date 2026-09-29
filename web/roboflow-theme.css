@@ -54,7 +54,7 @@ body.rail-expanded .studio-shell { grid-template-columns: 155px minmax(0, 1fr); 
   height: 32px;
   flex-basis: 32px;
   border-radius: 8px;
-  background: #242733;
+  background: transparent;
   color: #f9fafb;
   font: 700 11px/1 var(--font-sans);
   letter-spacing: 0;
@@ -371,6 +371,12 @@ body.page-dashboard .viewport { height: 100%; padding: 0; background: #fff; }
 .project-context-help { margin-left: auto; white-space: nowrap; }
 .conversation-assets { align-self: flex-start; margin: 7px 22px 0; border: 1px solid #e6e2ee; border-radius: 6px; background: #faf9fc; color: #6d28d9; padding: 4px 9px; font-size: 11px; font-weight: 650; }
 .conversation-assets[hidden] { display: none; }
+.conversation-assets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: calc(100% - 44px); max-height: 77px; overflow: auto; }
+.conversation-assets > span { margin-right: 3px; white-space: nowrap; }
+.conversation-asset-chip, .file-reference-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 190px; border: 1px solid #e6e2ee; border-radius: 6px; background: #fff; color: #4b2bb1; padding: 3px 7px; font: 500 11px/1.4 var(--font-mono); vertical-align: baseline; cursor: pointer; }
+.conversation-asset-chip:hover, .file-reference-chip:hover { border-color: #a88af3; background: #f5f1ff; }
+.file-reference-chip { max-width: 100%; margin: 0 2px; overflow-wrap: anywhere; }
+.artifact-missing-note { max-width: 520px; margin: 7px 0 12px; border-left: 2px solid #e6a540; padding: 6px 9px; background: #fffaf0; color: #80561a; font-size: 11px; line-height: 1.5; }
 .project-confirm-turn .turn-content { max-width: min(100%, 448px); }
 .project-confirm-card { overflow: hidden; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 6%); font-family: Inter, var(--font-sans); }
 .project-confirm-head { min-height: 42px; display: flex; align-items: flex-start; gap: 8px; border-bottom: 1px solid #e5e7eb; background: linear-gradient(#f9fafbcc, #fff); padding: 8px 12px; }

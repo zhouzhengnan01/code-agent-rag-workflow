@@ -3,6 +3,29 @@ import re
 from .db import resource_get
 
 
+CODING_TOOL_ALIASES = {
+    "bash": "run_shell",
+    "read": "read_file",
+    "write": "write_file",
+    "edit": "apply_patch",
+    "grep": "search_code",
+    "replace_file": "apply_patch",
+}
+
+BROWSER_USE_TOOL_NAMES = {
+    "search", "navigate", "go_back", "wait", "click", "input", "upload_file", "switch", "close",
+    "extract", "search_page", "find_elements", "scroll", "send_keys", "find_text", "screenshot",
+    "save_as_pdf", "dropdown_options", "select_dropdown", "evaluate", "browser_state",
+    # Public Browser Use MCP names, routed to the same tenant-scoped local Playwright runtime.
+    "browser_navigate", "browser_click", "browser_type", "browser_get_state", "browser_extract_content",
+    "browser_scroll", "browser_go_back", "browser_list_tabs", "browser_switch_tab", "browser_close_tab",
+    # Additional local interaction/session tools needed for robust task completion.
+    "browser_open_tab", "browser_forward", "browser_reload", "browser_double_click", "browser_right_click",
+    "browser_hover", "browser_drag", "browser_wait_for", "browser_get_element", "browser_download",
+    "browser_close_session",
+}
+
+
 ROLE_TEMPLATES = {
     "general": {
         "name": "通用执行者",
@@ -13,7 +36,7 @@ ROLE_TEMPLATES = {
         "name": "软件工程师",
         "description": "面向代码库分析、实现、测试和审查。",
         "instructions": (
-            "像资深软件工程师一样工作：先检查仓库和约束，再做最小且完整的修改；"
+            "像资深软件工程师一样工作：先检查仓库说明、工作区和现有实现，再做最小且完整的修改；"
             "修改后运行与风险匹配的测试，检查 Git diff，并明确报告剩余风险。"
         ),
     },
@@ -47,6 +70,10 @@ def tool_policy_decision(agent, tool_name):
     rules = policy.get("tools") if isinstance(policy, dict) else {}
     rules = rules if isinstance(rules, dict) else {}
     candidates = [tool_name]
+    if tool_name in CODING_TOOL_ALIASES:
+        candidates.append(CODING_TOOL_ALIASES[tool_name])
+    if tool_name in BROWSER_USE_TOOL_NAMES:
+        candidates.append("browser")
     if tool_name.startswith("mcp__"):
         candidates.extend(["mcp:*", "mcp"])
     for key in candidates:

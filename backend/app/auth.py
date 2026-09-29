@@ -1,11 +1,12 @@
 import base64
+import asyncio
 import hashlib
 import hmac
 import os
 import re
 import secrets
 import sqlite3
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastapi import HTTPException, Request
@@ -48,7 +49,8 @@ def _password_matches(password: str, encoded: str | None) -> bool:
 def _public_user(row) -> dict:
     return {
         "id": row["id"], "email": row["email"], "name": row["name"],
-        "avatar_url": row["avatar_url"], "provider": "github" if row["github_id"] else "local",
+        "avatar_url": row["avatar_url"],
+        "provider": "google" if row["google_id"] else "github" if row["github_id"] else "local",
     }
 
 
@@ -233,8 +235,8 @@ async def github_callback(code: str, state: str) -> tuple[dict, str]:
                 safe_email = linked["email"] if email_owner and email_owner["id"] != user_id else email
                 db.execute("UPDATE users SET email=?,name=?,avatar_url=?,updated_at=? WHERE id=?", (safe_email, name, avatar_url, timestamp, user_id))
             elif email_owner:
-                if email_owner["github_id"]:
-                    raise HTTPException(409, "此邮箱已绑定其他 GitHub 账号")
+                if email_owner["github_id"] or email_owner["google_id"]:
+                    raise HTTPException(409, "此邮箱已绑定其他登录方式，请使用原账号登录")
                 user_id = email_owner["id"]
                 db.execute("UPDATE users SET name=?,avatar_url=?,github_id=?,updated_at=? WHERE id=?", (name, avatar_url, github_id, timestamp, user_id))
             else:
@@ -246,4 +248,132 @@ async def github_callback(code: str, state: str) -> tuple[dict, str]:
             row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
     except sqlite3.IntegrityError as exc:
         raise HTTPException(409, "GitHub 账号与现有用户资料冲突") from exc
+    return _public_user(row), _safe_next(saved["next_path"])
+
+
+def google_configured() -> bool:
+    return bool(os.getenv("CODEZZN_GOOGLE_CLIENT_ID") and os.getenv("CODEZZN_GOOGLE_CLIENT_SECRET"))
+
+
+def _google_redirect_uri() -> str:
+    uri = os.getenv("CODEZZN_GOOGLE_REDIRECT_URI") or (
+        os.getenv("CODEZZN_PUBLIC_URL", "http://127.0.0.1:8080").rstrip("/") + "/api/auth/google/callback"
+    )
+    parsed = urlparse(uri)
+    if (not parsed.hostname or parsed.username or parsed.password
+            or (parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}))
+            or parsed.path != "/api/auth/google/callback" or parsed.query or parsed.fragment):
+        raise HTTPException(503, "Google 回调地址必须使用 HTTPS 域名，或本机 localhost/127.0.0.1")
+    return uri
+
+
+def google_authorize_url(next_path: str | None = None) -> tuple[str, str]:
+    if not google_configured():
+        raise HTTPException(503, "Google 登录尚未配置，请设置 CODEZZN_GOOGLE_CLIENT_ID 和 CODEZZN_GOOGLE_CLIENT_SECRET")
+    redirect_uri = _google_redirect_uri()
+    state, nonce, verifier = (secrets.token_urlsafe(32), secrets.token_urlsafe(32), secrets.token_urlsafe(64))
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    timestamp = now()
+    with connect(global_db=True) as db:
+        db.execute("DELETE FROM oauth_states WHERE expires_at<=?", (timestamp,))
+        db.execute(
+            "INSERT INTO oauth_states(state_hash,provider,next_path,created_at,expires_at,nonce_hash,code_verifier) VALUES(?,?,?,?,?,?,?)",
+            (_digest(state), "google", _safe_next(next_path), timestamp, timestamp + 600, _digest(nonce), verifier),
+        )
+    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({
+        "client_id": os.getenv("CODEZZN_GOOGLE_CLIENT_ID"), "redirect_uri": redirect_uri,
+        "response_type": "code", "scope": "openid email profile", "state": state,
+        "nonce": nonce, "code_challenge": challenge, "code_challenge_method": "S256",
+        "prompt": "select_account",
+    })
+    return url, state
+
+
+def _verify_google_id_token(token: str, client_id: str) -> dict:
+    import requests
+    from google.auth.transport.requests import Request as GoogleRequest
+    from google.oauth2.id_token import verify_oauth2_token
+
+    session = requests.Session()
+    session.trust_env = False
+    proxy = os.getenv("CODEZZN_GOOGLE_PROXY_URL")
+    if proxy:
+        session.proxies.update({"https": proxy})
+    try:
+        return verify_oauth2_token(token, GoogleRequest(session=session), client_id)
+    finally:
+        session.close()
+
+
+async def google_callback(code: str, state: str) -> tuple[dict, str]:
+    timestamp = now()
+    with connect(global_db=True) as db:
+        saved = db.execute(
+            "SELECT * FROM oauth_states WHERE state_hash=? AND provider='google' AND expires_at>?",
+            (_digest(state), timestamp),
+        ).fetchone()
+        db.execute("DELETE FROM oauth_states WHERE state_hash=?", (_digest(state),))
+    if not saved or not saved["nonce_hash"] or not saved["code_verifier"]:
+        raise HTTPException(400, "Google 登录状态已失效，请重新尝试")
+    if not google_configured():
+        raise HTTPException(503, "Google 登录尚未配置")
+    proxy = os.getenv("CODEZZN_GOOGLE_PROXY_URL") or None
+    try:
+        transport = httpx.AsyncHTTPTransport(retries=1, proxy=proxy)
+    except (ImportError, ValueError) as exc:
+        raise HTTPException(502, "Google 代理配置无效") from exc
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5), transport=transport) as client:
+            response = await client.post("https://oauth2.googleapis.com/token", data={
+                "code": code, "client_id": os.getenv("CODEZZN_GOOGLE_CLIENT_ID"),
+                "client_secret": os.getenv("CODEZZN_GOOGLE_CLIENT_SECRET"),
+                "redirect_uri": _google_redirect_uri(), "grant_type": "authorization_code",
+                "code_verifier": saved["code_verifier"],
+            })
+            response.raise_for_status()
+            token = response.json().get("id_token")
+    except httpx.TimeoutException as exc:
+        raise HTTPException(504, "Google 响应超时，请重新登录") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Google 接口暂不可用，请重新登录") from exc
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(502, "Google 令牌响应无效，请重新登录") from exc
+    if not isinstance(token, str) or not token:
+        raise HTTPException(400, "Google 未返回身份令牌")
+    try:
+        claims = await asyncio.to_thread(_verify_google_id_token, token, os.getenv("CODEZZN_GOOGLE_CLIENT_ID"))
+    except ValueError as exc:
+        raise HTTPException(400, "Google 身份令牌校验失败") from exc
+    except Exception as exc:
+        raise HTTPException(502, "暂时无法校验 Google 身份令牌") from exc
+    nonce = str(claims.get("nonce") or "")
+    email = str(claims.get("email") or "").strip().lower()
+    google_id = str(claims.get("sub") or "")
+    if (not nonce or not hmac.compare_digest(_digest(nonce), saved["nonce_hash"])
+            or claims.get("email_verified") is not True or not EMAIL_PATTERN.fullmatch(email)
+            or len(email) > 254 or not google_id or len(google_id) > 255):
+        raise HTTPException(400, "Google 身份信息无效或邮箱未验证")
+    name = str(claims.get("name") or email.split("@", 1)[0])[:80]
+    avatar_url = str(claims.get("picture") or "")[:1000]
+    try:
+        with connect(global_db=True) as db:
+            linked = db.execute("SELECT * FROM users WHERE google_id=?", (google_id,)).fetchone()
+            email_owner = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+            if linked:
+                user_id = linked["id"]
+                safe_email = linked["email"] if email_owner and email_owner["id"] != user_id else email
+                db.execute("UPDATE users SET email=?,name=?,avatar_url=?,updated_at=? WHERE id=?",
+                           (safe_email, name, avatar_url, timestamp, user_id))
+            elif email_owner:
+                # Email alone is not proof that this Google subject owns a preexisting account.
+                raise HTTPException(409, "该邮箱已有账号；请使用原登录方式，Google 账号不会自动合并")
+            else:
+                user_id = new_id("usr")
+                db.execute(
+                    "INSERT INTO users(id,email,name,password_hash,avatar_url,google_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (user_id, email, name, None, avatar_url, google_id, timestamp, timestamp),
+                )
+            row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(409, "Google 账号与现有用户资料冲突") from exc
     return _public_user(row), _safe_next(saved["next_path"])

@@ -33,7 +33,7 @@ docker compose up -d --build
 
 Windows Docker Desktop 使用 bind mount 时，宿主机文件权限可能与容器内非 root UID 不一致。Compose 默认使用 `CODEZZN_UID=0`、`CODEZZN_GID=0` 保证本地启动可写；Linux 主机可在 `.env` 中改为 `./data` 和 `./workspace` 所属用户的 UID/GID。
 
-### 注册、登录与 GitHub OAuth
+### 注册、登录与 GitHub / Google OAuth
 
 本地注册使用 scrypt 密码哈希；浏览器只保存 `HttpOnly`、`SameSite=Lax` 会话 Cookie。生产环境放在 HTTPS 反向代理后时，将 `CODEZZN_PUBLIC_URL` 改为外部 HTTPS 地址，并设置 `CODEZZN_COOKIE_SECURE=true`。
 
@@ -59,6 +59,36 @@ CODEZZN_COOKIE_SECURE=false
 退出 Codezzn 会撤销当前应用会话并清除 Cookie；再次通过 GitHub 登录会要求显示账号选择器，OAuth `state` 也绑定到发起登录的浏览器。**这不会退出 github.com，也不能保证 GitHub 每次要求输入密码或二次验证**——认证挑战由 GitHub 控制。共用设备应同时退出 GitHub；若业务合规要求每次都进行密码/MFA 挑战，需要另行接入能实施该策略的身份提供方或添加应用级二次验证。生产环境请使用 HTTPS 并设置 `CODEZZN_COOKIE_SECURE=true`。
 
 如果宿主机访问 GitHub 必须走代理，而容器直连 GitHub 超时，可设置 `CODEZZN_GITHUB_PROXY_URL` 为**容器实际可访问**的 HTTP 代理地址（例如 `http://host.docker.internal:7897`，但需先从容器验证连通）。该代理只用于 GitHub OAuth，不影响内网 RAGFlow 请求。代理不可达时，登录页会显示连接失败/超时，而不会暴露授权码或返回空白 500 页面。
+
+要启用“Continue with Google”，在 Google Cloud Console 的 Google Auth Platform 配置应用品牌与受众，创建 **Web application** 类型 OAuth Client，并在该 Client 的 Authorized redirect URIs 中填入与 Codezzn 完全一致的回调地址。本机测试可填 `http://127.0.0.1:8080/api/auth/google/callback`；从其他电脑访问时必须先使用带 HTTPS 的正式域名（Google 不允许 `192.168.x.x` 这样的私有 IP 作为 Web OAuth 回调）。仅请求 `openid email profile` 时，Google 的基础资料权限例外规则允许未列入 Testing 测试名单的用户授权；如日后增加其他权限，需按 Audience/Testing 的要求管理测试用户。面向正式公开使用时应将应用发布为 In production，并按 Google 要求完成可能需要的验证。
+
+在 `.env` 中填写（不要把 Secret 提交到仓库）：
+
+```env
+CODEZZN_PUBLIC_URL=https://your-codezzn.example.com
+CODEZZN_COOKIE_SECURE=true
+CODEZZN_GOOGLE_CLIENT_ID=your-google-web-client-id
+CODEZZN_GOOGLE_CLIENT_SECRET=your-google-web-client-secret
+# 可选：默认使用 CODEZZN_PUBLIC_URL/api/auth/google/callback
+CODEZZN_GOOGLE_REDIRECT_URI=
+```
+
+然后运行 `docker compose up -d --build codezzn`，打开登录页点击 Continue with Google。Google 授权只请求 `openid email profile`，Codezzn 校验 `state`、PKCE、ID token、`nonce` 与已验证邮箱，并以 Google 的 `sub` 识别用户。已有本地或 GitHub 账号即使邮箱相同也**不会自动合并**，以免跨身份接管原有工作区；请先用原方式登录。退出 Codezzn 只撤销本应用会话，不会退出 Google；重新登录会显示 Google 账号选择器，但密码/MFA 提示由 Google 决定。若容器访问 Google 需要代理，可设置 `CODEZZN_GOOGLE_PROXY_URL` 为容器可达的代理地址。
+
+### Continue with Email 邮箱验证码登录
+
+Codezzn 不限定收件邮箱域名：QQ、163、126、139、189、阿里邮箱、企业邮箱以及国际化域名均走同一发送与验证流程；实际投递能否成功取决于发件 SMTP 服务、收件方策略，以及必要时的 SPF/DKIM/DMARC 配置。需要一只可通过 SMTP 发信的邮箱或邮件服务，通常要使用其**SMTP 授权码/应用密码**，不要在仓库保存凭据。在 `.env` 中配置：
+
+```env
+CODEZZN_SMTP_HOST=你的SMTP服务器地址
+CODEZZN_SMTP_PORT=465
+CODEZZN_SMTP_SECURITY=ssl
+CODEZZN_SMTP_USER=你的发件账号
+CODEZZN_SMTP_PASSWORD=你的SMTP授权码
+CODEZZN_SMTP_FROM=你的发件邮箱地址
+```
+
+若服务商要求 STARTTLS，则改为 `CODEZZN_SMTP_PORT=587`、`CODEZZN_SMTP_SECURITY=starttls`。容器需能连接 SMTP 服务器的对应端口。保存后执行 `docker compose up -d --force-recreate --no-deps codezzn`，在 `/api/auth/me` 确认 `email_code_configured=true`，再从登录页选择 Continue with Email 测试。验证码有效期 10 分钟、最多尝试 5 次、60 秒内不可重复发送，并限制每地址及全站发送频率。启用 SMTP 后，新邮箱注册必须验证邮件；已有本地账号可使用验证码或密码登录。若邮箱只绑定 GitHub/Google 身份且没有本地登录凭据，验证码不会自动合并身份或接管该账号。未配置 SMTP 时沿用原密码登录/注册；但若已有仅通过验证码登录、没有密码的账号，不要在未提供替代登录方式前关闭 SMTP。
 
 ### 可选 RAGFlow 检索后端
 
@@ -118,7 +148,7 @@ Install any other trusted dependencies into a custom image at build time and set
 - The broker connects only to the isolated, internal `sandbox-control` network and has no published port. The main service joins both `default` and `sandbox-control`. `/health` and `/tasks` on broker port 8090 require `Authorization: Bearer <CODEZZN_SANDBOX_TOKEN>`.
 - The broker resolves the `codezzn` container's `/workspace` mount using Docker inspect; it does not guess a host workspace path. Keep `CODEZZN_SANDBOX_WORKSPACE_CONTAINER` aligned with the main container name when customizing deployment. Do not mount the workspace into the broker itself.
 - Each Shell or Git tool invocation gets a **separate execution container**, not one container for a whole Turn. Execution runs as UID/GID `10001:10001` in the task worktree, without inherited application secrets or Docker socket. Network is off except explicitly approved Git remote calls when `CODEZZN_SANDBOX_GIT_NETWORK=true`. Defaults are 1 CPU, 512 MiB memory, 64 PIDs, and a 60-second timeout.
-- Only Shell/Git execution is container-sandboxed. MCP/LSP servers, Playwright, and native Python file tools are **out of scope** and execute in the main application's trust boundary. Browser sessions can reach networks available to the main container; enable them only for trusted agents.
+- Only Shell/Git execution is container-sandboxed. MCP/LSP servers, Playwright, and native Python file tools execute in the main application's trust boundary. Playwright navigation rejects private/link-local destinations by default and can use an admin domain allowlist, but it is not a network sandbox; deploy with outbound egress controls and enable browser access only for trusted agents.
 - When `/workspace` is a Git work tree, each persistent task or conversation receives an independent branch and `git worktree` below `.codezzn-worktrees/`. A non-Git workspace cannot provide branch isolation and falls back to the base workspace.
 - A repository created with `git init` but no first commit also has no usable `HEAD`: chats fall back to that account's own workspace instead of failing at startup. This mode has no per-task file isolation. For concurrent coding tasks, make a deliberate first commit containing only files you intend to track; Codezzn does not create a commit on your behalf.
 
@@ -194,10 +224,26 @@ docker run --rm --name codezzn-sandbox-verification --user 0:0 --network none --
 | `MILVUS_COLLECTION_PREFIX` | `codezzn_kb_` | 知识库 Collection 前缀 |
 | `CODEZZN_ADMIN_KEY` | 空 | 非空时，API 要求 `X-Codezzn-Key` |
 | `CODEZZN_AUTH_REQUIRED` | Compose 中为 `true` | 要求工作台使用账号会话或管理密钥认证 |
-| `CODEZZN_PUBLIC_URL` | `http://127.0.0.1:8080` | GitHub OAuth 回调所使用的外部地址 |
+| `CODEZZN_PUBLIC_URL` | `http://127.0.0.1:8080` | OAuth 回调所使用的外部地址 |
 | `CODEZZN_GITHUB_CLIENT_ID` | 空 | GitHub OAuth App Client ID |
 | `CODEZZN_GITHUB_CLIENT_SECRET` | 空 | GitHub OAuth App Client Secret |
 | `CODEZZN_GITHUB_PROXY_URL` | 空 | 仅 GitHub OAuth 使用的容器可达 HTTP 代理 |
+| `CODEZZN_GOOGLE_CLIENT_ID` | 空 | Google Web application OAuth Client ID |
+| `CODEZZN_GOOGLE_CLIENT_SECRET` | 空 | Google OAuth Client Secret |
+| `CODEZZN_GOOGLE_REDIRECT_URI` | 自动生成 | 可选的精确 Google 回调地址，须与控制台完全一致 |
+| `CODEZZN_GOOGLE_PROXY_URL` | 空 | 仅 Google OAuth 使用的容器可达 HTTP 代理 |
+| `CODEZZN_SMTP_HOST` | 空 | 邮箱验证码的 SMTP 服务器 |
+| `CODEZZN_SMTP_PORT` | `465` | SMTP 端口；STARTTLS 通常使用 `587` |
+| `CODEZZN_SMTP_SECURITY` | `ssl` | `ssl` 或 `starttls`；不允许明文 SMTP |
+| `CODEZZN_SMTP_USER` | 空 | SMTP 发件账号 |
+| `CODEZZN_SMTP_PASSWORD` | 空 | SMTP 授权码/应用密码 |
+| `CODEZZN_SMTP_FROM` | 空 | 发件邮箱地址 |
+| `CODEZZN_BROWSER_ALLOWED_DOMAINS` | 空 | 浏览器目标域名白名单；逗号分隔，空表示不额外限制公网域名 |
+| `CODEZZN_BROWSER_ALLOW_PRIVATE_NETWORK` | `false` | 允许访问白名单中的内网目标；仅在确有需要时开启 |
+| `CODEZZN_BROWSER_MAX_SESSIONS` | `64` | 本地 Playwright 同时保留的会话上限 |
+| `CODEZZN_BROWSER_MAX_TABS` | `12` | 单会话标签上限 |
+| `CODEZZN_BROWSER_SESSION_IDLE_SECONDS` | `3600` | 空闲会话回收时间 |
+| `CODEZZN_BROWSER_MAX_FILE_BYTES` | `52428800` | 上传/下载文件大小上限（50 MiB） |
 | `CODEZZN_SESSION_DAYS` | `14` | 登录会话有效天数 |
 | `CODEZZN_COOKIE_SECURE` | `false` | HTTPS 生产环境应设为 `true` |
 | `CODEZZN_BASE_IMAGE` | `python:3.12-slim` | Docker Hub 不可用时可换成内部 Python 3.12 基础镜像 |
@@ -279,7 +325,9 @@ HTTP：
 - 代码智能：给智能体启用 `code_index`、`code_symbols`、`find_references`、`call_graph`、`dependency_graph`。Python 使用 AST；其他语言建议在“LSP 服务”添加已安装的 language server，并启用 `lsp_request`。
 - GitHub：在 `.env` 配置 `CODEZZN_GITHUB_TOKEN`；给智能体启用 Git 远端和 GitHub 工具。所有写操作默认审批，clone/fetch/push 还要求 sandbox overlay 与 `CODEZZN_SANDBOX_GIT_NETWORK=true`。
 - Skill 包：上传 ZIP 时包内必须只有一个 `SKILL.md`；可带 `skill.json`，其中 `version` 使用 SemVer，`dependencies` 为字符串/对象数组。脚本只能位于 `scripts/` 且目前仅执行 `.py`/`.sh`；依赖不会在运行期自动安装。
-- Browser/Computer Use：给智能体启用 `browser` 工具和“允许浏览器操作”。支持 DOM inspect、selector/坐标点击、鼠标移动、滚动、输入、键盘、截图和受审批的页面脚本；截图写入任务工作区并可通过 `/api/artifacts?path=...` 读取。
+- Browser/Computer Use：给智能体启用浏览器能力。Codezzn 使用本地 Playwright（不会调用 Browser Use Cloud），兼容公开 Browser Use MCP 核心工具名：navigate/click/type/get-state/extract/scroll/back/list-tabs/switch/close；同时支持 hover、双击、右键、拖拽、等待、元素详情、下载、截图和 PDF。必要时可调用 `browser_get_state` 并设置 `include_screenshot=true`，将受大小限制的当前视口截图作为图片发给配置的模型；仅适用于支持图片输入的模型，数据发往你已配置的模型服务，且可能包含在可恢复任务状态中。会话按租户+对话隔离，空闲超时清理；文件上传、下载和页面变更仍经过 Codezzn 审批与项目文件规则。浏览器为无头、内存会话，容器重启后不保留登录态。
+
+  默认阻止回环、私网、链路本地和云元数据目标，并拦截重定向/子资源请求。若确需访问内网，请由管理员在 `.env` 同时配置 `CODEZZN_BROWSER_ALLOWED_DOMAINS=192.168.1.10,app.internal.example` 与 `CODEZZN_BROWSER_ALLOW_PRIVATE_NETWORK=true`，然后重启服务；不要将宽泛通配符作为白名单。建议额外设置 Docker/主机出口防火墙，避免仅依赖应用层 DNS 检查。
 - Worktree：当 `/workspace` 本身是 Git 仓库时自动生效；可用 `GET /api/worktrees` 查看，用 `DELETE /api/worktrees/{id}` 清理。清理前确认分支内容已经提交或推送。
 
 ## API 概览

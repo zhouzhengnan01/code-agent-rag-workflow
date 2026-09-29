@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Codezzn</title>
+  <rect width="64" height="64" rx="16" fill="#6d28d9"/>
+  <path d="M43 18H28c-8.3 0-15 6.3-15 14s6.7 14 15 14h15" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m30 26 7 6-7 6" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -16,6 +16,7 @@ RUN python -m playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* /root/.cache/pip
 COPY backend ./backend
 COPY web ./web
+COPY public ./public
 COPY tests ./tests
 COPY samples ./samples
 RUN mkdir -p /app/data /workspace \

@@ -95,7 +95,8 @@ def list_artifacts(project_id: str):
         return None
     with connect() as db:
         rows = db.execute(
-            "SELECT pa.*, (SELECT MAX(v.version) FROM project_artifact_versions v WHERE v.artifact_id=pa.id) AS version "
+            "SELECT pa.*, (SELECT MAX(v.version) FROM project_artifact_versions v WHERE v.artifact_id=pa.id) AS version, "
+            "(SELECT v.size_bytes FROM project_artifact_versions v WHERE v.artifact_id=pa.id ORDER BY v.version DESC LIMIT 1) AS size_bytes "
             "FROM project_artifacts pa WHERE pa.project_id=? ORDER BY pa.created_at DESC,pa.id DESC",
             (project_id,),
         ).fetchall()

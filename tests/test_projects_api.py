@@ -1,6 +1,8 @@
 from fastapi.testclient import TestClient
 import pytest
 import sqlite3
+import zipfile
+from io import BytesIO
 
 from backend.app import db, main, workspace
 from backend.app.projects import get_turn_project, project_root, record_artifact
@@ -88,12 +90,19 @@ def test_project_turn_artifact_and_user_isolation(tmp_path, monkeypatch):
         assert download.content == b"print('sort')\n"
         preview = client.get(f"/api/projects/{project_id}/artifacts/{artifacts[0]['id']}/content")
         assert preview.json()["content"] == "print('sort')\n"
+        archive = client.get(f"/api/projects/{project_id}/artifacts/archive")
+        assert archive.status_code == 200
+        assert archive.headers["content-type"] == "application/zip"
+        with zipfile.ZipFile(BytesIO(archive.content)) as bundle:
+            assert bundle.namelist() == ["quicksort.py"]
+            assert bundle.read("quicksort.py") == b"print('sort')\n"
 
         second_cookie = _register(client, "project-second@example.com")
         assert second_cookie != first_cookie
         assert client.get("/api/projects").json()["data"] == []
         assert client.get(f"/api/projects/{project_id}").status_code == 404
         assert client.get(f"/api/projects/{project_id}/artifacts").status_code == 404
+        assert client.get(f"/api/projects/{project_id}/artifacts/archive").status_code == 404
         assert client.get(f"/api/projects/{project_id}/artifacts/{artifacts[0]['id']}/download").status_code == 404
         assert client.get(f"/api/projects/{project_id}/artifacts/{artifacts[0]['id']}/content").status_code == 404
         other_thread = client.post("/api/threads", json={}).json()["id"]
@@ -105,6 +114,32 @@ def test_project_turn_artifact_and_user_isolation(tmp_path, monkeypatch):
         }).status_code == 404
         client.cookies.set("codezzn_session", first_cookie)
         assert client.get(f"/api/projects/{project_id}").status_code == 200
+
+
+def test_project_folder_archive_only_contains_registered_subtree(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    with TestClient(main.app) as client:
+        _register(client, "folder-archive@example.com")
+        user_id = client.get("/api/auth/me").json()["user"]["id"]
+        project_id = client.post("/api/projects", json={"name": "Sorting Project"}).json()["id"]
+        thread_id = client.post("/api/threads", json={}).json()["id"]
+        token = db.use_tenant(user_id)
+        try:
+            root = project_root(project_id)
+            for relative in ("algorithms/quick.py", "algorithms/nested/bubble.py", "README.md"):
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(relative, encoding="utf-8")
+                record_artifact(project_id, thread_id, "turn_folder", target, "code")
+        finally:
+            db.reset_tenant(token)
+        archive = client.get(f"/api/projects/{project_id}/artifacts/archive", params={"prefix": "algorithms"})
+        assert archive.status_code == 200
+        with zipfile.ZipFile(BytesIO(archive.content)) as bundle:
+            assert sorted(bundle.namelist()) == ["algorithms/nested/bubble.py", "algorithms/quick.py"]
+        assert client.get(f"/api/projects/{project_id}/artifacts/archive", params={"prefix": "missing"}).status_code == 404
+        for invalid in ("../algorithms", "/algorithms", "algorithms/", "algorithms//nested", "algorithms\\nested"):
+            assert client.get(f"/api/projects/{project_id}/artifacts/archive", params={"prefix": invalid}).status_code == 400
 
 
 def test_project_choice_requires_existing_project_and_safe_paths(tmp_path, monkeypatch):
@@ -183,6 +218,85 @@ def test_project_choice_requires_existing_project_and_safe_paths(tmp_path, monke
             project_root(project_id)
 
 
+def test_project_switch_from_chat_does_not_grant_file_write(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    with TestClient(main.app) as client:
+        first_cookie = _register(client, "switch-first@example.com")
+        first = client.post("/api/projects", json={"name": "0929-dev-01"}).json()
+        target = client.post("/api/projects", json={"name": "0929-dev"}).json()
+        thread_id = client.post("/api/threads", json={}).json()["id"]
+        assert client.patch(f"/api/threads/{thread_id}", json={"active_project_id": first["id"]}).status_code == 200
+
+        switched = client.post(f"/api/threads/{thread_id}/project-switch", json={
+            "content": "切换到0929-dev项目", "project_name": "0929-dev",
+        })
+        assert switched.status_code == 200, switched.text
+        assert switched.json()["project"]["id"] == target["id"]
+        thread = client.get(f"/api/threads/{thread_id}").json()
+        assert thread["active_project_id"] == target["id"]
+        assert [message["role"] for message in thread["messages"]] == ["user", "assistant"]
+        assert "不授权写入文件" in thread["messages"][-1]["content"]
+        with db.connect() as connection:
+            assert connection.execute("SELECT count(*) FROM turn_projects").fetchone()[0] == 0
+
+        assert client.post(f"/api/threads/{thread_id}/project-switch", json={
+            "content": "切换到不存在的项目", "project_name": "不存在",
+        }).status_code == 404
+        compound = client.post(f"/api/threads/{thread_id}/project-switch", json={
+            "content": "切换到0929-dev-01项目，并写一份冒泡排序的python文件", "project_name": "0929-dev-01",
+        })
+        assert compound.status_code == 400
+        assert len(client.get(f"/api/threads/{thread_id}").json()["messages"]) == 2
+        _register(client, "switch-second@example.com")
+        assert client.post(f"/api/threads/{thread_id}/project-switch", json={
+            "content": "切换到0929-dev项目", "project_name": "0929-dev",
+        }).status_code == 404
+        client.cookies.set("codezzn_session", first_cookie)
+        assert client.get(f"/api/threads/{thread_id}").status_code == 200
+
+
+def test_compound_project_switch_and_file_creation_reaches_correct_project(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    instruction = "帮我切换到0929-dev-01项目，并写一份冒泡排序的python文件"
+
+    async def fake_agent(agent, history, content, **kwargs):
+        assert content == instruction
+        assert get_turn_project(kwargs["turn_id"]) == {"project_id": target_id, "save_to_project": True}
+        root = project_root(target_id)
+        root.mkdir(parents=True, exist_ok=True)
+        file = root / "bubble_sort.py"
+        file.write_text("def bubble_sort(items):\n    return sorted(items)\n", encoding="utf-8")
+        record_artifact(target_id, kwargs["thread_id"], kwargs["turn_id"], file, "code")
+        return {"status": "completed", "content": "已创建 bubble_sort.py", "events": [], "usage": {}, "runtime": {}, "sources": []}
+
+    monkeypatch.setattr(main, "run_agent_isolated", fake_agent)
+    with TestClient(main.app) as client:
+        _register(client, "compound@example.com")
+        agent_id = client.post("/api/resources/agents", json={
+            "name": "Coding", "role_template": "coding", "sandbox_mode": "workspace-write", "builtin_tools": ["write_file"],
+        }).json()["id"]
+        other_id = client.post("/api/projects", json={"name": "0929-dev"}).json()["id"]
+        target_id = client.post("/api/projects", json={"name": "0929-dev-01"}).json()["id"]
+        thread_id = client.post("/api/threads", json={"agent_id": agent_id}).json()["id"]
+        client.patch(f"/api/threads/{thread_id}", json={"active_project_id": other_id})
+        intent_response = client.post("/api/agent/intent", json={
+            "content": instruction, "agent_id": agent_id, "thread_id": thread_id,
+        })
+        assert intent_response.status_code == 200, intent_response.text
+        intent = intent_response.json()
+        assert intent["requires_project"] is True and intent["kind"] == "file"
+        assert intent["target_project_id"] == target_id and not intent["project_switch_only"]
+        streamed = client.post(f"/api/threads/{thread_id}/turns/stream", json={
+            "agent_id": agent_id, "content": instruction, "project_id": target_id,
+            "save_to_project": True, "intent_kind": "file",
+        })
+        assert streamed.status_code == 200 and '"status": "completed"' in streamed.text
+        thread = client.get(f"/api/threads/{thread_id}").json()
+        assert thread["active_project_id"] == target_id
+        assert thread["messages"][-1]["project_artifacts"][0]["path"] == "bubble_sort.py"
+        assert client.get(f"/api/projects/{other_id}/artifacts").json()["data"] == []
+
+
 def test_project_save_respects_agent_tool_policy():
     writer = {"sandbox_mode": "workspace-write", "builtin_tools": ["write_file"]}
     assert main._agent_can_save_project_files(writer)
@@ -224,3 +338,27 @@ def test_agent_question_answer_resumes_from_checkpoint(tmp_path, monkeypatch):
         assert response.status_code == 200, response.text
         assert response.json()["content"] == "已收到选择"
         assert client.get(f"/api/threads/{thread_id}").json()["status"] == "idle"
+
+
+def test_legacy_approval_can_be_retired_and_retried_without_running_tool(tmp_path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    with TestClient(main.app) as client:
+        _register(client, "legacy-approval@example.com")
+        user_id = client.get("/api/auth/me").json()["user"]["id"]
+        agent_id = client.post("/api/resources/agents", json={"name": "Writer"}).json()["id"]
+        thread_id = client.post("/api/threads", json={"agent_id": agent_id}).json()["id"]
+        token = db.use_tenant(user_id)
+        try:
+            with db.connect() as connection:
+                connection.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", ("msg_legacy", thread_id, "turn_legacy", "user", "帮我写一份冒泡排序代码", db.now()))
+                connection.execute("INSERT INTO approvals(id,thread_id,turn_id,tool_name,arguments,status,created_at,resumable) VALUES(?,?,?,?,?,'pending',?,0)", ("approval_legacy", thread_id, "turn_legacy", "write_file", '{"path":"bubble_sort.py"}', db.now()))
+        finally:
+            db.reset_tenant(token)
+        inbox = client.get(f"/api/threads/{thread_id}/approvals/inbox").json()["data"]
+        assert len(inbox) == 1 and inbox[0]["resumable"] is False
+        assert client.post("/api/approvals/approval_legacy", json={"decision": "approved"}).status_code == 409
+        retry = client.post("/api/approvals/approval_legacy/dismiss")
+        assert retry.status_code == 200
+        assert retry.json()["content"] == "帮我写一份冒泡排序代码"
+        assert client.get(f"/api/threads/{thread_id}/approvals/inbox").json()["data"] == []
+        assert client.post("/api/approvals/approval_legacy/dismiss").status_code == 409

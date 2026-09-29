@@ -1,0 +1,340 @@
+/* Alternating feature rows for the Browser Use landing page. */
+@media (min-width: 1025px) {
+  .bw-site .bw-feature-rows { min-height: 1129px; }
+}
+
+.bw-site .bw-feature-rows {
+  box-sizing: border-box;
+  width: min(1200px, calc(100% - 48px));
+  margin: 0 auto;
+  padding-block: 112px;
+  border-top: 1px solid var(--bw-line, #3d3d3d);
+  color: var(--bw-fg, #fafafa);
+  background: var(--bw-bg, #000);
+}
+
+.bw-site .bw-feature-rows *,
+.bw-site .bw-feature-rows *::before,
+.bw-site .bw-feature-rows *::after {
+  box-sizing: border-box;
+}
+
+.bw-site .bw-feature-rows > .bw-section-shell {
+  width: 100%;
+  max-width: 1200px;
+  margin-inline: auto;
+}
+
+.bw-site .bw-feature-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 48px;
+  padding-block: 26px;
+  border-bottom: 1px solid var(--bw-line, #3d3d3d);
+}
+
+.bw-site .bw-feature-row:nth-child(even) .bw-feature-copy {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.bw-site .bw-feature-row:nth-child(even) .bw-feature-figure {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.bw-site .bw-feature-copy {
+  min-width: 0;
+}
+
+.bw-site .bw-feature-title {
+  margin: 0;
+  color: var(--bw-fg, #fafafa);
+  font-family: var(--bw-font-sans, Geist, "Geist Fallback", sans-serif);
+  font-size: 28px;
+  font-weight: 450;
+  line-height: 35px;
+  letter-spacing: -0.84px;
+}
+
+.bw-site .bw-feature-description {
+  max-width: 448px;
+  margin: 12px 0 0;
+  color: var(--bw-body, #e5e5e5);
+  font-family: var(--bw-font-sans, Geist, "Geist Fallback", sans-serif);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 28px;
+}
+
+.bw-site .bw-feature-figure {
+  display: flex;
+  flex-direction: column;
+  justify-self: end;
+  gap: 14px;
+  width: 100%;
+  max-width: 330px;
+  min-width: 0;
+  margin: 0;
+}
+
+.bw-site .bw-feature-row:nth-child(even) .bw-feature-figure {
+  justify-self: start;
+}
+
+.bw-site .bw-feature-figure > :is(svg, img, video) {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.bw-site .bw-feature-figure figcaption,
+.bw-site .bw-feature-caption {
+  margin: 0;
+  color: var(--bw-muted, #a1a1a1);
+  font-family: var(--bw-font-mono, "Geist Mono", monospace);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+/* The concurrency matrix is intentionally wider than the other figures. */
+.bw-site .bw-feature-figure:has(.bw-concurrency-grid) {
+  max-width: 576px;
+}
+
+.bw-site .bw-concurrency-grid {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  gap: clamp(3px, 0.55vw, 6px);
+  width: 100%;
+}
+
+.bw-site .bw-concurrency-grid > * {
+  min-width: 0;
+  aspect-ratio: 1;
+  border: 1px solid var(--bw-line, #3d3d3d);
+  border-radius: 2px;
+  background: var(--bw-surface-2, #222);
+}
+
+.bw-site .bw-concurrency-grid > :is(.is-active, .is-highlighted, [data-state="active"]) {
+  border-color: var(--bw-accent, #fe750e);
+  background: var(--bw-accent, #fe750e);
+}
+
+/* Progress track; set --bw-progress-value on the fill, or use a data value. */
+.bw-site .bw-progress {
+  position: relative;
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #222;
+}
+
+.bw-site .bw-progress__fill {
+  display: block;
+  width: var(--bw-progress-value, 100%);
+  max-width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--bw-accent, #fe750e);
+  transform: scaleX(1);
+  transform-origin: left center;
+}
+
+.bw-site .bw-progress__fill:is([data-value="81"], [data-percent="81"]) {
+  width: 81%;
+}
+
+.bw-site .bw-progress__fill:is([data-value="2"], [data-percent="2"]) {
+  width: 2%;
+}
+
+.bw-site .bw-feature-row.is-visible .bw-progress__fill,
+.bw-site .bw-progress.is-visible .bw-progress__fill {
+  animation: bw-progress-reveal 680ms var(--bw-ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+@keyframes bw-progress-reveal {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+/* Event checks are short neutral marks; changed results are tall and orange. */
+.bw-site .bw-ticks {
+  display: grid;
+  grid-template-columns: repeat(40, minmax(2px, 1fr));
+  align-items: end;
+  gap: clamp(2px, 0.35vw, 5px);
+  width: 100%;
+  max-width: 576px;
+  height: 70px;
+  padding-top: 8px;
+}
+
+.bw-site .bw-ticks > * {
+  display: block;
+  align-self: end;
+  min-width: 0;
+  height: var(--bw-tick-height, 22%);
+  border-radius: 2px 2px 0 0;
+  background: #222;
+}
+
+.bw-site .bw-ticks > :is(.is-different, .is-tall, [data-state="different"]) {
+  height: var(--bw-tick-height, 82%);
+  background: var(--bw-accent, #fe750e);
+}
+
+/* JSON output keeps a compact terminal-like treatment. */
+.bw-site .bw-json-sample {
+  width: 100%;
+  max-width: 330px;
+  margin: 0;
+  padding: 14px;
+  overflow-x: auto;
+  border: 1px solid var(--bw-line, #3d3d3d);
+  border-radius: 8px;
+  color: var(--bw-body, #e5e5e5);
+  background: var(--bw-surface-1, #0a0a0a);
+  font-family: var(--bw-font-mono, "Geist Mono", monospace);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 19px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.bw-site .bw-json-sample :is(.key, [data-json-key]) {
+  color: var(--bw-accent, #fe750e);
+}
+
+/* Reveal animations run only after the observer marks a row as visible. */
+.bw-site .bw-feature-row.is-visible .bw-concurrency-grid > *,
+.bw-site .bw-concurrency-grid.is-visible > * {
+  animation: bw-feature-cell-reveal 260ms var(--bw-ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+.bw-site .bw-feature-row.is-visible .bw-ticks > :is(.is-different, .is-tall, [data-state="different"]),
+.bw-site .bw-ticks.is-visible > :is(.is-different, .is-tall, [data-state="different"]) {
+  animation: bw-feature-tick-reveal 320ms var(--bw-ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+}
+
+@keyframes bw-feature-cell-reveal {
+  from { opacity: 0.15; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes bw-feature-tick-reveal {
+  from { opacity: 0.2; transform: scaleY(0.55); transform-origin: bottom; }
+  to { opacity: 1; transform: scaleY(1); transform-origin: bottom; }
+}
+
+@media (max-width: 1024px) {
+  .bw-site .bw-feature-rows {
+    padding-block: 80px;
+  }
+
+  .bw-site .bw-feature-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+    padding-block: 32px;
+  }
+
+  .bw-site .bw-feature-row .bw-feature-copy,
+  .bw-site .bw-feature-row .bw-feature-figure {
+    grid-column: 1;
+    grid-row: auto;
+  }
+
+  .bw-site .bw-feature-row .bw-feature-figure {
+    justify-self: start;
+  }
+
+  .bw-site .bw-feature-figure:has(.bw-concurrency-grid) {
+    max-width: 576px;
+  }
+}
+
+@media (max-width: 640px) {
+  .bw-site .bw-feature-rows {
+    width: calc(100% - 40px);
+  }
+
+  .bw-site .bw-feature-title {
+    font-size: 25px;
+    line-height: 32px;
+    letter-spacing: -0.7px;
+  }
+
+  .bw-site .bw-feature-description {
+    margin-top: 10px;
+  }
+
+  .bw-site .bw-concurrency-grid {
+    gap: 3px;
+  }
+
+  .bw-site .bw-ticks {
+    grid-template-columns: repeat(40, minmax(1px, 1fr));
+    height: 56px;
+  }
+
+  .bw-site .bw-json-sample {
+    padding: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bw-site .bw-feature-row.is-visible .bw-progress__fill,
+  .bw-site .bw-progress.is-visible .bw-progress__fill,
+  .bw-site .bw-feature-row.is-visible .bw-concurrency-grid > *,
+  .bw-site .bw-concurrency-grid.is-visible > *,
+  .bw-site .bw-feature-row.is-visible .bw-ticks > :is(.is-different, .is-tall, [data-state="different"]),
+  .bw-site .bw-ticks.is-visible > :is(.is-different, .is-tall, [data-state="different"]) {
+    animation-duration: 0.01ms;
+    animation-delay: 0ms;
+    animation-iteration-count: 1;
+  }
+}
+
+/* Landing page markup integration: labeled progress cards and event highlights. */
+.bw-site .bw-reach-figure .bw-progress {
+  position: relative;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  border-radius: 0;
+  background: transparent;
+}
+
+.bw-site .bw-reach-figure .bw-progress__track {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #222;
+}
+
+.bw-site .bw-reach-figure .bw-progress__fill {
+  width: 0;
+  transition: width 650ms var(--bw-ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+
+.bw-site .bw-ticks > .is-change {
+  height: var(--bw-tick-height, 46px);
+  background: var(--bw-accent, #fe750e);
+}
+
+.bw-site .bw-concurrency-grid > .is-hot {
+  border-color: var(--bw-accent, #fe750e);
+  background: var(--bw-accent, #fe750e);
+  animation-delay: var(--cell-delay, 0ms);
+}
+
+.bw-site .bw-feature-row.is-visible .bw-concurrency-grid > .is-hot {
+  animation-delay: var(--cell-delay, 0ms);
+}

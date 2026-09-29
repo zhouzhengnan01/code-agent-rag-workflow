@@ -104,6 +104,10 @@ def init_db():
               active_project_id TEXT,
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS agent_todos (
+              thread_id TEXT PRIMARY KEY, items_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL,
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS projects (
               id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -262,6 +266,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users (
               id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
               password_hash TEXT, avatar_url TEXT NOT NULL DEFAULT '', github_id TEXT UNIQUE,
+              google_id TEXT UNIQUE,
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -272,10 +277,28 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at);
             CREATE TABLE IF NOT EXISTS oauth_states (
               state_hash TEXT PRIMARY KEY, provider TEXT NOT NULL, next_path TEXT NOT NULL,
-              created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+              created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+              nonce_hash TEXT, code_verifier TEXT
+            );
+            CREATE TABLE IF NOT EXISTS email_login_challenges (
+              email TEXT PRIMARY KEY, salt TEXT NOT NULL, code_hash TEXT NOT NULL,
+              created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+              last_sent_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS auth_rate_limits (
+              bucket TEXT PRIMARY KEY, window_start INTEGER NOT NULL, attempts INTEGER NOT NULL
             );
             """
         )
+        user_columns = {row["name"] for row in db.execute("PRAGMA table_info(users)")}
+        if "google_id" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN google_id TEXT")
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users(google_id)")
+        state_columns = {row["name"] for row in db.execute("PRAGMA table_info(oauth_states)")}
+        if "nonce_hash" not in state_columns:
+            db.execute("ALTER TABLE oauth_states ADD COLUMN nonce_hash TEXT")
+        if "code_verifier" not in state_columns:
+            db.execute("ALTER TABLE oauth_states ADD COLUMN code_verifier TEXT")
         db.execute("""CREATE TABLE IF NOT EXISTS knowledge_documents (
             id TEXT PRIMARY KEY, knowledge_id TEXT NOT NULL, source TEXT NOT NULL,
             content TEXT NOT NULL, metadata TEXT NOT NULL DEFAULT '{}',

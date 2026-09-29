@@ -20,6 +20,8 @@ const navGroups = [
   ['编排', ['workflows']],
 ];
 
+const codezznLogoHtml = '<img src="/assets/codezzn-mark.svg?v=1" alt="">';
+
 const navIcons = {
   dashboard: '<path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/>',
   chat: '<path d="M21 11.5a8.4 8.4 0 0 1-9 8.5 9 9 0 0 1-4-.9L3 21l1.9-5A9 9 0 1 1 21 11.5Z"/>',
@@ -52,6 +54,7 @@ let state = {
   page: 'dashboard', cache: {}, thread: null, threadScope: 'active', chatThreads: [],
   chatCapabilities: { skill_ids: [], mcp_server_ids: [] }, activeTurn: null,
   projects: [], activeProjectId: null, pendingProjectTurn: null, projectDetailId: null, intentPending: false,
+  filesPanelOpen: true, chatFiles: [],
 };
 
 const $ = selector => document.querySelector(selector);
@@ -768,6 +771,7 @@ async function agentForm(item) {
       ${choiceGroup('MCP 服务', 'mcp_server_ids', mcps, item.mcp_server_ids)}
       ${choiceGroup('LSP 服务', 'lsp_server_ids', lsps, item.lsp_server_ids || [])}
       ${choiceGroup('内置工具', 'builtin_tools', tools, item.builtin_tools || [])}
+      <p class="control-help control-full">选择“软件工程师”角色后，会自动提供编码工具：bash、read、write、edit、replace_file、glob_search、grep、todo_read、todo_write 和 done。启用“允许浏览器操作”后，还会自动提供 Browser Use 风格的页面导航、元素操作、搜索、截图和 PDF 工具。执行 Shell 仍需单独授权。</p>
       ${choiceGroup('可委派子智能体', 'subagent_ids', agents.filter(agent => agent.id !== item.id), item.subagent_ids || [])}
       ${field('最大并行子智能体', 'max_concurrent_subagents', item.max_concurrent_subagents || 4, 'number')}${field('最大委派深度', 'max_subagent_depth', item.max_subagent_depth || 2, 'number')}
       <section class="form-section control-full"><header><h3>记忆与工具策略</h3><p>长期记忆按用户、项目和会话分层；工具策略支持 allow / ask / deny / inherit。</p></header></section>
@@ -929,14 +933,17 @@ function runWorkflow(id) {
   }, false, '运行');
 }
 
-function richText(value) {
+function richText(value, artifacts = []) {
   const blocks = [];
   let text = esc(value).replace(/```([\s\S]*?)```/g, (_, code) => {
     const token = `CODEBLOCK${blocks.length}TOKEN`;
     blocks.push(`<pre class="message-code"><code>${code.trim()}</code></pre>`);
     return token;
   });
-  text = text.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>');
+  text = text.replace(/`([^`\n]+)`/g, (_, label) => {
+    const file = artifacts.find(item => item.path === label || item.path?.split('/').at(-1) === label);
+    return file ? `<button type="button" class="file-reference-chip" data-project-id="${esc(file.project_id)}" data-artifact-id="${esc(file.id)}" onclick="openChatArtifact(this)" aria-label="在 Files 中打开 ${esc(file.path)}">▤ ${label}</button>` : `<code class="inline-code">${label}</code>`;
+  });
   text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/\n/g, '<br>');
   blocks.forEach((block, index) => { text = text.replace(`CODEBLOCK${index}TOKEN`, block); });
@@ -1107,6 +1114,106 @@ async function setActiveProject(projectId) {
   state.activeProjectId = projectId;
   if (state.currentThread) state.currentThread.active_project_id = projectId;
   renderProjectChip();
+  if (state.page === 'chat') await refreshChatFiles();
+}
+
+function fileTreeHtml(artifacts, projectId) {
+  const root = { directories: new Map(), files: [] };
+  for (const artifact of artifacts) {
+    const parts = String(artifact.path || '').split('/').filter(Boolean);
+    if (!parts.length) continue;
+    let node = root;
+    for (const name of parts.slice(0, -1)) {
+      if (!node.directories.has(name)) node.directories.set(name, { directories: new Map(), files: [] });
+      node = node.directories.get(name);
+    }
+    node.files.push({ ...artifact, name: parts.at(-1) });
+  }
+  const render = (node, parentPath = '') => `${[...node.directories].sort(([a], [b]) => a.localeCompare(b)).map(([name, child]) => {
+    const folderPath = parentPath ? `${parentPath}/${name}` : name;
+    return `<details class="chat-file-folder" open><summary><span class="chat-file-folder-icon" aria-hidden="true">▱</span><span class="chat-file-folder-name">${esc(name)}</span><button type="button" class="chat-file-download" data-folder-path="${esc(folderPath)}" onclick="event.preventDefault();event.stopPropagation();downloadProjectArchive('${esc(projectId)}',this.dataset.folderPath)" aria-label="下载文件夹 ${esc(folderPath)}">↓</button></summary><div class="chat-file-children">${render(child, folderPath)}</div></details>`;
+  }).join('')}
+    ${node.files.sort((a, b) => a.name.localeCompare(b.name)).map(item => `
+    <div class="chat-file-row"><button type="button" class="chat-file-open" onclick="viewProjectArtifact('${esc(projectId)}','${esc(item.id)}')" title="查看 ${esc(item.path)}" aria-label="查看 ${esc(item.path)}"><span aria-hidden="true">${/\.py$/i.test(item.name) ? '🐍' : '▤'}</span><span>${esc(item.name)}</span></button><small>${item.size_bytes != null ? formatFileSize(item.size_bytes) : ''}</small><button type="button" class="chat-file-download" data-file-name="${esc(item.name)}" onclick="downloadProjectArtifact('${esc(projectId)}','${esc(item.id)}',this.dataset.fileName)" aria-label="下载 ${esc(item.path)}">↓</button></div>`).join('')}`;
+  return `<details class="chat-file-folder chat-file-project-root" open><summary><span class="chat-file-folder-icon" aria-hidden="true">▱</span><span class="chat-file-folder-name">${esc(projectName(projectId))}</span><button type="button" class="chat-file-download" onclick="event.preventDefault();event.stopPropagation();downloadProjectArchive('${esc(projectId)}')" aria-label="下载项目 ${esc(projectName(projectId))}">↓</button></summary><div class="chat-file-children">${render(root)}</div></details>`;
+}
+
+function formatFileSize(bytes) {
+  const size = Number(bytes);
+  if (!Number.isFinite(size)) return '';
+  return size < 1024 ? `${size} B` : size < 1024 * 1024 ? `${Math.ceil(size / 1024)} KB` : `${(size / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function renderChatFilesPanel() {
+  const studio = $('.chat-studio');
+  const panel = $('#chatFilesPanel');
+  if (!studio || !panel) return;
+  const hasConversationFiles = (state.currentThread?.messages || []).some(message =>
+    message.role === 'assistant' && Array.isArray(message.project_artifacts) &&
+    message.project_artifacts.some(artifact => artifact.project_id === state.activeProjectId));
+  const visible = hasConversationFiles && state.filesPanelOpen;
+  studio.classList.toggle('has-file-panel', visible);
+  panel.hidden = !visible;
+  const toggle = $('#filesPanelToggle');
+  if (toggle) {
+    toggle.hidden = !hasConversationFiles;
+    toggle.setAttribute('aria-pressed', String(visible));
+    toggle.innerHTML = `<span aria-hidden="true">▤</span> Files <small>${state.chatFiles.length}</small>`;
+  }
+  const projectId = state.activeProjectId;
+  panel.innerHTML = `<header class="chat-files-header"><div><strong>▤ Files <small>${state.chatFiles.length}</small></strong></div><button type="button" onclick="toggleChatFiles()" aria-label="关闭文件面板">×</button></header>
+    <div class="chat-files-toolbar"><span>${state.chatFiles.length} files</span>${projectId && state.chatFiles.length ? `<button type="button" onclick="downloadProjectArchive('${esc(projectId)}')">↓ Download all</button>` : ''}</div>
+    <div class="chat-files-tree">${!projectId ? '<div class="chat-files-empty"><p>选择一个项目，在这里查看智能体创建的文件。</p><button type="button" onclick="openProjectPicker()">选择项目</button></div>' : state.chatFiles.length ? fileTreeHtml(state.chatFiles, projectId) : '<div class="chat-files-empty"><p>这个项目还没有已保存的文件。</p></div>'}</div>`;
+}
+
+function toggleChatFiles() {
+  state.filesPanelOpen = !state.filesPanelOpen;
+  renderChatFilesPanel();
+}
+
+async function openChatProject(button) {
+  const projectId = button.dataset.projectId;
+  if (!projectId) return;
+  try {
+    if (state.activeProjectId !== projectId) await setActiveProject(projectId);
+    state.filesPanelOpen = true;
+    renderChatFilesPanel();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function openChatArtifact(button) {
+  await openChatProject(button);
+  if (state.activeProjectId === button.dataset.projectId) {
+    await viewProjectArtifact(button.dataset.projectId, button.dataset.artifactId);
+  }
+}
+
+async function refreshChatFiles() {
+  const projectId = state.activeProjectId;
+  state.chatFiles = [];
+  renderChatFilesPanel();
+  if (!projectId) return;
+  try {
+    const result = await api(`/api/projects/${encodeURIComponent(projectId)}/artifacts`);
+    if (state.page !== 'chat' || state.activeProjectId !== projectId) return;
+    state.chatFiles = Array.isArray(result.data) ? result.data : [];
+    renderChatFilesPanel();
+  } catch (error) {
+    if (state.activeProjectId === projectId) toast(`项目文件加载失败：${error.message}`, true);
+  }
+}
+
+async function downloadProjectArchive(projectId, folderPath = '') {
+  try {
+    const query = folderPath ? `?prefix=${encodeURIComponent(folderPath)}` : '';
+    const response = await fetch(`/api/projects/${encodeURIComponent(projectId)}/artifacts/archive${query}`, { headers: headers(false) });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
+    const url = URL.createObjectURL(await response.blob());
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = folderPath ? `${folderPath.split('/').at(-1)}.zip` : `project-${projectId}.zip`;
+    document.body.append(anchor); anchor.click(); anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { toast(error.message, true); }
 }
 
 function projectPickerItems(tab = 'recent', search = '') {
@@ -1166,7 +1273,10 @@ async function selectProjectFromPicker(projectId) {
   try {
     await setActiveProject(projectId);
     closeModal();
-    if (state.projectPickerPurpose === 'pending' && state.pendingProjectTurn) renderProjectDecision('save');
+    if (state.projectPickerPurpose === 'pending' && state.pendingProjectTurn) {
+      state.pendingProjectTurn.unresolvedTargetName = null;
+      renderProjectDecision('save');
+    }
     else toast(`已选择项目：${projectName(projectId)}`);
   } catch (error) { toast(error.message, true); }
 }
@@ -1306,6 +1416,7 @@ async function chat() {
   };
   state.currentThread = current;
   state.activeProjectId = current?.active_project_id || null;
+  state.chatFiles = [];
   $('#content').innerHTML = `
     <div class="chat-studio page-enter">
       <aside class="session-browser">
@@ -1331,7 +1442,7 @@ async function chat() {
         <div class="conversation-top">
           <header class="conversation-bar">
             <div class="conversation-title"><span>当前会话</span><strong>${esc(current?.name || '新对话')}</strong></div>
-            <label class="agent-selector"><span>运行智能体</span><select id="chatAgent" aria-label="选择智能体" onchange="changeChatAgent(this.value)">${agents.map(agent => `<option value="${agent.id}" ${selectedAgent === agent.id ? 'selected' : ''}>${esc(agent.name)}</option>`).join('')}</select></label>
+            <div class="conversation-header-actions"><button class="chat-files-toggle" id="filesPanelToggle" type="button" onclick="toggleChatFiles()" aria-label="切换文件面板" aria-pressed="${state.filesPanelOpen}"><span aria-hidden="true">▤</span> Files <small>0</small></button><label class="agent-selector"><span>运行智能体</span><select id="chatAgent" aria-label="选择智能体" onchange="changeChatAgent(this.value)">${agents.map(agent => `<option value="${agent.id}" ${selectedAgent === agent.id ? 'selected' : ''}>${esc(agent.name)}</option>`).join('')}</select></label></div>
           </header>
           <div class="capability-strip" id="capabilityStrip">${capabilityBarHtml(skills, mcps)}</div>
           <div class="project-context-bar"><span>当前项目</span><div id="projectChip">${projectChipHtml()}</div><span class="project-context-help">代码与文件仅在确认后写入项目</span></div>
@@ -1339,17 +1450,20 @@ async function chat() {
         </div>
         <div class="message-stream" id="messages" aria-live="polite">
           ${current?.messages?.length || approvals.length ? `${(current?.messages || []).map(messageHtml).join('')}${approvals.map(approvalHtml).join('')}` : `
-            <div class="conversation-empty"><span class="empty-mark" aria-hidden="true">Z</span><h2>开始调试智能体</h2><p>输入任务，查看模型、工具和知识库如何协同运行。</p></div>`}
+            <div class="conversation-empty"><span class="empty-mark" aria-hidden="true">${codezznLogoHtml}</span><h2>开始调试智能体</h2><p>输入任务，查看模型、工具和知识库如何协同运行。</p></div>`}
         </div>
         <footer class="prompt-dock">
           <textarea id="chatInput" aria-label="消息" rows="1" placeholder="向智能体发送任务"></textarea>
           <div class="prompt-footer"><span>Enter 发送　Shift+Enter 换行</span><button class="button button-primary" id="sendBtn" type="button" onclick="sendMessage()">发送</button></div>
         </footer>
       </section>
+      <aside class="chat-files-panel" id="chatFilesPanel" aria-label="项目文件"></aside>
     </div>`;
+  renderChatFilesPanel();
   window.setTimeout(() => {
     if (state.page !== 'chat') return;
     bindComposer();
+    refreshChatFiles();
     if (state.pendingDashboardPrompt) {
       const prompt = state.pendingDashboardPrompt;
       state.pendingDashboardPrompt = null;
@@ -1485,40 +1599,56 @@ async function changeChatAgent(agentId) {
 
 function messageHtml(message) {
   const events = message.meta?.events || [];
+  const toolEvents = events.filter(event => event.type?.startsWith('tool_'));
+  const startedAt = Date.parse(events[0]?.timestamp || '');
+  const endedAt = Date.parse(events.at(-1)?.timestamp || '');
+  const elapsed = Number.isFinite(startedAt) && Number.isFinite(endedAt) && endedAt >= startedAt ? `${Math.max(1, Math.ceil((endedAt - startedAt) / 1000))}s` : '';
   const sources = message.meta?.sources || [];
   const model = message.meta?.runtime?.model;
   const assistant = message.role !== 'user';
   const choice = assistant ? message.project_choice : null;
   const artifacts = assistant ? (message.project_artifacts || []) : [];
+  const missingFile = assistant && choice?.save_to_project && !artifacts.length && !message.resource_assets?.length
+    ? '<p class="artifact-missing-note">这条回复没有关联到实际文件。代码块不是项目文件；请让智能体继续创建文件，或重新发送任务。</p>' : '';
   const decision = choice ? `<section class="project-decision-summary" aria-label="本次项目选择"><span class="project-decision-check" aria-hidden="true">✓</span><span><strong>${choice.save_to_project ? '已确认保存到项目' : '已选择仅回答，不保存'}</strong>${choice.project_id ? `<small>${esc(projectName(choice.project_id))}</small>` : ''}</span></section>` : '';
   const artifactCards = artifacts.map(item => `<section class="project-result-card" aria-label="项目文件 ${esc(item.path)}"><span class="project-result-icon" aria-hidden="true">⌘</span><span class="project-result-copy"><strong>${esc(item.path)}</strong><small>已保存到 ${esc(projectName(item.project_id))}</small></span><button type="button" onclick="viewProjectArtifact('${esc(item.project_id)}','${esc(item.id)}')">打开</button><button type="button" onclick="downloadProjectArtifact('${esc(item.project_id)}','${esc(item.id)}',decodeURIComponent('${encodeURIComponent(item.path).replace(/'/g, '%27')}'))">下载</button></section>`).join('');
   const resourceCards = assistant ? (Array.isArray(message.resource_assets) ? message.resource_assets : []).map(resourceAssetHtml).join('') : '';
+  const workTrace = assistant && !message.error ? `<details class="agent-work-trace"><summary>Worked${elapsed ? ` for ${elapsed}` : ''}</summary>${toolEvents.length ? `<div class="agent-work-events">${toolEvents.map(event => `<div><span>${event.type === 'tool_started' ? '运行' : event.type === 'tool_failed' ? '失败' : '完成'}</span><strong>${esc(event.name || '')}</strong></div>`).join('')}</div>` : '<div class="agent-work-events"><span>已完成回复</span></div>'}</details>` : '';
   return `
     <article class="message-turn ${assistant ? 'assistant' : 'user'} ${message.error ? 'is-error' : ''}">
-      <div class="turn-avatar" aria-hidden="true">${assistant ? 'Z' : '你'}</div>
+      <div class="turn-avatar" aria-hidden="true">${assistant ? codezznLogoHtml : '你'}</div>
       <div class="turn-content">
         <header><strong>${assistant ? 'Codezzn' : '你'}</strong>${model ? `<span>${esc(model)}</span>` : ''}</header>
         ${decision}
-        <div class="message-copy">${richText(message.content)}</div>
+        ${workTrace}
+        <div class="message-copy">${richText(message.content, artifacts)}</div>
+        ${missingFile}
         ${artifactCards}
         ${resourceCards}
-        ${events.filter(event => event.type.startsWith('tool_')).map(event => `<div class="tool-call"><span>${event.type === 'tool_started' ? '调用工具' : event.type === 'tool_failed' ? '工具失败' : '工具完成'}</span><strong>${esc(event.name)}</strong></div>`).join('')}
         ${sources.length ? `<div class="source-list"><span>知识来源</span><div>${sources.map((source, index) => `<button type="button">[${index + 1}] ${esc(source.source)} #片段${Number(source.position) + 1}</button>`).join('')}</div></div>` : ''}
       </div>
     </article>`;
 }
 
 function assetStripHtml(messages) {
-  const unique = new Set();
+  const projects = new Map();
+  const files = new Map();
   messages.filter(message => message.role === 'assistant').forEach(message => {
+    const chosen = message.project_choice?.project_id;
+    if (chosen) projects.set(chosen, chosen);
     (Array.isArray(message.resource_assets) ? message.resource_assets : []).forEach(item => {
-      if (item && item.status !== 'failed') unique.add(`resource:${item.kind}:${item.resource_id || item.id}`);
+      if (item?.kind === 'project' && item.status !== 'failed') projects.set(item.project_id || item.resource_id || item.id, item.project_id || item.resource_id || item.id);
     });
     (Array.isArray(message.project_artifacts) ? message.project_artifacts : []).forEach(item => {
-      if (item?.id) unique.add(`file:${item.project_id}:${item.id}`);
+      if (item?.id && item.project_id) { projects.set(item.project_id, item.project_id); files.set(item.id, item); }
     });
   });
-  return unique.size ? `<div class="conversation-assets" id="conversationAssets" aria-label="会话资产">▣ ${unique.size} Assets</div>` : '<div class="conversation-assets" id="conversationAssets" hidden></div>';
+  const count = projects.size + files.size;
+  if (!count) return '<div class="conversation-assets" id="conversationAssets" hidden></div>';
+  return `<div class="conversation-assets" id="conversationAssets" aria-label="会话资产"><span>▣ ${count} Assets</span>
+    ${[...projects.values()].slice(0, 6).map(id => `<button type="button" class="conversation-asset-chip" data-project-id="${esc(id)}" onclick="openChatProject(this)" aria-label="在 Files 中查看项目 ${esc(projectName(id))}">▱ ${esc(projectName(id))}</button>`).join('')}
+    ${[...files.values()].slice(-8).map(item => `<button type="button" class="conversation-asset-chip" data-project-id="${esc(item.project_id)}" data-artifact-id="${esc(item.id)}" onclick="openChatArtifact(this)" aria-label="在 Files 中打开 ${esc(item.path)}">▤ ${esc(item.path.split('/').at(-1))}</button>`).join('')}
+    ${count > 14 ? `<button type="button" class="conversation-asset-chip" onclick="go('projects')">查看全部</button>` : ''}</div>`;
 }
 
 function resourceAssetHtml(asset) {
@@ -1572,10 +1702,11 @@ async function decideWorkflowDraft(button, action) {
 
 function approvalHtml(approval) {
   const args = JSON.stringify(approval.arguments || {}, null, 2);
+  if (!approval.resumable) return `<article class="message-turn assistant approval-turn" id="approval_${esc(approval.id)}"><div class="turn-avatar" aria-hidden="true">!</div><div class="turn-content"><header><strong>旧审批无法续跑</strong><span>${esc(approval.tool_name)}</span></header><div class="approval-card"><p class="approval-impact">这条审批缺少运行检查点。为避免重复或越权执行旧工具调用，不能直接允许；你可以将原任务重新放入输入框，按当前审批策略重新执行。</p><details class="approval-technical"><summary>查看旧工具参数</summary><pre>${esc(args)}</pre></details><div class="approval-actions"><button class="button button-quiet button-small" type="button" onclick="dismissStaleApproval('${esc(approval.id)}',false)">移除旧审批</button><button class="button button-primary button-small" type="button" onclick="dismissStaleApproval('${esc(approval.id)}',true)">重新填写任务</button></div></div></div></article>`;
   if (approval.tool_name === 'ask_user') {
     const question = String(approval.arguments?.question || '请选择下一步');
     const options = Array.isArray(approval.arguments?.options) ? approval.arguments.options.slice(0, 4) : [];
-    return `<article class="message-turn assistant project-confirm-turn approval-turn" id="approval_${esc(approval.id)}"><div class="turn-avatar" aria-hidden="true">Z</div><div class="turn-content"><header><strong>Codezzn</strong><span>等待你的回答</span></header>
+    return `<article class="message-turn assistant project-confirm-turn approval-turn" id="approval_${esc(approval.id)}"><div class="turn-avatar" aria-hidden="true">${codezznLogoHtml}</div><div class="turn-content"><header><strong>Codezzn</strong><span>等待你的回答</span></header>
       <section class="project-confirm-card" role="group" aria-label="${esc(question)}"><div class="project-confirm-head"><span class="project-question-icon" aria-hidden="true">?</span><strong>${esc(question)}</strong></div>
       <div class="project-confirm-body">${options.map(item => {
         const label = String(item?.label || '').slice(0, 120);
@@ -1602,6 +1733,21 @@ function approvalHtml(approval) {
         </div>
       </div>
     </article>`;
+}
+
+async function dismissStaleApproval(approvalId, retry) {
+  const card = document.getElementById(`approval_${approvalId}`);
+  const buttons = card ? [...card.querySelectorAll('button')] : [];
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    const result = await api(`/api/approvals/${encodeURIComponent(approvalId)}/dismiss`, { method: 'POST', body: '{}' });
+    card?.remove();
+    if (retry) {
+      const input = $('#chatInput');
+      if (input && result.content) { input.value = result.content; input.dispatchEvent(new Event('input')); input.focus(); }
+      toast('原任务已放入输入框。检查内容后发送，将重新进行所需审批。');
+    } else toast('旧审批已移除；没有执行任何工具。');
+  } catch (error) { buttons.forEach(button => { button.disabled = false; }); toast(error.message, true); }
 }
 
 function approvalActionDetails(approval) {
@@ -1749,7 +1895,7 @@ function selectedAgentWriteCapability(agentId, kind = '') {
   const tools = agent.builtin_tools || [];
   const policy = agent.tool_policy || {};
   const rules = policy.tools || {};
-  const allows = name => tools.includes(name)
+  const allows = name => (tools.includes(name) || agent.role_template === 'coding' && ['write_file', 'apply_patch'].includes(name))
     && rules[name] !== 'deny' && (rules[name] || policy.default) !== 'deny';
   const domainAllows = name => rules[name] !== 'deny' && (rules[name] || policy.default) !== 'deny';
   const projectAllowed = ['project_create', 'project_select'].some(domainAllows);
@@ -1772,7 +1918,7 @@ function projectDecisionCardHtml(step = 'project') {
   const target = pending.kind === 'workflow' ? '工作流' : pending.kind === 'project' ? '项目' : '代码和文件';
   const title = step === 'permission' ? `当前智能体还不能创建或修改${target}`
     : step === 'save' ? `是否将本次${target}任务关联到“${name}”？`
-    : step === 'create' ? '为这次任务创建项目' : '是否为这次任务关联一个项目？';
+    : step === 'create' ? '为这次任务创建项目' : pending.unresolvedTargetName ? `找不到“${pending.unresolvedTargetName}”，请选择目标项目` : '是否为这次任务关联一个项目？';
   let body = '';
   if (step === 'permission') body = `
     <p class="project-permission-note" role="status">${esc(capability.reason)}。请在智能体配置中开启所需工具${['file', 'other_artifact'].includes(pending.kind) ? '并选择“工作区可写”' : ''}。项目确认与工具审批仍会分别执行。</p>
@@ -1790,9 +1936,9 @@ function projectDecisionCardHtml(step = 'project') {
     <button class="project-choice" type="button" onclick="renderProjectDecision('create')"><span class="project-choice-number">1</span><span><strong>创建新项目</strong><small>为此任务建立独立目录，再由你确认是否保存生成内容。</small></span></button>
     <button class="project-choice" type="button" onclick="openProjectPicker('pending')"><span class="project-choice-number">2</span><span><strong>打开已有项目</strong><small>选择一个项目作为本次任务的目标。</small></span></button>
     <button class="project-choice project-choice-subtle" type="button" onclick="continuePendingProject(false)"><span class="project-choice-number">3</span><span><strong>仅回答，不保存</strong><small>Agent 会继续回答，不写入文件。</small></span></button>`;
-  return `<article class="message-turn assistant project-confirm-turn" id="${pending.cardId}"><div class="turn-avatar" aria-hidden="true">Z</div><div class="turn-content"><header><strong>Codezzn</strong><span>需要你的确认</span></header>
+  return `<article class="message-turn assistant project-confirm-turn" id="${pending.cardId}"><div class="turn-avatar" aria-hidden="true">${codezznLogoHtml}</div><div class="turn-content"><header><strong>Codezzn</strong><span>需要你的确认</span></header>
     <section class="project-confirm-card" aria-label="项目与保存确认"><header class="project-confirm-head"><span class="project-question-icon" aria-hidden="true">?</span><strong>${esc(title)}</strong><div class="project-confirm-controls"><button type="button" onclick="toggleProjectDecision()" aria-label="收起确认">−</button><button type="button" onclick="cancelPendingProject()" aria-label="取消这次任务">×</button></div></header>
-    <div class="project-confirm-body">${pending.intentError ? `<p class="project-permission-note" role="status">意图检查暂时不可用，请明确选择是否关联项目。</p>` : ''}${body}${step === 'project' ? `<div class="project-custom-answer"><span aria-hidden="true">✎</span><input type="text" id="projectCustomAnswer" aria-label="输入项目名称" placeholder="或者输入新项目名称，按 Enter 继续" onkeydown="if(event.key==='Enter'){event.preventDefault();createPendingProjectFromCustom()}" /></div>` : ''}</div></section></div></article>`;
+    <div class="project-confirm-body">${pending.intentError ? `<p class="project-permission-note" role="status">意图检查暂时不可用，请明确选择是否关联项目。</p>` : ''}${pending.unresolvedTargetName ? `<p class="project-permission-note" role="status">指定的项目不存在；不会将文件写进当前的其他项目。</p>` : ''}${body}${step === 'project' ? `<div class="project-custom-answer"><span aria-hidden="true">✎</span><input type="text" id="projectCustomAnswer" aria-label="输入项目名称" placeholder="或者输入新项目名称，按 Enter 继续" onkeydown="if(event.key==='Enter'){event.preventDefault();createPendingProjectFromCustom()}" /></div>` : ''}</div></section></div></article>`;
 }
 
 function renderProjectDecision(step = 'project') {
@@ -1813,7 +1959,7 @@ function toggleProjectDecision() {
   if (control) { control.textContent = card.classList.contains('is-collapsed') ? '+' : '−'; control.setAttribute('aria-label', card.classList.contains('is-collapsed') ? '展开确认' : '收起确认'); }
 }
 
-function cancelPendingProject() {
+async function cancelPendingProject() {
   const pending = state.pendingProjectTurn;
   if (!pending) return;
   document.getElementById(pending.cardId)?.remove();
@@ -1821,6 +1967,10 @@ function cancelPendingProject() {
   const input = $('#chatInput');
   if (input) { input.value = pending.content; input.focus(); input.dispatchEvent(new Event('input')); }
   state.pendingProjectTurn = null;
+  if (Object.hasOwn(pending, 'priorProjectId') && pending.priorProjectId !== state.activeProjectId) {
+    try { await setActiveProject(pending.priorProjectId); }
+    catch (error) { toast(`恢复原项目失败：${error.message}`, true); }
+  }
 }
 
 function openPendingAgentSettings() {
@@ -1846,6 +1996,7 @@ async function createPendingProject() {
     const project = await api('/api/projects', { method: 'POST', body: JSON.stringify({ name }) });
     await refreshProjects();
     await setActiveProject(project.id);
+    pending.unresolvedTargetName = null;
     renderProjectDecision('save');
   } catch (error) { if (button) button.disabled = false; toast(error.message, true); }
 }
@@ -1853,6 +2004,7 @@ async function createPendingProject() {
 async function continuePendingProject(saveToProject) {
   const pending = state.pendingProjectTurn;
   if (!pending) return;
+  if (saveToProject && pending.unresolvedTargetName) return toast('请先选择或创建目标项目，不能写入其他项目', true);
   if (saveToProject && !state.activeProjectId) return toast('请先选择项目', true);
   if (saveToProject && !selectedAgentWriteCapability(pending.agent, pending.kind).allowed) {
     renderProjectDecision('permission');
@@ -1860,7 +2012,7 @@ async function continuePendingProject(saveToProject) {
   }
   state.pendingProjectTurn = null;
   document.getElementById(pending.cardId)?.remove();
-  await sendMessage({ content: pending.content, agent: pending.agent, project_id: saveToProject ? state.activeProjectId : null, save_to_project: saveToProject, intent_kind: pending.kind, preRendered: true });
+  await sendMessage({ content: pending.content, agent: pending.agent, project_id: state.activeProjectId, save_to_project: saveToProject, intent_kind: pending.kind, preRendered: true });
 }
 
 async function sendMessage(decision = null) {
@@ -1875,19 +2027,45 @@ async function sendMessage(decision = null) {
   const agent = decision?.agent || agentSelect?.value;
   if (!content) return;
   if (!agent) { toast('请先创建并选择智能体', true); return; }
-  if (!state.thread) await ensureChatThread();
   const messages = $('#messages');
+  const suffix = Date.now();
+  const userId = decision?.preRendered ? null : `projectUser_${suffix}`;
+  const pendingId = `pending_${suffix}`;
+  messages?.querySelector('.conversation-empty')?.remove();
+  messages?.insertAdjacentHTML('beforeend', `${userId ? `<div id="${userId}">${messageHtml({ role: 'user', content })}</div>` : ''}
+    <article class="message-turn assistant is-pending" id="${pendingId}"><div class="turn-avatar" aria-hidden="true">${codezznLogoHtml}</div><div class="turn-content"><header><strong>Codezzn</strong></header><div class="thinking-line"><span></span><span></span><span></span><b>Thinking · 正在理解任务</b></div></div></article>`);
+  input.value = '';
+  input.style.height = '54px';
+  scrollMessages(true);
+  state.intentPending = true;
+  button.disabled = true;
+  try {
+    if (!state.thread) await ensureChatThread();
+  } catch (error) {
+    const pending = document.getElementById(pendingId);
+    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: `请求失败：${error.message}`, error: true });
+    toast(error.message, true);
+    return;
+  } finally {
+    state.intentPending = false;
+    button.disabled = false;
+  }
   let intent = null;
   let intentError = false;
   if (!decision) {
     state.intentPending = true;
     button.disabled = true;
     try {
+      const pending = document.getElementById(pendingId);
+      if (pending) pending.querySelector('.thinking-line b').textContent = 'Thinking · 正在判断是否需要项目确认';
       intent = await api('/api/agent/intent', { method: 'POST', body: JSON.stringify({ content, agent_id: agent, thread_id: state.thread }) });
       if (typeof intent?.requires_project !== 'boolean') throw new Error('意图检查返回无效结果');
     } catch (error) {
       intentError = true;
       if (!selectedAgentWriteCapability(agent).allowed) {
+        document.getElementById(pendingId)?.remove();
+        if (userId) document.getElementById(userId)?.remove();
+        input.value = content;
         toast(`无法检查任务意图：${error.message}`, true);
         return;
       }
@@ -1896,23 +2074,49 @@ async function sendMessage(decision = null) {
       button.disabled = false;
     }
   }
+  if (!decision && intent?.project_switch_only) {
+    try {
+      const result = await api(`/api/threads/${encodeURIComponent(state.thread)}/project-switch`, {
+        method: 'POST', body: JSON.stringify({ content, project_name: intent.target_project_name }),
+      });
+      state.activeProjectId = result.project.id;
+      const freshThread = await api(`/api/threads/${encodeURIComponent(state.thread)}`);
+      state.currentThread = freshThread;
+      await refreshProjects();
+      renderProjectChip();
+      document.getElementById(pendingId)?.remove();
+      messages?.insertAdjacentHTML('beforeend', messageHtml({ role: 'assistant', content: result.content }));
+      await refreshChatFiles();
+      scrollMessages(true);
+    } catch (error) {
+      const pending = document.getElementById(pendingId);
+      if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: `请求失败：${error.message}`, error: true });
+      toast(error.message, true);
+      openProjectPicker('activate');
+    }
+    return;
+  }
+  if (!decision && intent?.target_project_id) {
+    try {
+      intent.priorProjectId = state.activeProjectId;
+      await setActiveProject(intent.target_project_id);
+    } catch (error) {
+      const pending = document.getElementById(pendingId);
+      if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: `项目切换失败：${error.message}`, error: true });
+      toast(error.message, true);
+      return;
+    }
+  }
   if (!decision && (intent?.requires_project || intentError)) {
-    const suffix = Date.now();
     const kind = intent?.kind || '';
-    const step = !selectedAgentWriteCapability(agent, kind).allowed ? 'permission' : state.activeProjectId ? 'save' : 'project';
-    state.pendingProjectTurn = { content, agent, kind, cardId: `projectConfirm_${suffix}`, userId: `projectUser_${suffix}`, suggestedName: String(intent?.suggested_name || content).replace(/[。！!？?].*$/, '').slice(0, 32), step, intentError };
-    messages?.querySelector('.conversation-empty')?.remove();
-    messages?.insertAdjacentHTML('beforeend', `<div id="${state.pendingProjectTurn.userId}">${messageHtml({ role: 'user', content })}</div>`);
-    input.value = ''; input.style.height = '54px';
+    const step = !selectedAgentWriteCapability(agent, kind).allowed ? 'permission' : intent?.unresolved_target ? 'project' : state.activeProjectId ? 'save' : 'project';
+    state.pendingProjectTurn = { content, agent, kind, cardId: `projectConfirm_${suffix}`, userId, suggestedName: String(intent?.target_project_name || intent?.suggested_name || content).replace(/[。！!？?].*$/, '').slice(0, 32), step, intentError, unresolvedTargetName: intent?.unresolved_target ? intent.target_project_name : null, ...(Object.hasOwn(intent || {}, 'priorProjectId') ? { priorProjectId: intent.priorProjectId } : {}) };
+    document.getElementById(pendingId)?.remove();
     renderProjectDecision(state.pendingProjectTurn.step);
     return;
   }
-  const pendingId = `pending_${Date.now()}`;
-  messages?.querySelector('.conversation-empty')?.remove();
-  messages?.insertAdjacentHTML('beforeend', `${decision?.preRendered ? '' : messageHtml({ role: 'user', content })}
-    <article class="message-turn assistant is-pending" id="${pendingId}"><div class="turn-avatar" aria-hidden="true">Z</div><div class="turn-content"><header><strong>Codezzn</strong></header><div class="thinking-line"><span></span><span></span><span></span><b>正在检索知识并运行</b></div></div></article>`);
-  input.value = '';
-  input.style.height = '54px';
+  const runningPending = document.getElementById(pendingId);
+  if (runningPending) runningPending.querySelector('.thinking-line b').textContent = 'Thinking · 正在运行';
   const controller = new AbortController();
   const activeTurn = { controller, pendingId, cancelled: false };
   state.activeTurn = activeTurn;
@@ -1928,15 +2132,28 @@ async function sendMessage(decision = null) {
       turnPayload.project_id = decision.project_id ?? null;
       turnPayload.save_to_project = decision.save_to_project === true;
       if (decision.intent_kind) turnPayload.intent_kind = decision.intent_kind;
-    } else if (state.activeProjectId) {
-      turnPayload.project_id = state.activeProjectId;
     }
     const response = await fetch(`/api/threads/${state.thread}/turns/stream`, {
       method: 'POST', headers: headers(), body: JSON.stringify(turnPayload), signal: controller.signal,
     });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let renderedAnswer = ''; const events = []; let streamError = ''; let resultStatus = ''; let approvalId = ''; let completedTurnId = '';
-    const renderPending = () => { const pending = document.getElementById(pendingId); if (pending) pending.querySelector('.turn-content').innerHTML = `<header><strong>Codezzn</strong></header><div class="message-copy">${richText(renderedAnswer)}</div><div class="thinking-line"><b>${esc(events.at(-1)?.status || events.at(-1)?.type || '运行中')}</b></div>`; scrollMessages(); };
+    const renderPending = () => {
+      const pending = document.getElementById(pendingId);
+      if (!pending) return;
+      const progress = events.filter(event => ['tool_started', 'tool_completed', 'tool_failed', 'assistant_status', 'model_fallback'].includes(event.type)).slice(-4).map(event => {
+        if (event.type === 'tool_started') return `正在使用 ${event.name || '工具'}`;
+        if (event.type === 'tool_completed') return `${event.name || '工具'} 已完成`;
+        if (event.type === 'tool_failed') return `${event.name || '工具'} 执行失败`;
+        if (event.type === 'model_fallback') return '正在切换模型';
+        return event.status === 'saving_project_file' ? '正在保存项目文件' : '正在整理结果';
+      });
+      pending.querySelector('.turn-content').innerHTML = `<header><strong>Codezzn</strong></header>
+        <div class="agent-live-thinking" aria-live="polite"><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Thinking</span></div>
+        ${progress.length ? `<div class="agent-live-steps">${progress.map(item => `<div>${esc(item)}</div>`).join('')}</div>` : '<div class="agent-live-steps"><div>正在理解任务并准备下一步</div></div>'}
+        ${renderedAnswer ? `<div class="message-copy">${richText(renderedAnswer)}</div>` : ''}`;
+      scrollMessages();
+    };
     const animator = createStreamTextAnimator(text => { renderedAnswer = text; renderPending(); });
     activeTurn.animator = animator;
     while (true) {
@@ -1978,9 +2195,16 @@ async function sendMessage(decision = null) {
         ? approvalHtml(approval)
         : messageHtml({ role: 'assistant', content: '工具调用正在等待审批，请刷新页面后处理。', meta: { events, usage: {}, runtime: {}, sources: [] } });
     } else if (pending) {
-      const persisted = completedTurnId && resultStatus === 'completed'
-        ? (await api(`/api/threads/${state.thread}`).catch(() => null))?.messages?.find(item => item.turn_id === completedTurnId && item.role === 'assistant')
+      const freshThread = completedTurnId && resultStatus === 'completed'
+        ? await api(`/api/threads/${state.thread}`).catch(() => null)
         : null;
+      const persisted = freshThread?.messages?.find(item => item.turn_id === completedTurnId && item.role === 'assistant');
+      if (freshThread) {
+        await refreshProjects().catch(() => null);
+        state.currentThread = freshThread;
+        state.activeProjectId = freshThread.active_project_id || null;
+        renderProjectChip();
+      }
       pending.outerHTML = persisted
         ? messageHtml(persisted)
         : messageHtml({ role: 'assistant', content: activeTurn.cancelled ? '已停止生成。' : (answer || '模型返回了空响应。'), meta: { events, usage: {}, runtime: {}, sources: [] } });
@@ -1991,6 +2215,7 @@ async function sendMessage(decision = null) {
       }
     }
     scrollMessages(true);
+    await refreshChatFiles();
   } catch (error) {
     const pending = document.getElementById(pendingId);
     const cancelled = activeTurn.cancelled || error.name === 'AbortError';

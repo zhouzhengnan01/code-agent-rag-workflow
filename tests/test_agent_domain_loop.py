@@ -85,7 +85,36 @@ def test_semantic_intent_parses_model_json_and_rejects_invalid(tmp_path, monkeyp
 
     monkeypatch.setattr(intent, "chat_completion", invalid_completion)
     with pytest.raises(ValueError, match="意图识别暂不可用"):
-        asyncio.run(intent.classify_intent({}, "写文件"))
+        asyncio.run(intent.classify_intent({}, "完成当前任务"))
+
+
+def test_common_intents_do_not_wait_for_model(monkeypatch):
+    monkeypatch.setattr(intent, "model_candidates", lambda *_: (_ for _ in ()).throw(AssertionError("must not call model")))
+    projects = [
+        {"id": "prj_aaaaaaaaaaaaaaaa", "name": "0929-dev"},
+        {"id": "prj_bbbbbbbbbbbbbbbb", "name": "0929-dev-01"},
+    ]
+    for content, expected in (
+        ("你好", False),
+        ("切换到0929-dev项目", False),
+        ("帮我写一份python快速排序的文件", True),
+        ("列出当前有哪些项目", False),
+    ):
+        result = asyncio.run(intent.classify_intent({}, content, projects=projects))
+        assert result["requires_project"] is expected
+    compound = asyncio.run(intent.classify_intent({}, "帮我切换到0929-dev-01项目，并写一份冒泡排序的python文件", projects=projects))
+    assert compound["requires_project"] is True
+    assert compound["kind"] == "file"
+    assert compound["target_project_id"] == "prj_bbbbbbbbbbbbbbbb"
+    assert compound["project_switch_only"] is False
+    assert intent.parse_project_directive("切换到0929-dev-01项目，并写文件", projects)["remaining_task"] == "写文件"
+    unknown_compound = asyncio.run(intent.classify_intent({}, "切换到unknown项目，并写一个python文件", projects=projects))
+    assert unknown_compound["requires_project"] is True
+    assert unknown_compound["unresolved_target"] is True
+    assert unknown_compound["target_project_name"] == "unknown"
+    assert unknown_compound["target_project_id"] is None
+    unmatched = intent.parse_project_directive("切换到0929-development项目", projects)
+    assert unmatched["project_id"] is None and unmatched["project_name"] == "0929-development"
 
 
 def test_workflow_draft_rejects_cycle():

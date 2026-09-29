@@ -1,0 +1,204 @@
+/* Benchmark section for the Browser Use landing page. */
+.bw-site .bw-benchmark {
+  box-sizing: border-box;
+  padding: 112px 24px;
+  color: var(--bw-fg, #fafafa);
+  background: var(--bw-bg, #000);
+  border-bottom: 1px solid var(--bw-line, #3d3d3d);
+}
+
+.bw-site .bw-benchmark *,
+.bw-site .bw-benchmark *::before,
+.bw-site .bw-benchmark *::after {
+  box-sizing: border-box;
+}
+
+.bw-site .bw-benchmark .bw-section-shell {
+  width: min(100%, 1200px);
+  margin-inline: auto;
+}
+
+.bw-site .bw-benchmark .bw-section-title {
+  max-width: 820px;
+  margin: 0;
+  color: var(--bw-fg, #fafafa);
+  font-family: var(--bw-font-sans, Geist, "Geist Fallback", sans-serif);
+  font-size: 52px;
+  font-weight: 450;
+  line-height: 1.06;
+  letter-spacing: -1.144px;
+}
+
+.bw-site .bw-benchmark .bw-section-shell > p,
+.bw-site .bw-benchmark__description,
+.bw-site .bw-benchmark__summary {
+  max-width: 576px;
+  margin: 16px 0 0;
+  color: var(--bw-muted, #a1a1a1);
+  font-family: var(--bw-font-sans, Geist, "Geist Fallback", sans-serif);
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 28px;
+}
+
+.bw-site .bw-benchmark__summary {
+  margin-top: 32px;
+  color: var(--bw-body, #e5e5e5);
+}
+
+.bw-site .bw-benchmark__chart,
+.bw-site .bw-benchmark-chart,
+.bw-site .bw-benchmark figure {
+  width: 100%;
+  margin: 40px 0 24px;
+}
+
+.bw-site .bw-benchmark__chart,
+.bw-site .bw-benchmark-chart {
+  aspect-ratio: 1200 / 640;
+}
+
+.bw-site .bw-benchmark__chart :is(svg, img),
+.bw-site .bw-benchmark-chart :is(svg, img),
+.bw-site .bw-benchmark figure > :is(svg, img) {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1200 / 640;
+}
+
+.bw-site .bw-benchmark__chart svg,
+.bw-site .bw-benchmark-chart svg,
+.bw-site .bw-benchmark figure svg {
+  overflow: visible;
+}
+
+.bw-site .bw-benchmark :is(.bw-benchmark__meta, .bw-benchmark__footer, .bw-benchmark__links) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px 24px;
+  margin-top: 24px;
+  color: var(--bw-muted, #a1a1a1);
+  font-family: var(--bw-font-mono, "Geist Mono", monospace);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.bw-site .bw-benchmark a {
+  color: var(--bw-accent, #fe750e);
+  text-decoration-color: currentColor;
+  text-underline-offset: 3px;
+  transition: color 150ms var(--bw-ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+
+.bw-site .bw-benchmark a:hover {
+  color: var(--bw-accent-hover, #fe8f3c);
+}
+
+.bw-site .bw-benchmark a:focus-visible {
+  outline: 2px solid var(--bw-accent, #fe750e);
+  outline-offset: 4px;
+}
+
+/* Add data-reveal="pending" when the page's observer owns the reveal state. */
+.bw-site .bw-benchmark [data-reveal="pending"] {
+  opacity: 0;
+  transform: translateY(8px);
+  transition:
+    opacity 420ms var(--bw-ease, cubic-bezier(0.22, 1, 0.36, 1)),
+    transform 420ms var(--bw-ease, cubic-bezier(0.22, 1, 0.36, 1));
+}
+
+.bw-site .bw-benchmark [data-reveal="pending"].is-visible {
+  opacity: 1;
+  transform: none;
+}
+
+@media (max-width: 1024px) {
+  .bw-site .bw-benchmark {
+    padding-block: 80px;
+  }
+}
+
+@media (max-width: 640px) {
+  .bw-site .bw-benchmark {
+    padding-inline: 20px;
+  }
+
+  .bw-site .bw-benchmark .bw-section-title {
+    font-size: 40px;
+    line-height: 1.1;
+    letter-spacing: -0.88px;
+  }
+
+  .bw-site .bw-benchmark__chart,
+  .bw-site .bw-benchmark-chart,
+  .bw-site .bw-benchmark figure {
+    margin-block: 32px 20px;
+  }
+
+  .bw-site .bw-benchmark :is(.bw-benchmark__meta, .bw-benchmark__footer, .bw-benchmark__links) {
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bw-site .bw-benchmark a,
+  .bw-site .bw-benchmark [data-reveal="pending"] {
+    scroll-behavior: auto;
+    transition-duration: 0.01ms;
+  }
+}
+
+.bw-site .bw-chart__grid path {
+  fill: none;
+  stroke: rgb(255 255 255 / 7%);
+  stroke-width: 1;
+}
+
+.bw-site .bw-chart__grid .bw-chart__axis {
+  stroke: rgb(255 255 255 / 16%);
+}
+
+.bw-site .bw-chart__ticks,
+.bw-site .bw-chart__yticks,
+.bw-site .bw-chart__axis-label,
+.bw-site .bw-chart__direction,
+.bw-site .bw-chart__zone {
+  fill: #737373;
+  font-family: var(--bw-font-mono, "Geist Mono", monospace);
+  font-size: 14px;
+}
+
+.bw-site .bw-chart__axis-label { font-size: 13px; }
+.bw-site .bw-chart__direction { font-size: 11px; }
+.bw-site .bw-chart__zone { fill: var(--bw-accent, #fe750e); font-size: 12px; opacity: .8; }
+
+.bw-site .bw-chart__leaders path {
+  fill: none;
+  stroke: rgb(255 255 255 / 30%);
+  stroke-width: 1.2;
+}
+
+.bw-site .bw-chart__leaders .is-browser-use { stroke: var(--bw-accent, #fe750e); }
+.bw-site .bw-chart__points circle { fill: rgb(140 140 148); }
+.bw-site .bw-chart__points .is-browser-use { fill: var(--bw-accent, #fe750e); }
+
+.bw-site .bw-chart__labels {
+  fill: #a1a1a1;
+  font-family: var(--bw-font-mono, "Geist Mono", monospace);
+  font-size: 20px;
+}
+
+.bw-site .bw-chart__labels .is-browser-use { fill: #fafafa; }
+
+@media (max-width: 640px) {
+  .bw-site .bw-chart__labels { font-size: 32px; }
+  .bw-site .bw-chart__ticks,
+  .bw-site .bw-chart__yticks { font-size: 22px; }
+  .bw-site .bw-chart__axis-label { font-size: 20px; }
+  .bw-site .bw-chart__direction { font-size: 17px; }
+  .bw-site .bw-chart__zone { font-size: 18px; }
+}

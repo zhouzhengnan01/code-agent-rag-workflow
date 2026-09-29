@@ -42,7 +42,7 @@ def create_project_tool(name, description, *, thread_id, turn_id):
     return project
 
 
-def select_project_tool(project_id, *, thread_id, turn_id, record_link=True):
+def select_project_tool(project_id, *, thread_id, turn_id, record_link=True, save_to_project=True):
     project = get_project(project_id)
     if not project:
         raise ValueError("项目不存在")
@@ -56,7 +56,7 @@ def select_project_tool(project_id, *, thread_id, turn_id, record_link=True):
             db.execute(
                 "INSERT INTO turn_projects(turn_id,thread_id,project_id,save_to_project,created_at) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(turn_id) DO UPDATE SET project_id=excluded.project_id,save_to_project=excluded.save_to_project",
-                (turn_id, thread_id, project_id, 1, now()),
+                (turn_id, thread_id, project_id, int(save_to_project), now()),
             )
     if record_link:
         _asset(thread_id, turn_id, "project", project_id, project["name"], project_id, "linked")

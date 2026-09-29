@@ -20,60 +20,74 @@
   video.autoplay = true;
   video.playsInline = true;
   video.setAttribute("aria-hidden", "true");
-
   const scrim = el("div", "auth-promo__scrim");
   scrim.setAttribute("aria-hidden", "true");
 
-  const stage = el("div", "auth-ticket-stage");
+  const slot = el("div", "promo-ticket-slot");
+  const stage = el("div", "promo-ticket-stage");
   stage.tabIndex = 0;
   stage.setAttribute("aria-label", "Codezzn Agent Studio event pass");
-  const ticket = el("div", "auth-ticket");
+  const tilt = el("div", "promo-ticket-tilt");
+  const ticket = el("div", "promo-ticket");
 
+  const glowStack = (back = false) => {
+    const glow = el("div", `ticket-glow-stack${back ? " ticket-glow-stack--back" : ""}`);
+    glow.setAttribute("aria-hidden", "true");
+    for (let index = 0; index < 9; index += 1) glow.append(el("span"));
+    return glow;
+  };
+  const detail = (...items) => {
+    const row = el("div", "ticket-detail");
+    items.forEach((item) => row.append(el("span", "", item)));
+    return row;
+  };
   const makeFace = (side) => {
-    const face = el("div", `auth-ticket__face auth-ticket__face--${side}`);
-    const rail = el("div", "auth-ticket__rail");
-    rail.append(el("span", "auth-ticket__rail-mark", "Z"));
-    rail.append(el("span", "auth-ticket__rail-text", side === "front" ? "AGENT STUDIO" : "LOCAL FIRST"));
-    face.append(rail);
+    const front = side === "front";
+    const face = el("div", `ticket-face ticket-face--${side}`);
+    face.append(el("div", "ticket-band", front ? "AGENT STUDIO" : "LOCAL FIRST"));
+    const watermark = el("img", "ticket-watermark");
+    watermark.src = "/assets/codezzn-mark.svg?v=1";
+    watermark.alt = "";
+    watermark.setAttribute("aria-hidden", "true");
+    face.append(watermark);
+    if (front) face.append(el("div", "ticket-holo"));
+    face.append(el("div", "ticket-sheen"), el("div", "ticket-pointer-light"));
 
-    const body = el("div", "auth-ticket__body");
-    const top = el("div", "auth-ticket__topline");
-    top.append(el("span", "auth-ticket__edition", side === "front" ? "BUILD / 2026" : "PASS / 001"));
-    top.append(el("span", "auth-ticket__admit", side === "front" ? "ADMIT ONE" : "ALL ACCESS"));
-    body.append(top);
-
-    if (side === "front") {
-      body.append(el("p", "auth-ticket__kicker", "CODEZZN PRESENTS"));
-      body.append(el("h2", "auth-ticket__name", "AGENT\nSTUDIO"));
-      body.append(el("p", "auth-ticket__summary", "Design, connect and run capable AI agents from one local workspace."));
+    const content = el("div", "ticket-content");
+    const stamp = el("div", "ticket-stamp");
+    stamp.append(el("span", "", front ? "CODEZZN PRESENTS" : "YOUR WORKSPACE"));
+    stamp.append(el("span", "", front ? "BUILD / 2026" : "PASS / 001"));
+    content.append(stamp);
+    content.append(el("strong", "ticket-title", front ? "AGENT\nSTUDIO" : "MAKE\nIT WORK"));
+    if (front) {
+      content.append(detail("Design, connect and run capable AI agents from one local workspace."));
+      content.append(detail("ALWAYS ON", "LOCAL WORKSPACE"));
+      content.append(detail("ADMIT ONE"));
     } else {
-      body.append(el("p", "auth-ticket__kicker", "YOUR WORKSPACE"));
-      body.append(el("h2", "auth-ticket__name auth-ticket__name--back", "MAKE\nIT WORK"));
-      const grid = el("div", "auth-ticket__feature-grid");
-      ["MODELS", "TOOLS", "MEMORY", "FLOWS"].forEach((item, index) => {
-        const cell = el("div", "auth-ticket__feature");
-        cell.append(el("span", "auth-ticket__feature-no", `0${index + 1}`));
-        cell.append(el("span", "auth-ticket__feature-name", item));
-        grid.append(cell);
-      });
-      body.append(grid);
+      content.append(detail("01 MODELS", "02 TOOLS"));
+      content.append(detail("03 MEMORY", "04 FLOWS"));
+      content.append(detail("ALL ACCESS"));
     }
-
-    const footer = el("div", "auth-ticket__footer");
-    const date = el("div", "auth-ticket__date");
-    date.append(el("strong", "", "ALWAYS ON"));
-    date.append(el("span", "", "LOCAL WORKSPACE"));
-    footer.append(date);
-    const barcode = el("div", "auth-ticket__barcode");
+    const last = detail("ALWAYS ON", "LOCAL WORKSPACE");
+    last.classList.add("ticket-detail--last");
+    content.append(last, el("div", "ticket-spacer"));
+    const barcodeWrap = el("div", "ticket-barcode-wrap");
+    const barcode = el("div", "ticket-barcode");
     barcode.setAttribute("aria-hidden", "true");
-    footer.append(barcode);
-    body.append(footer);
-    face.append(body);
+    const barcodeScan = el("div", "ticket-barcode-scan");
+    barcodeScan.setAttribute("aria-hidden", "true");
+    barcodeWrap.append(barcode, barcodeScan);
+    content.append(barcodeWrap, el("div", "ticket-perforation"));
+    content.append(el("div", "ticket-tagline", front ? "CODEZZN PRESENTS" : "YOUR WORKSPACE"));
+    content.append(el("div", "ticket-legal", front ? "AGENT STUDIO BUILD / 2026" : "LOCAL FIRST PASS / 001"));
+    face.append(content);
     return face;
   };
 
-  ticket.append(makeFace("front"), makeFace("back"));
-  stage.append(ticket);
+  ticket.append(glowStack(), makeFace("front"), glowStack(true), makeFace("back"));
+  tilt.append(ticket);
+  stage.append(tilt);
+  slot.append(stage);
 
   const copy = el("div", "auth-promo__copy");
   copy.append(el("p", "auth-promo__eyebrow", "CODEZZN PRESENTS"));
@@ -85,16 +99,77 @@
 
   const motionToggle = el("button", "auth-promo__motion");
   motionToggle.type = "button";
-  const motionIcon = el("span", "auth-promo__motion-icon");
-  motionIcon.setAttribute("aria-hidden", "true");
   const motionLabel = el("span", "auth-promo__motion-label");
-  motionToggle.append(motionIcon, motionLabel);
-
-  promo.append(video, scrim, stage, copy, motionToggle);
+  motionToggle.append(motionLabel);
+  promo.append(video, scrim, slot, copy, motionToggle);
   mount.replaceChildren(promo);
 
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   let paused = reducedMotion.matches;
+  let frame = 0;
+  let targetX = 0;
+  let targetY = 0;
+  let currentX = 0;
+  let currentY = 0;
+  let dragStartX = 0;
+  let dragAngle = 0;
+  let currentDragAngle = 0;
+  let dragBase = 0;
+  let dragging = false;
+
+  const animateTilt = () => {
+    currentX += (targetX - currentX) * 0.14;
+    currentY += (targetY - currentY) * 0.14;
+    currentDragAngle += (dragAngle - currentDragAngle) * 0.14;
+    tilt.style.transform = `rotateX(${currentX}deg) rotateY(${currentY + currentDragAngle}deg)`;
+    if (Math.abs(targetX - currentX) + Math.abs(targetY - currentY) + Math.abs(dragAngle - currentDragAngle) > 0.02 || dragging) {
+      frame = requestAnimationFrame(animateTilt);
+    } else {
+      frame = 0;
+    }
+  };
+  const scheduleTilt = () => {
+    if (!frame && !paused) frame = requestAnimationFrame(animateTilt);
+  };
+  const resetTilt = () => {
+    if (dragging) return;
+    stage.removeAttribute("data-pointer");
+    targetX = 0;
+    targetY = 0;
+    dragAngle = 0;
+    scheduleTilt();
+  };
+
+  stage.addEventListener("pointermove", (event) => {
+    if (paused) return;
+    const rect = stage.getBoundingClientRect();
+    const x = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const y = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
+    stage.style.setProperty("--vis-px", `${x * 100}%`);
+    stage.style.setProperty("--vis-py", `${y * 100}%`);
+    stage.setAttribute("data-pointer", "true");
+    targetX = -18 * (y - 0.5);
+    targetY = 26 * (x - 0.5);
+    if (dragging) dragAngle = dragBase + 0.6 * (event.clientX - dragStartX);
+    scheduleTilt();
+  });
+  stage.addEventListener("pointerdown", (event) => {
+    if (paused || (event.pointerType === "mouse" && event.button !== 0)) return;
+    dragging = true;
+    dragStartX = event.clientX;
+    dragBase = currentDragAngle;
+    stage.setPointerCapture(event.pointerId);
+    scheduleTilt();
+  });
+  const pointerUp = (event) => {
+    dragging = false;
+    if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId);
+    resetTilt();
+  };
+  stage.addEventListener("pointerup", pointerUp);
+  stage.addEventListener("pointercancel", pointerUp);
+  stage.addEventListener("pointerleave", resetTilt);
+  stage.addEventListener("blur", resetTilt);
 
   const syncMotion = () => {
     promo.classList.toggle("is-paused", paused);
@@ -103,19 +178,15 @@
     motionToggle.setAttribute("aria-label", motionLabel.textContent);
     if (paused) {
       video.pause();
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
     } else {
       const play = video.play();
       if (play && typeof play.catch === "function") play.catch(() => {});
     }
   };
-
-  motionToggle.addEventListener("click", () => {
-    paused = !paused;
-    syncMotion();
-  });
-  reducedMotion.addEventListener("change", (event) => {
-    paused = event.matches;
-    syncMotion();
-  });
+  motionToggle.addEventListener("click", () => { paused = !paused; syncMotion(); });
+  reducedMotion.addEventListener("change", (event) => { paused = event.matches; syncMotion(); });
+  window.addEventListener("pagehide", () => { if (frame) cancelAnimationFrame(frame); video.pause(); }, { once: true });
   syncMotion();
 })();
