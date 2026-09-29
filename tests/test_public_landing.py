@@ -49,3 +49,24 @@ def test_public_landing_and_assets_do_not_bypass_workbench_auth(tmp_path, monkey
         answer = client.post("/api/help/ask", json={"question": "如何让智能体把代码保存成项目文件？"})
         assert answer.status_code == 200
         assert answer.json()["source"] == "faq"
+
+
+def test_login_particle_animation_is_decorative_and_assets_are_served(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        login = client.get("/login")
+        assert login.status_code == 200
+        assert 'class="auth-pane auth-pane--particle"' in login.text
+        assert 'id="authParticleField" aria-hidden="true"' in login.text
+        assert "/assets/auth-particle.css?v=3" in login.text
+        assert "/assets/auth-particle.js?v=3" in login.text
+
+        stylesheet = client.get("/assets/auth-particle.css")
+        assert stylesheet.status_code == 200
+        assert "position: absolute" in stylesheet.text
+        assert "background: #020205" in stylesheet.text
+        assert "pointer-events: none" in stylesheet.text
+
+        animation = client.get("/assets/auth-particle.js")
+        assert animation.status_code == 200
+        assert "prefers-reduced-motion: reduce" in animation.text
+        assert "visibilitychange" in animation.text

@@ -1,0 +1,105 @@
+.auth-pane--particle {
+  isolation: isolate;
+  color-scheme: dark;
+  --auth-ink: #ededed;
+  --auth-ink-soft: rgb(237 237 237 / 70%);
+  --auth-ink-faint: rgb(237 237 237 / 58%);
+  --auth-hairline: rgb(237 237 237 / 18%);
+  --auth-hairline-strong: rgb(237 237 237 / 25%);
+  --auth-field: #111115;
+  --auth-hover: #1b1b21;
+  background: #020205;
+  color: #ededed;
+}
+
+.auth-pane--particle .provider-button,
+.auth-pane--particle .action-secondary {
+  background: rgb(17 17 21 / 86%);
+}
+
+.auth-pane--particle .provider-button:hover,
+.auth-pane--particle .action-secondary:hover {
+  background: var(--auth-hover);
+}
+
+.auth-pane--particle #githubButton img,
+.auth-pane--particle [data-provider="email"] img {
+  filter: brightness(0) invert(1);
+}
+
+.auth-pane--particle .last-used-badge {
+  border-color: #47434b;
+  background: #17171d;
+  color: #ededed;
+}
+
+.auth-pane--particle .selected-email {
+  background: rgb(237 237 237 / 10%);
+}
+
+.auth-pane--particle .current-session {
+  background: #111015;
+}
+
+.auth-pane--particle .current-session p {
+  color: #d6b9ff;
+}
+
+.auth-pane--particle .auth-feedback {
+  color: #ff9e9e;
+}
+
+.auth-pane--particle .auth-feedback.is-success {
+  color: #75e0b4;
+}
+
+.auth-pane--particle .auth-footer {
+  color: rgb(237 237 237 / 62%);
+}
+
+.auth-pane--particle .auth-footer a:hover {
+  color: #ededed;
+}
+
+.auth-pane--particle > .auth-particle-canvas {
+  position: absolute;
+  z-index: 0;
+  right: 0;
+  left: 0;
+  top: 50%;
+  display: block;
+  width: 100%;
+  max-width: none;
+  height: clamp(420px, 62vh, 620px);
+  overflow: clip;
+  opacity: .88;
+  pointer-events: none;
+  contain: strict;
+  transform: translateY(-50%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 14%, #000 88%, transparent 100%);
+}
+
+.auth-pane--particle > .auth-workflow,
+.auth-pane--particle > .auth-footer {
+  position: relative;
+  z-index: 1;
+}
+
+.auth-pane--particle > .auth-brand {
+  z-index: 2;
+}
+
+@media (max-width: 820px) {
+  .auth-pane--particle > .auth-particle-canvas {
+    height: min(62dvh, 520px);
+    min-height: 360px;
+    opacity: .58;
+    mask-image: linear-gradient(to bottom, transparent 0%, #000 16%, #000 88%, transparent 100%);
+  }
+}
+
+@media (max-width: 520px) {
+  .auth-pane--particle > .auth-particle-canvas {
+    opacity: .45;
+  }
+}

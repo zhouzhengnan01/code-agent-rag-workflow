@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light">
   <title>登录 · Codezzn</title><link rel="icon" type="image/svg+xml" href="/assets/codezzn-mark.svg?v=1">
-  <link rel="stylesheet" href="/assets/auth.css?v=0.7.0"><link rel="stylesheet" href="/assets/auth-promo.css?v=0.6.1"><link rel="stylesheet" href="/assets/help-widget.css?v=1">
+  <link rel="stylesheet" href="/assets/auth.css?v=0.7.0"><link rel="stylesheet" href="/assets/auth-promo.css?v=0.6.1"><link rel="stylesheet" href="/assets/auth-particle.css?v=3"><link rel="stylesheet" href="/assets/help-widget.css?v=1">
 </head>
 <body data-auth-mode="login">
   <main class="auth-split">
-    <section class="auth-pane" aria-labelledby="authTitle">
+    <section class="auth-pane auth-pane--particle" aria-labelledby="authTitle">
+      <canvas class="auth-particle-canvas" id="authParticleField" aria-hidden="true"></canvas>
       <a class="auth-brand" href="/" aria-label="Codezzn 首页"><span class="auth-brand-mark" aria-hidden="true"><img src="/assets/codezzn-mark.svg?v=1" alt=""></span><span class="auth-brand-word">codezzn</span></a>
       <div class="auth-workflow"><div class="auth-workflow-inner">
         <h1 id="authTitle">Sign In or Sign Up</h1><div class="current-session" id="currentSession" hidden></div>
@@ -36,6 +37,6 @@
     </section>
     <aside id="authPromo" class="auth-promo-mount" aria-label="Codezzn 产品展示"></aside>
   </main>
-  <script src="/assets/auth-promo.js?v=0.6.1"></script><script src="/assets/auth.js?v=0.7.0"></script><script src="/assets/help-widget.js?v=1" defer></script>
+  <script src="/assets/auth-promo.js?v=0.6.1"></script><script src="/assets/auth-particle.js?v=3"></script><script src="/assets/auth.js?v=0.7.0"></script><script src="/assets/help-widget.js?v=1" defer></script>
 </body>
 </html>
