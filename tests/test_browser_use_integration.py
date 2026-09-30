@@ -264,11 +264,13 @@ def test_help_widget_open_chat_and_close():
         manager = BrowserManager()
         try:
             page = await manager.page("help-widget")
+            await page.route("**/api/auth/me", lambda route: route.fulfill(json={"authenticated": True, "user": {"id": "usr_test"}}))
             await page.route("**/assets/codezzn-mark.svg*", lambda route: route.fulfill(
                 path=str(root / "web" / "codezzn-mark.svg"), content_type="image/svg+xml"))
             await page.set_content("<!doctype html><html><head><base href='http://codezzn.test/'></head><body><main>Codezzn</main></body></html>")
             await page.add_style_tag(path=str(root / "web" / "help-widget.css"))
             await page.add_script_tag(path=str(root / "web" / "help-widget.js"))
+            await page.locator(".cz-help-toggle").wait_for(state="visible")
             panel = page.locator(".cz-help-panel")
             assert await panel.is_hidden()
             await page.locator(".cz-help-toggle").click()

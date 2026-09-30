@@ -20,7 +20,7 @@ def test_public_landing_and_assets_do_not_bypass_workbench_auth(tmp_path, monkey
         assert home.status_code == 200
         assert "Browser Use Agents" in home.text
         assert "/login?next=/workbench.html" in home.text
-        assert "/assets/help-widget.js?v=1" in home.text
+        assert "help-widget" not in home.text
 
         hero = client.get("/site-assets/agents-hero-750.webp")
         assert hero.status_code == 200
@@ -40,8 +40,8 @@ def test_public_landing_and_assets_do_not_bypass_workbench_auth(tmp_path, monkey
 
         login = client.get("/login")
         assert login.status_code == 200
-        assert "/assets/help-widget.js?v=1" in login.text
-        assert "/assets/help-widget.css?v=1" in client.get("/register").text
+        assert "help-widget" not in login.text
+        assert "help-widget" not in client.get("/register").text
 
         faq = client.get("/api/help/faq", params={"q": "项目"})
         assert faq.status_code == 200
@@ -49,8 +49,7 @@ def test_public_landing_and_assets_do_not_bypass_workbench_auth(tmp_path, monkey
         colloquial = client.get("/api/help/faq", params={"q": "怎么保存文件"})
         assert colloquial.json()["data"][0]["id"] == "projects-and-files"
         answer = client.post("/api/help/ask", json={"question": "如何让智能体把代码保存成项目文件？"})
-        assert answer.status_code == 200
-        assert answer.json()["source"] == "faq"
+        assert answer.status_code == 401
 
 
 def test_login_particle_animation_is_decorative_and_assets_are_served(tmp_path, monkeypatch):
@@ -79,3 +78,10 @@ def test_login_particle_animation_is_decorative_and_assets_are_served(tmp_path, 
         shaders = source.split("  var COMMON =", 1)[1].split("  function compile(", 1)[0]
         digest = hashlib.sha256(("  var COMMON =" + shaders).encode()).hexdigest()
         assert digest == "a9b284b97e6fc342fc086f686607a45285011cfafecb7effb8a05c708b8f46a3"
+
+
+def test_help_ask_requires_session_even_when_workbench_auth_is_optional(tmp_path, monkeypatch):
+    with _client(tmp_path, monkeypatch) as client:
+        monkeypatch.setenv("CODEZZN_AUTH_REQUIRED", "false")
+        response = client.post("/api/help/ask", json={"question": "我有哪些项目？"})
+        assert response.status_code == 401

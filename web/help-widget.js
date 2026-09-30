@@ -1,5 +1,17 @@
-(() => {
+(async () => {
   'use strict';
+
+  // Login/marketing pages never mount the assistant, even with a session cookie.
+  if (['/', '/login', '/register'].includes(location.pathname.replace(/\/$/, '') || '/')) return;
+  const authenticated = async () => {
+    try {
+      const response = await fetch('/api/auth/me', { credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) return false;
+      const result = await response.json();
+      return result.authenticated === true && Boolean(result.user?.id);
+    } catch (_) { return false; }
+  };
+  if (!await authenticated()) return;
 
   const root = document.createElement('div');
   root.className = 'cz-help-widget';
@@ -37,6 +49,7 @@
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 18V5m0 0L6.5 10.5M12 5l5.5 5.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>`;
   document.body.append(root);
+  window.addEventListener('pageshow', async () => { if (!await authenticated()) root.remove(); });
 
   const panel = root.querySelector('.cz-help-panel');
   const toggle = root.querySelector('.cz-help-toggle');
@@ -109,11 +122,12 @@
         method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question }),
       });
+      if (response.status === 401) { root.remove(); return; }
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.detail || `HTTP ${response.status}`);
       placeholder.textContent = payload.answer || '暂时没有找到答案。';
     } catch (error) { placeholder.textContent = error.message || '请求失败，请稍后重试。'; }
-    finally { send.disabled = false; send.textContent = '↑'; input.focus(); messages.scrollTop = messages.scrollHeight; }
+    finally { send.disabled = false; send.textContent = '↑'; if (root.isConnected) input.focus(); messages.scrollTop = messages.scrollHeight; }
   });
   loadFaq('');
 })();

@@ -618,6 +618,9 @@ textarea.control-input { min-height: 126px; resize: vertical; line-height: 1.6; 
 .session-item:hover .session-more, .session-item.is-active .session-more, .session-more:focus-visible, .session-more[aria-expanded="true"] { opacity: 1; }
 .session-more:hover { background: var(--surface-hover); color: var(--text); }
 .session-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 620; }
+.session-rename-input { width: 100%; min-width: 0; padding: 3px 5px; border: 1px solid var(--accent); border-radius: 5px; background: var(--surface); color: var(--text); font: inherit; font-weight: 620; outline: none; box-sizing: border-box; }
+.session-rename-input:focus { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent); }
+.session-rename-input[readonly] { opacity: .65; }
 .session-state { color: var(--muted); font: 9px/1.2 var(--font-mono); }
 .session-menu { position: fixed; z-index: 50; width: 148px; border: 1px solid var(--line-strong); border-radius: var(--radius-control); background: var(--surface-raised); box-shadow: var(--shadow); display: grid; gap: 2px; padding: 5px; }
 .session-menu[hidden] { display: none; }
@@ -676,6 +679,34 @@ textarea.control-input { min-height: 126px; resize: vertical; line-height: 1.6; 
 .message-turn.user .message-copy { width: fit-content; max-width: 100%; border: 1px solid rgb(120 153 232 / 22%); border-radius: var(--radius-panel); background: rgb(120 153 232 / 11%); padding: 10px 14px; color: var(--text); text-align: left; }
 .inline-code { border-radius: var(--radius-small); background: var(--surface-raised); color: var(--accent); padding: 2px 5px; font: 11px/1.4 var(--font-mono); }
 .message-code { overflow: auto; margin: 13px 0; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); padding: 14px; font: 11px/1.65 var(--font-mono); }
+.message-copy > :first-child { margin-top: 0; }
+.message-copy > :last-child { margin-bottom: 0; }
+.message-copy p { margin: 0 0 12px; }
+.message-copy h1, .message-copy h2, .message-copy h3, .message-copy h4, .message-copy h5, .message-copy h6 { color: var(--text); line-height: 1.4; margin: 22px 0 10px; }
+.message-copy h1 { font-size: 24px; }
+.message-copy h2 { font-size: 21px; }
+.message-copy h3 { font-size: 18px; }
+.message-copy h4, .message-copy h5, .message-copy h6 { font-size: 15px; }
+.message-copy ul, .message-copy ol { padding-left: 24px; margin: 10px 0 14px; }
+.message-copy li { margin: 4px 0; }
+.message-copy li > p { margin: 4px 0; }
+.message-copy blockquote { margin: 14px 0; border-left: 3px solid var(--accent); padding: 4px 14px; color: var(--muted); background: var(--surface); }
+.message-copy a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.message-copy hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+.markdown-code-block { min-width: 0; margin: 14px 0; border: 1px solid var(--line); border-radius: var(--radius-control); overflow: hidden; background: var(--surface); }
+.markdown-code-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 7px 12px; border-bottom: 1px solid var(--line); color: var(--muted); font: 11px/1.5 var(--font-mono); }
+.markdown-code-copy { border: 0; border-radius: 5px; padding: 4px 8px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; }
+.markdown-code-copy:hover, .markdown-code-copy:focus-visible { background: var(--surface-hover); color: var(--text); }
+.markdown-code-block .message-code { margin: 0; border: 0; border-radius: 0; white-space: pre; overflow-wrap: normal; font-size: 12px; }
+.markdown-table-scroll { max-width: 100%; overflow-x: auto; margin: 14px 0; }
+.message-copy table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.message-copy th, .message-copy td { border: 1px solid var(--line); padding: 8px 12px; }
+.message-copy th { background: var(--surface); font-weight: 600; }
+.thread-delete-dialog { width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 32px); box-sizing: border-box; padding: 24px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel, var(--surface)); color: var(--text); box-shadow: 0 20px 70px rgb(0 0 0 / 20%); }
+.thread-delete-dialog::backdrop { background: rgb(15 18 30 / 35%); }
+.thread-delete-dialog h2 { margin: 0 0 12px; font-size: 18px; overflow-wrap: anywhere; }
+.thread-delete-dialog p { color: var(--muted); font-size: 13px; line-height: 1.7; margin: 0; }
+.thread-delete-dialog footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 24px; }
 .tool-call { width: fit-content; display: flex; gap: 8px; margin-top: 11px; border-radius: var(--radius-small); background: rgb(215 177 103 / 8%); color: var(--warning); padding: 6px 8px; font: 9px/1.2 var(--font-mono); }
 .approval-turn .turn-avatar { background: rgb(215 177 103 / 13%); color: var(--warning); }
 .approval-card { max-width: 700px; margin-top: 5px; border: 1px solid rgb(215 177 103 / 30%); border-radius: var(--radius-panel); background: rgb(215 177 103 / 6%); padding: 15px; }

@@ -204,7 +204,7 @@ app.mount(
 )
 
 
-PUBLIC_PATHS = {"/", "/healthz", "/login", "/register", "/api/help/faq", "/api/help/ask"}
+PUBLIC_PATHS = {"/", "/healthz", "/login", "/register", "/api/help/faq"}
 
 
 @app.middleware("http")
@@ -265,17 +265,14 @@ def help_faq(q: str = ""):
 
 @app.post("/api/help/ask")
 async def help_ask(request: Request, payload: dict = Body(...)):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(401, "请先登录后使用帮助助手")
     question = str(payload.get("question") or "").strip()
     if not question or len(question) > 2000:
         raise HTTPException(400, "问题长度须为 1–2000 个字符")
     matches = search_faq(question, 4)
-    # Public/login pages remain useful without exposing a provider or spending
-    # model tokens. Authenticated workbench sessions may ask their tenant's
-    # configured model, but the help endpoint never exposes agent tools.
-    user = getattr(request.state, "user", None)
-    if not user:
-        answer = matches[0]["answer"] if matches else "暂时没有匹配到帮助条目。登录工作台后，可以向 Codezzn 助手询问更多产品使用问题。"
-        return {"answer": answer, "source": "faq", "matches": matches}
+    # Only authenticated tenant sessions may use the assistant.
     if asks_for_own_projects(question):
         projects = list_projects()
         if projects:

@@ -107,7 +107,12 @@ function modal(title, body, onSave, wide = false, saveLabel = '保存') {
   window.setTimeout(() => $('#modalRoot input, #modalRoot select, #modalRoot textarea, #modalRoot button')?.focus(), 0);
 }
 
-function closeModal() { $('#modalRoot').innerHTML = ''; }
+function closeModal() {
+  const dialog = $('#modalRoot dialog');
+  if (dialog?.dataset.busy === 'true') return;
+  if (dialog?.open) dialog.close();
+  $('#modalRoot').innerHTML = '';
+}
 
 function field(label, name, value = '', type = 'text', full = false, help = '') {
   const id = `field_${name}`;
@@ -933,23 +938,6 @@ function runWorkflow(id) {
   }, false, '运行');
 }
 
-function richText(value, artifacts = []) {
-  const blocks = [];
-  let text = esc(value).replace(/```([\s\S]*?)```/g, (_, code) => {
-    const token = `CODEBLOCK${blocks.length}TOKEN`;
-    blocks.push(`<pre class="message-code"><code>${code.trim()}</code></pre>`);
-    return token;
-  });
-  text = text.replace(/`([^`\n]+)`/g, (_, label) => {
-    const file = artifacts.find(item => item.path === label || item.path?.split('/').at(-1) === label);
-    return file ? `<button type="button" class="file-reference-chip" data-project-id="${esc(file.project_id)}" data-artifact-id="${esc(file.id)}" onclick="openChatArtifact(this)" aria-label="在 Files 中打开 ${esc(file.path)}">▤ ${label}</button>` : `<code class="inline-code">${label}</code>`;
-  });
-  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  text = text.replace(/\n/g, '<br>');
-  blocks.forEach((block, index) => { text = text.replace(`CODEBLOCK${index}TOKEN`, block); });
-  return text;
-}
-
 function threadStatus(status) {
   return ({ idle: '就绪', running: '运行中', waiting_for_approval: '等待审批', error: '出错' })[status] || status || '就绪';
 }
@@ -1032,24 +1020,84 @@ function getManagedThread(threadId) {
   return state.chatThreads.find(thread => thread.id === threadId);
 }
 
+let activeThreadRename = null;
+
 function renameThread(threadId) {
   closeSessionMenus();
+  if (activeThreadRename?.saving) return toast('正在保存会话名称，请稍后', true);
+  activeThreadRename?.cancel();
   const thread = getManagedThread(threadId);
   if (!thread) return;
-  modal('重命名会话', `<form id="threadRenameForm" class="form-layout">${field('会话名称', 'name', thread.name, 'text', true, '最多 80 个字符。')}</form>`, async () => {
-    const button = $('#modalSave');
-    const name = formData($('#threadRenameForm')).name.trim();
-    if (!name) { toast('会话名称不能为空', true); return; }
-    button.disabled = true;
+  const row = $$('.session-item').find(item => item.dataset.threadId === threadId);
+  const original = row?.querySelector('.session-open');
+  if (!original) return;
+  const editor = document.createElement('div');
+  editor.className = 'session-open session-rename';
+  const input = document.createElement('input');
+  input.className = 'session-rename-input';
+  input.type = 'text';
+  input.value = thread.name;
+  input.maxLength = 80;
+  input.setAttribute('aria-label', '会话名称');
+  input.setAttribute('aria-describedby', 'sessionRenameHint');
+  const hint = document.createElement('span');
+  hint.id = 'sessionRenameHint';
+  hint.className = 'session-state';
+  hint.textContent = 'Enter 保存 · Esc 取消';
+  editor.append(input, hint);
+  original.replaceWith(editor);
+  let finished = false;
+  let saving = false;
+  const control = { get saving() { return saving; }, cancel: () => { if (!saving) finish(); } };
+  activeThreadRename = control;
+  function finish(name) {
+    if (finished) return;
+    finished = true;
+    if (name) {
+      thread.name = name;
+      original.querySelector('.session-name').textContent = name;
+      original.setAttribute('aria-label', `打开会话 ${name}`);
+      row.querySelector('.session-more')?.setAttribute('aria-label', `管理会话 ${name}`);
+      if (state.thread === threadId) {
+        const title = $('.conversation-title strong');
+        if (title) title.textContent = name;
+      }
+    }
+    editor.replaceWith(original);
+    if (activeThreadRename === control) activeThreadRename = null;
+  }
+  async function save() {
+    if (finished || saving || input.composing) return;
+    const name = input.value.trim();
+    if (!name) { toast('会话名称不能为空', true); finish(); return; }
+    if (name === thread.name) { finish(); return; }
+    saving = true;
+    input.readOnly = true;
+    hint.textContent = '保存中…';
     try {
-      await api(`/api/threads/${threadId}`, { method: 'PATCH', body: JSON.stringify({ name }) });
-      closeModal();
+      await api(`/api/threads/${encodeURIComponent(threadId)}`, { method: 'PATCH', body: JSON.stringify({ name }) });
+      finish(name);
       toast('会话已重命名');
-      await loadPage();
-    } catch (error) { button.disabled = false; toast(error.message, true); }
-  }, false, '保存名称');
-  const input = $('#field_name');
-  window.setTimeout(() => { input?.focus(); input?.select(); }, 0);
+    } catch (error) {
+      saving = false;
+      input.readOnly = false;
+      hint.textContent = '保存失败 · Enter 重试';
+      toast(error.message, true);
+      if (input.isConnected) input.focus();
+    }
+  }
+  input.addEventListener('compositionstart', () => { input.composing = true; });
+  input.addEventListener('compositionend', () => { input.composing = false; });
+  input.addEventListener('keydown', event => {
+    event.stopPropagation();
+    if (event.isComposing || input.composing || event.keyCode === 229) return;
+    if (event.key === 'Enter') { event.preventDefault(); save(); }
+    if (event.key === 'Escape') { event.preventDefault(); control.cancel(); original.focus(); }
+  });
+  input.addEventListener('blur', save);
+  editor.addEventListener('click', event => event.stopPropagation());
+  input.focus();
+  input.select();
 }
 
 async function archiveThread(threadId, archived) {
@@ -1066,22 +1114,37 @@ function deleteThread(threadId) {
   closeSessionMenus();
   const thread = getManagedThread(threadId);
   if (!thread) return;
-  modal('删除会话', `
-    <div class="delete-confirmation">
-      <span class="delete-confirmation-mark" aria-hidden="true">!</span>
-      <div><h3>永久删除“${esc(thread.name)}”？</h3><p>此会话中的全部消息和运行记录都会被删除，且无法恢复。</p></div>
-    </div>`, async () => {
-    const button = $('#modalSave');
+  const previousFocus = document.activeElement;
+  $('#modalRoot').innerHTML = `<dialog class="thread-delete-dialog" aria-labelledby="deleteThreadTitle" aria-describedby="deleteThreadDescription">
+    <h2 id="deleteThreadTitle">删除会话“${esc(thread.name)}”？</h2>
+    <p id="deleteThreadDescription">此会话中的全部消息和运行记录都会被永久删除，且无法恢复。</p>
+    <footer><button type="button" class="button button-quiet" id="cancelThreadDelete" autofocus>取消</button><button type="button" class="button button-danger-solid" id="confirmThreadDelete">永久删除</button></footer>
+  </dialog>`;
+  const dialog = $('#modalRoot dialog');
+  const cancel = $('#cancelThreadDelete');
+  const button = $('#confirmThreadDelete');
+  cancel.onclick = closeModal;
+  dialog.addEventListener('cancel', event => { event.preventDefault(); closeModal(); });
+  dialog.addEventListener('close', () => { if (previousFocus?.isConnected) previousFocus.focus(); });
+  button.onclick = async () => {
+    if (dialog.dataset.busy === 'true') return;
+    dialog.dataset.busy = 'true';
     button.disabled = true;
+    cancel.disabled = true;
+    button.textContent = '删除中…';
     try {
-      await api(`/api/threads/${threadId}`, { method: 'DELETE' });
+      await api(`/api/threads/${encodeURIComponent(threadId)}`, { method: 'DELETE' });
       if (state.thread === threadId) state.thread = null;
+      dialog.dataset.busy = 'false';
       closeModal();
       toast('会话已删除');
       await loadPage();
-    } catch (error) { button.disabled = false; toast(error.message, true); }
-  }, false, '永久删除');
-  $('#modalSave')?.classList.add('button-danger-solid');
+    } catch (error) {
+      dialog.dataset.busy = 'false'; button.disabled = false; cancel.disabled = false;
+      button.textContent = '永久删除'; toast(error.message, true);
+    }
+  };
+  dialog.showModal();
 }
 
 function projectName(projectId) {
@@ -1430,7 +1493,7 @@ async function chat() {
         </header>
         <div class="session-list">
           ${threads.length ? threads.map(thread => `
-            <div class="session-item ${state.thread === thread.id ? 'is-active' : ''}">
+            <div class="session-item ${state.thread === thread.id ? 'is-active' : ''}" data-thread-id="${esc(thread.id)}">
               <button class="session-open" type="button" onclick="selectThread('${thread.id}')" aria-label="打开会话 ${esc(thread.name)}">
                 <span class="session-name">${esc(thread.name)}</span><span class="session-state">${esc(threadStatus(thread.status))}</span>
               </button>
