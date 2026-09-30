@@ -2,11 +2,8 @@
    Ping-pong position/velocity textures, additive point pass, bloom, composite.
    Driven by focus and submit events on the widget. */
 (function () {
-  var host = document.getElementById('authParticleField');
-  var pane = document.querySelector('.auth-pane--particle');
-  if (!host || !pane) return;
-  var promoMount = document.getElementById('authPromo');
-  var inView = true, sharedPaused = false;
+  var host = document.getElementById('orb');
+  if (!host) return;
 
   /* No orb on phones. Nothing is built until we are above the breakpoint, so
      a phone pays nothing for context creation, shader compilation or the
@@ -26,8 +23,7 @@
   }
 
   var SIDE = 181, COUNT = SIDE * SIDE;
-  var motionPreference = matchMedia('(prefers-reduced-motion: reduce)');
-  var reduced = motionPreference.matches;
+  var reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   var COMMON = [
     'precision highp float;',
@@ -266,8 +262,6 @@
     var p = gl.createProgram();
     gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
     gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
-    gl.bindAttribLocation(p, 0, 'aP');
-    gl.bindAttribLocation(p, 0, 'aIndex');
     gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
     var u = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
@@ -394,32 +388,30 @@
   var offX = -0.42, offY = 0, scale = 1, exposure = 1.32;
   var sceneTex, sceneFbo, blurTexA, blurFboA, blurTexB, blurFboB;
 
-  /* Codezzn layout adapter. Simulation/shaders below remain source-identical.
-     Preserve the accepted center and 1.5x diameter in CSS pixels. */
-  var layoutSignature = '';
+  /* Orb placement per breakpoint; it lives in the fixed atmosphere layer. */
+  var heroEl = document.querySelector('.hero');
   function layout(cssWidth, cssHeight) {
-    var box = host.getBoundingClientRect(), panel = pane.getBoundingClientRect();
-    var form = pane.querySelector('.auth-workflow-inner').getBoundingClientRect();
-    var signature = [cssWidth, cssHeight, panel.left, panel.top, panel.width, panel.height,
-      form.left, form.top, form.width, form.height, window.innerWidth, quality].join(',');
-    if (signature === layoutSignature) return;
-    layoutSignature = signature;
-    var scrim = pane.querySelector('.auth-particle-scrim');
-    scrim.style.left = (form.left - panel.left - form.width * 0.34) + 'px';
-    scrim.style.top = (form.top - panel.top - 230) + 'px';
-    scrim.style.width = (form.width * 1.6) + 'px';
-    scrim.style.height = (form.height + 480) + 'px';
-    var cx = panel.left + panel.width * 0.5 - box.left;
-    var cy = panel.top + panel.height * 0.5 - box.top;
-    offX = (cx / cssWidth) * 2 - 1;
-    offY = 1 - (cy / cssHeight) * 2;
-    var radius = Math.min(panel.width * 0.38, cssHeight * 0.31, 220) * 1.5;
-    scale = radius * 2 * 12.2 * Math.tan(0.3665) / (3.36 * cssHeight);
-    exposure = 0.74;
-    baseCount = window.innerWidth > 1100 ? COUNT
-      : window.innerWidth > 760 ? Math.floor(COUNT * 0.72)
+    /* Derived from the headline's box: the layout is width-capped and centred,
+       so a fixed offset would only be correct at one width. */
+    if (cssWidth > 1100) {
+      var cx = cssWidth * 0.26, cy = cssHeight * 0.5;
+      if (heroEl) {
+        var b = heroEl.getBoundingClientRect();
+        cx = b.left + b.width * 0.5;
+        cy = b.top + b.height * 0.5;
+      }
+      offX = (cx / cssWidth) * 2 - 1;
+      offY = 1 - (cy / cssHeight) * 2;
+      scale = 0.78; exposure = 0.74;
+    } else if (cssWidth > 760) {
+      offX = 0; offY = 0.30; scale = 0.54; exposure = 0.68;
+    } else {
+      /* Large and cropped by the top edge at this size. */
+      offX = 0; offY = 0.78; scale = 0.62; exposure = 0.92;
+    }
+    baseCount = cssWidth > 1100 ? COUNT
+      : cssWidth > 760 ? Math.floor(COUNT * 0.72)
       : Math.floor(COUNT * 0.5);
-    host.dataset.orbRadius = radius.toFixed(2);
     applyQuality();
   }
 
@@ -429,9 +421,9 @@
     dpr = Math.min(window.devicePixelRatio || 1, cap);
     var w = Math.max(1, Math.round(box.width * dpr));
     var h = Math.max(1, Math.round(box.height * dpr));
-    layout(box.width, box.height);
     if (w === W && h === H) return;
     W = w; H = h;
+    layout(box.width, box.height);
     host.width = W; host.height = H;
     BW = Math.max(1, W >> 1); BH = Math.max(1, H >> 1);
     if (sceneTex) {
@@ -600,8 +592,6 @@
   function applyQuality() {
     dprCap = quality >= 1 ? 1.0 : 0;
     drawCount = quality >= 2 ? Math.floor(baseCount * 0.55) : baseCount;
-    host.dataset.orbParticles = String(drawCount);
-    host.dataset.orbQuality = String(quality);
   }
   function degrade() {
     slowFrames = 0;
@@ -635,14 +625,12 @@
     draw(clock);
   }
   function start() {
-    if (running || reduced || lost || !built || document.hidden || !inView || sharedPaused || window.innerWidth < ORB_MIN_WIDTH) return;
+    if (running || reduced || lost || !built) return;
     running = true; last = 0;
-    host.dataset.orbStatus = 'running';
     if (!raf) raf = requestAnimationFrame(frame);
   }
   function stop() {
     running = false;
-    host.dataset.orbStatus = lost ? 'context-lost' : 'paused';
     if (raf) { cancelAnimationFrame(raf); raf = 0; }
   }
 
@@ -653,37 +641,29 @@
   }, false);
   host.addEventListener('webglcontextrestored', function () {
     lost = false;
-    built = buildGL();
-    warmed = false; pHas = false; pVel = [0, 0, 0];
-    layoutSignature = '';
-    ptrOn = smOn = 0; last = clock = 0;
-    if (built) { W = 0; boot(); }
+    if (buildGL()) { W = 0; resize(); start(); }
   }, false);
 
   var built = false, warmed = false;
 
   function boot() {
-    if (lost) { stop(); return; }
-    if (document.hidden || !inView || sharedPaused) { stop(); return; }
     if (window.innerWidth < ORB_MIN_WIDTH) {
       stop();
       host.style.display = 'none';
       return;
     }
     host.style.display = '';
-    if (!context()) { host.dataset.orbStatus = 'unsupported'; return; }
+    if (!context()) return;
     if (!built) {
-      if (!buildGL()) { host.style.display = 'none'; host.dataset.orbStatus = 'shader-error'; return; }
+      if (!buildGL()) { host.style.display = 'none'; return; }
       built = true;
     }
     resize();
     if (reduced) {
       if (!warmed) {
         /* Warm up to a settled state, then hold one frame. */
-        if (clock === 0) {
-          for (var w = 0; w < 220; w++) step(0.016, w * 0.016);
-          clock = 3.5;
-        }
+        for (var w = 0; w < 220; w++) step(0.016, w * 0.016);
+        clock = 3.5;
         warmed = true;
       }
       draw(clock);
@@ -701,61 +681,33 @@
   /* Auth0 renders the widget after this script runs, so listen on the
      document rather than binding to the inputs. */
   document.addEventListener('keydown', function (e) {
-    if (!reduced && e.target.closest && e.target.closest('.auth-workflow')) {
+    if (!reduced && e.target.closest && e.target.closest('.widget-frame')) {
       voice = Math.min(0.5, voice + 0.16);
     }
   }, true);
 
   document.addEventListener('focusin', function (e) {
-    if (e.target.closest && e.target.closest('.auth-workflow')) tightenTarget = 1;
+    if (e.target.closest && e.target.closest('.widget-frame')) tightenTarget = 1;
   });
   document.addEventListener('focusout', function () { tightenTarget = 0; });
-  /* Map input to the measured canvas, not the containing form. */
-  window.addEventListener('pointermove', function (e) {
-    if (e.pointerType === 'touch' || reduced || sharedPaused) return;
-    var box = host.getBoundingClientRect(), panel = pane.getBoundingClientRect();
-    ptrOn = e.clientX >= panel.left && e.clientX <= panel.right &&
-      e.clientY >= panel.top && e.clientY <= panel.bottom ? 1 : 0;
-    ptrNdcX = ((e.clientX - box.left) / box.width) * 2 - 1;
-    ptrNdcY = 1 - ((e.clientY - box.top) / box.height) * 2;
-  }, { passive: true });
-  window.addEventListener('pointerleave', function () { ptrOn = 0; }, { passive: true });
-  window.addEventListener('blur', function () { ptrOn = 0; });
+  /* No cursor reaction under reduced motion. */
+  if (!reduced) {
+    window.addEventListener('pointermove', function (e) {
+      if (e.pointerType === 'touch') return;
+      ptrNdcX = (e.clientX / window.innerWidth) * 2 - 1;
+      ptrNdcY = 1 - (e.clientY / window.innerHeight) * 2;
+      ptrOn = 1;
+    }, { passive: true });
+    window.addEventListener('pointerleave', function () { ptrOn = 0; }, { passive: true });
+    window.addEventListener('blur', function () { ptrOn = 0; });
+  }
 
-  document.addEventListener('submit', function (e) {
-    if (!reduced && e.target.closest('.auth-workflow')) pulseAt = clock;
-  }, true);
+  document.addEventListener('submit', function () { pulseAt = clock; }, true);
   document.addEventListener('click', function (e) {
     var t = e.target;
-    if (t.closest && t.closest('.auth-workflow') &&
-      !reduced && (t.tagName === 'BUTTON' || t.closest('button, .provider-button') || t.type === 'submit')) {
+    if (t.closest && t.closest('.widget-frame') &&
+      (t.tagName === 'BUTTON' || t.closest('button') || t.type === 'submit')) {
       pulseAt = clock;
     }
   }, true);
-
-  /* Codezzn lifecycle: share its existing motion toggle, keep login state intact. */
-  function syncMotion() {
-    reduced = motionPreference.matches;
-    sharedPaused = Boolean(promoMount && promoMount.querySelector('.auth-promo.is-paused'));
-    pane.classList.toggle('is-particle-paused', reduced || sharedPaused);
-    if (reduced) ptrOn = smOn = 0;
-    stop();
-    boot();
-  }
-  motionPreference.addEventListener('change', syncMotion);
-  if (promoMount) {
-    new MutationObserver(syncMotion).observe(promoMount, {
-      childList: true, subtree: true, attributes: true, attributeFilter: ['class']
-    });
-  }
-  if (typeof ResizeObserver !== 'undefined') new ResizeObserver(boot).observe(pane);
-  if (typeof IntersectionObserver !== 'undefined') {
-    new IntersectionObserver(function (entries) {
-      inView = entries.some(function (entry) { return entry.isIntersecting; });
-      if (inView) boot(); else stop();
-    }).observe(pane);
-  }
-  window.addEventListener('pagehide', stop);
-  window.addEventListener('pageshow', boot);
-  syncMotion();
 })();

@@ -1,3 +1,5 @@
+import hashlib
+
 from fastapi.testclient import TestClient
 
 from backend.app import db, main
@@ -57,8 +59,9 @@ def test_login_particle_animation_is_decorative_and_assets_are_served(tmp_path, 
         assert login.status_code == 200
         assert 'class="auth-pane auth-pane--particle"' in login.text
         assert 'id="authParticleField" aria-hidden="true"' in login.text
-        assert "/assets/auth-particle.css?v=3" in login.text
-        assert "/assets/auth-particle.js?v=3" in login.text
+        assert "/assets/auth-particle.css?v=8" in login.text
+        assert "/assets/auth-particle.js?v=8" in login.text
+        assert client.get("/assets/auth-particle-grain.css?v=1").status_code == 200
 
         stylesheet = client.get("/assets/auth-particle.css")
         assert stylesheet.status_code == 200
@@ -70,3 +73,9 @@ def test_login_particle_animation_is_decorative_and_assets_are_served(tmp_path, 
         assert animation.status_code == 200
         assert "prefers-reduced-motion: reduce" in animation.text
         assert "visibilitychange" in animation.text
+        # Reference captured from the live PolyAI page: keep simulation,
+        # particle/light shading, bloom and compositing source-identical.
+        source = animation.text.replace("\r\n", "\n")
+        shaders = source.split("  var COMMON =", 1)[1].split("  function compile(", 1)[0]
+        digest = hashlib.sha256(("  var COMMON =" + shaders).encode()).hexdigest()
+        assert digest == "a9b284b97e6fc342fc086f686607a45285011cfafecb7effb8a05c708b8f46a3"
