@@ -10,7 +10,7 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 - MCP：stdio 与 Streamable HTTP JSON-RPC transport，支持版本/能力协商、Session ID、JSON/SSE、工具、资源/资源模板、提示词、补全、订阅、日志级别、分页，以及 stdio roots 反向请求
 - RAG 知识库：可选择本地 SQLite + Milvus 混合检索，或通过独立 RAGFlow 服务使用复杂文档解析、全文/向量混合召回、重排与来源引用；旧知识库保持本地后端，不会被默认配置自动迁移
 - 工作流：input、prompt、agent、knowledge、mcp、condition、parallel、output 节点；并行就绪队列、条件边、节点超时/重试、检查点恢复、后台运行和节点 trace
-- Workbench：仪表盘、对话、角色/智能体团队、任务队列、长期记忆、各资源管理、工作流 JSON 设计器、设置
+- Workbench：仪表盘、对话、角色/智能体团队、任务队列、长期记忆、各资源管理、React Flow 工作流画布（节点配置、JSON 导入导出、版本历史、运行调试）、设置
 - 工具执行：知识检索、代码搜索、AST/符号/引用/调用图/依赖图、LSP 3.18、目录读取、原子文件读写、测试、完整 Git 远端/merge 工作流、GitHub PR/CI/Review、Playwright 浏览器/DOM/截图；写操作受沙箱、审批与工具策略共同控制
 - 后台任务：SQLite 持久队列、并发 worker、失败退避重试、取消、事件历史、进程重启后恢复未完成任务；智能体和工作流均可后台执行
 - 多智能体：可配置团队、协调智能体、成员白名单、并发和深度限制；主智能体通过 `delegate_task` 并行委派并用 `task_status` 汇总
@@ -22,6 +22,12 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 - 认证与部署：本地账号、HttpOnly 会话、GitHub OAuth、Dockerfile、Compose healthcheck、持久化数据卷和可选 API 管理密钥
 
 ## 启动
+
+工作流画布的重新部署、入门 / 条件分支 / 知识库问答测试步骤见 [工作流画布使用说明](docs/workflow-canvas.md)。Docker 默认同时构建前端与后端；不能拉取 Node 镜像时可先用本机 Node 编译并选择 `CODEZZN_BUILD_TARGET=prebuilt`。
+
+智能体问答、模型检索决策、两条分支的真实 Agent 调用，以及旧演示流程升级步骤见 [智能体工作流说明](docs/workflow-agent-routing.md)。
+
+本地知识库批量上传、后台文档处理、失败重试与片段预览见 [知识库文档处理说明](docs/knowledge-documents.md)。
 
 ```powershell
 cd D:\code-agent-rag-workflow

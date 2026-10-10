@@ -1,0 +1,75 @@
+{
+  "question": "你是谁？",
+  "output": "我是 Codezzn 智能体（Codezzn Assistant）。我的底层模型由阿里云百炼提供（具体为 qwen3.7-plus）。\n\n我致力于准确、务实地为您完成各类任务，包括代码开发、项目管理、工作流执行等。请问有什么我可以帮您的？",
+  "decision": {
+    "matched": false,
+    "reason": "用户询问身份，属于身份类问题，无需检索知识库。",
+    "query": "你是谁？"
+  },
+  "trace": [
+    {
+      "node_id": "input_1",
+      "type": "input",
+      "status": "completed",
+      "agent_name": null,
+      "runtime": null,
+      "elapsed_ms": 0
+    },
+    {
+      "node_id": "router_1",
+      "type": "router",
+      "status": "completed",
+      "agent_name": "Codezzn Assistant",
+      "runtime": {
+        "provider": "阿里云百炼 · 华北2（北京）",
+        "provider_type": "bailian",
+        "model": "qwen3.7-plus"
+      },
+      "elapsed_ms": 5195
+    },
+    {
+      "node_id": "knowledge_1",
+      "type": "knowledge",
+      "status": "skipped",
+      "agent_name": null,
+      "runtime": null,
+      "elapsed_ms": null
+    },
+    {
+      "node_id": "rag_agent",
+      "type": "agent",
+      "status": "skipped",
+      "agent_name": null,
+      "runtime": null,
+      "elapsed_ms": null
+    },
+    {
+      "node_id": "rag_output",
+      "type": "output",
+      "status": "skipped",
+      "agent_name": null,
+      "runtime": null,
+      "elapsed_ms": null
+    },
+    {
+      "node_id": "direct_agent",
+      "type": "agent",
+      "status": "completed",
+      "agent_name": "Codezzn Assistant",
+      "runtime": {
+        "provider": "阿里云百炼 · 华北2（北京）",
+        "provider_type": "bailian",
+        "model": "qwen3.7-plus"
+      },
+      "elapsed_ms": 10317
+    },
+    {
+      "node_id": "direct_output",
+      "type": "output",
+      "status": "completed",
+      "agent_name": null,
+      "runtime": null,
+      "elapsed_ms": 0
+    }
+  ]
+}

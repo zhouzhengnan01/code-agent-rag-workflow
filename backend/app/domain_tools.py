@@ -76,12 +76,16 @@ def _draft_payload(arguments, existing=None):
         "nodes": arguments.get("nodes", current.get("nodes", [])),
         "edges": arguments.get("edges", current.get("edges", [])),
         "max_parallel": arguments.get("max_parallel", current.get("max_parallel", 4)),
+        "canvas": arguments.get("canvas", current.get("canvas", {})),
+        "enabled": arguments.get("enabled", current.get("enabled", True)),
     }
     if not isinstance(definition["nodes"], list) or len(definition["nodes"]) > 100:
         raise ValueError("Workflow nodes 必须是最多 100 个节点的数组")
     if not isinstance(definition["edges"], list) or len(definition["edges"]) > 300:
         raise ValueError("Workflow edges 必须是最多 300 条边的数组")
     validate_workflow(definition)
+    from .workflow_store import prepare_workflow
+    prepare_workflow({"name": name, "description": description, **definition})
     return name, description, definition
 
 
@@ -116,27 +120,43 @@ def get_workflow_draft(draft_id):
         return None
     result = dict(row)
     result["definition"] = json.loads(result["definition"])
+    result["revision"] = _draft_revision(result)
     return result
+
+
+def _draft_revision(draft):
+    value = json.dumps([draft["name"], draft["description"], draft["definition"]], ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def update_workflow_draft(draft_id, arguments):
     draft = get_workflow_draft(draft_id)
     if not draft or draft["status"] != "draft":
         raise ValueError("Workflow 草稿不存在或已处理")
-    name, description, definition = _draft_payload(arguments, {**draft["definition"], "name": draft["name"], "description": draft["description"]})
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute("SELECT * FROM workflow_drafts WHERE id=? AND status='draft'", (draft_id,)).fetchone()
+        if not row:
+            raise ValueError("Workflow 草稿已处理")
+        draft = {**dict(row), "definition": json.loads(row["definition"])}
+        if arguments.get("expected_revision") is not None and arguments["expected_revision"] != _draft_revision(draft):
+            raise ValueError("Workflow 草稿已被其他操作修改，请导出当前编辑后重新加载")
+        name, description, definition = _draft_payload(arguments, {**draft["definition"], "name": draft["name"], "description": draft["description"]})
         db.execute(
             "UPDATE workflow_drafts SET name=?,description=?,definition=?,updated_at=? WHERE id=? AND status='draft'",
             (name, description, json.dumps(definition, ensure_ascii=False), now(), draft_id),
         )
-    return {"draft_id": draft_id, "workflow_id": draft["workflow_id"], "name": name, "definition": definition, "status": "draft"}
+    result = {"draft_id": draft_id, "workflow_id": draft["workflow_id"], "name": name, "description": description, "definition": definition, "status": "draft"}
+    return {**result, "revision": _draft_revision(result)}
 
 
-def save_workflow_draft(draft_id, *, thread_id, turn_id):
+def save_workflow_draft(draft_id, *, thread_id, turn_id, expected_revision=None):
     from .workflows import validate_workflow
     draft = get_workflow_draft(draft_id)
     if not draft or draft["status"] != "draft":
         raise ValueError("Workflow 草稿不存在或已处理")
+    if expected_revision is not None and expected_revision != draft["revision"]:
+        raise ValueError("Workflow 草稿已被其他操作修改，请重新加载")
     validate_workflow(draft["definition"])
     current = resource_get("workflows", draft["workflow_id"]) if draft["workflow_id"] else None
     if draft["workflow_id"] and (not current or current["updated_at"] != draft["base_updated_at"]):
@@ -147,24 +167,26 @@ def save_workflow_draft(draft_id, *, thread_id, turn_id):
             row = db.execute("SELECT name,enabled,data,updated_at FROM resources WHERE id=? AND kind='workflows'", (draft["workflow_id"],)).fetchone()
             if not row or _workflow_fingerprint(row) != draft["base_fingerprint"]:
                 raise ValueError("Workflow 已被其他操作修改；请重新读取后创建新草稿")
-        row = db.execute("SELECT status FROM workflow_drafts WHERE id=?", (draft_id,)).fetchone()
+        row = db.execute("SELECT * FROM workflow_drafts WHERE id=?", (draft_id,)).fetchone()
         if not row or row["status"] != "draft":
             raise ValueError("Workflow 草稿已处理")
+        if _draft_revision({**dict(row), "definition": json.loads(row["definition"])}) != draft["revision"]:
+            raise ValueError("Workflow 草稿已被其他操作修改，请重新加载")
         workflow_id = draft["workflow_id"] or new_id("wor")
         version = int((current or {}).get("version") or 0) + 1
         payload = {"name": draft["name"], "description": draft["description"], **draft["definition"],
-                   "project_id": draft["project_id"], "version": version, "enabled": True}
+                   "project_id": draft["project_id"], "version": version, "enabled": draft["definition"].get("enabled", True)}
         data = {key: value for key, value in payload.items() if key not in {"name", "enabled"}}
         timestamp = now()
         if current:
             db.execute(
-                "UPDATE resources SET name=?,enabled=1,data=?,updated_at=? WHERE id=? AND kind='workflows'",
-                (draft["name"], json.dumps(data, ensure_ascii=False), timestamp, workflow_id),
+                "UPDATE resources SET name=?,enabled=?,data=?,updated_at=? WHERE id=? AND kind='workflows'",
+                (draft["name"], int(bool(payload["enabled"])), json.dumps(data, ensure_ascii=False), timestamp, workflow_id),
             )
         else:
             db.execute(
-                "INSERT INTO resources(id,kind,name,enabled,data,created_at,updated_at) VALUES(?,'workflows',?,1,?,?,?)",
-                (workflow_id, draft["name"], json.dumps(data, ensure_ascii=False), timestamp, timestamp),
+                "INSERT INTO resources(id,kind,name,enabled,data,created_at,updated_at) VALUES(?,'workflows',?,?,?,?,?)",
+                (workflow_id, draft["name"], int(bool(payload["enabled"])), json.dumps(data, ensure_ascii=False), timestamp, timestamp),
             )
         db.execute(
             "INSERT INTO workflow_versions(workflow_id,version,definition,created_at) VALUES(?,?,?,?)",
@@ -191,7 +213,7 @@ def enqueue_workflow_run(workflow_id, input_value, *, thread_id, turn_id):
     workflow = resource_get("workflows", workflow_id)
     if not workflow or not workflow.get("enabled", True):
         raise ValueError("Workflow 不存在或已禁用")
-    validate_workflow(workflow)
+    validate_workflow(workflow, runnable=True, check_resources=True)
     run_id, timestamp = new_id("run"), now()
     with connect() as db:
         db.execute(
@@ -199,7 +221,7 @@ def enqueue_workflow_run(workflow_id, input_value, *, thread_id, turn_id):
             (run_id, workflow_id, json.dumps(input_value, ensure_ascii=False), "{}", timestamp, timestamp),
         )
     try:
-        task = enqueue_task("workflow", workflow.get("name") or "Workflow", {"workflow_id": workflow_id, "run_id": run_id, "input": input_value}, 3)
+        task = enqueue_task("workflow", workflow.get("name") or "Workflow", {"workflow_id": workflow_id, "workflow_snapshot": workflow, "run_id": run_id, "input": input_value}, 3)
     except Exception as exc:
         with connect() as db:
             db.execute(
@@ -214,9 +236,11 @@ def enqueue_workflow_run(workflow_id, input_value, *, thread_id, turn_id):
 def get_workflow_run(run_id):
     with connect() as db:
         row = db.execute("SELECT * FROM workflow_runs WHERE id=?", (run_id,)).fetchone()
+        task = db.execute("SELECT payload FROM tasks WHERE kind='workflow' AND json_extract(payload,'$.run_id')=? ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
     if not row:
         raise ValueError("Workflow 运行不存在")
     result = dict(row)
+    result["workflow_version"] = (json.loads(task["payload"]).get("workflow_snapshot") or {}).get("version") if task else None
     for key in ("input", "output", "trace"):
         result[key] = json.loads(result[key] or "null")
     return result

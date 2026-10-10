@@ -202,21 +202,21 @@ class PersistentTaskQueue:
             append_task_event(task["id"], "started", {"attempt": task["attempts"]})
             result = await self.handler(task)
             with connect() as db:
-                if db.execute("SELECT status FROM tasks WHERE id=?", (task["id"],)).fetchone()["status"] == "cancelled":
-                    return
-                db.execute("UPDATE tasks SET status='completed',result=?,error=NULL,lease_until=NULL,worker_id=NULL,updated_at=? WHERE id=?", (json.dumps(result, ensure_ascii=False, default=str), now(), task["id"]))
-            append_task_event(task["id"], "completed")
+                changed = db.execute("UPDATE tasks SET status='completed',result=?,error=NULL,lease_until=NULL,worker_id=NULL,updated_at=? WHERE id=? AND status='running'", (json.dumps(result, ensure_ascii=False, default=str), now(), task["id"])).rowcount
+            if changed:
+                append_task_event(task["id"], "completed")
         except asyncio.CancelledError:
             if self.stopping:
                 raise
-            append_task_event(task["id"], "cancelled")
+            cancel_task(task["id"])
         except Exception as exc:
             retry = task["attempts"] < task["max_attempts"]
             status = "queued" if retry else "failed"
             available = now() + min(2 ** task["attempts"], 60)
             with connect() as db:
-                db.execute("UPDATE tasks SET status=?,error=?,available_at=?,lease_until=NULL,worker_id=NULL,updated_at=? WHERE id=?", (status, str(exc)[:4000], available, now(), task["id"]))
-            append_task_event(task["id"], "retrying" if retry else "failed", {"error": str(exc)[:1000]})
+                changed = db.execute("UPDATE tasks SET status=?,error=?,available_at=?,lease_until=NULL,worker_id=NULL,updated_at=? WHERE id=? AND status='running'", (status, str(exc)[:4000], available, now(), task["id"])).rowcount
+            if changed:
+                append_task_event(task["id"], "retrying" if retry else "failed", {"error": str(exc)[:1000]})
         finally:
             self.running.pop(task["id"], None)
             reset_tenant(token)

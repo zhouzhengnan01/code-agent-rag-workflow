@@ -57,7 +57,7 @@ def test_mcp_negotiation_roots_and_pagination(monkeypatch):
 def test_workflow_parallel_retry_and_condition(monkeypatch):
     attempts = {}
 
-    async def fake_execute(node, input_value, context, dependencies, task_id=None):
+    async def fake_execute(node, input_value, context, dependencies, task_id=None, execution=None):
         attempts[node["id"]] = attempts.get(node["id"], 0) + 1
         await asyncio.sleep(0.04)
         if node["id"] == "a" and attempts[node["id"]] == 1:

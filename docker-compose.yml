@@ -2,8 +2,10 @@ services:
   codezzn:
     build:
       context: .
+      target: ${CODEZZN_BUILD_TARGET:-runtime}
       args:
         BASE_IMAGE: ${CODEZZN_BASE_IMAGE:-python:3.12-slim}
+        NODE_IMAGE: ${CODEZZN_NODE_IMAGE:-node:22-bookworm-slim}
     container_name: codezzn
     restart: unless-stopped
     # Bind mounts on Windows retain host ACLs; root is the compatible local-dev default.

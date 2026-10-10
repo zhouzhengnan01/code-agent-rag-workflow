@@ -11,3 +11,7 @@ audit-*.png
 redesign-*.png
 qwen-provider-preview*.png
 taste-*.png
+node_modules/
+.workflow-venv/
+.workflow-qa/
+web/workflow-editor/

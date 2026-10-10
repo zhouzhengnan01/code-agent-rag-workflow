@@ -1,0 +1,58 @@
+{
+  "status": "completed",
+  "output": "本地工作流测试环境的部署口令是 local-workflow-2026。",
+  "model_adapter": "controlled QA Answer",
+  "vector_backend": "real Milvus Lite",
+  "retrieval": {
+    "status": "ok",
+    "backends": {
+      "local": {
+        "vector": [
+          {
+            "knowledge_id": "kno_0cb77b9f90404893",
+            "status": "ok",
+            "hits": 3
+          }
+        ],
+        "rerank": {
+          "status": "disabled"
+        },
+        "expansion": {
+          "status": "disabled"
+        },
+        "query": "本地工作流测试环境的部署口令是什么?",
+        "filters": {},
+        "top_k": 5,
+        "candidate_k": 20,
+        "source_cap": 3,
+        "skipped_knowledge_ids": [],
+        "returned": 3,
+        "queries": [
+          "本地工作流测试环境的部署口令是什么?"
+        ],
+        "eligible_chunks": 3,
+        "vector_candidates": 3,
+        "lexical_candidates": 3,
+        "fused_candidates": 3,
+        "status": "ok",
+        "retrieval": "hybrid",
+        "diverse_candidates": 3
+      }
+    },
+    "returned": 3
+  },
+  "trace": [
+    {
+      "type": "knowledge",
+      "status": "completed"
+    },
+    {
+      "type": "agent",
+      "status": "completed"
+    },
+    {
+      "type": "output",
+      "status": "completed"
+    }
+  ]
+}

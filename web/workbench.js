@@ -108,7 +108,7 @@ function modal(title, body, onSave, wide = false, saveLabel = '保存') {
 }
 
 function closeModal() {
-  const dialog = $('#modalRoot dialog');
+  const dialog = $('#modalRoot dialog, #modalRoot .drawer');
   if (dialog?.dataset.busy === 'true') return;
   if (dialog?.open) dialog.close();
   $('#modalRoot').innerHTML = '';
@@ -816,24 +816,7 @@ async function agentForm(item) {
 }
 
 function workflowForm(item) {
-  const sample = {
-    name: item.name || '文档问答流', description: item.description || '', enabled: item.enabled !== false,
-    nodes: item.nodes || [{ id: 'input_1', type: 'input' }, { id: 'agent_1', type: 'agent', agent_id: '在此填智能体ID', prompt: '{{input}}' }, { id: 'output_1', type: 'output', template: '{{last}}' }],
-    edges: item.edges || [{ source: 'input_1', target: 'agent_1' }, { source: 'agent_1', target: 'output_1' }],
-  };
-  modal(item.id ? '编辑工作流' : '新建工作流', `
-    <form id="editForm" class="form-layout">
-      ${field('名称', 'name', sample.name)}${field('描述', 'description', sample.description)}
-      ${field('工作流 JSON', 'definition', JSON.stringify({ max_parallel: item.max_parallel || 4, nodes: sample.nodes, edges: sample.edges }, null, 2), 'textarea', true, '节点支持 retries、timeout；条件边使用 when: true/false；同一批就绪节点会真实并行执行。')}
-      ${toggleField('启用工作流', 'enabled', sample.enabled, true)}
-    </form>`, () => {
-      try {
-        const data = formData($('#editForm'));
-        const definition = JSON.parse(data.definition);
-        save('workflows', item.id, { name: data.name, description: data.description, enabled: $('#editForm [name=enabled]').checked, max_parallel: Number(definition.max_parallel || 4), nodes: definition.nodes || [], edges: definition.edges || [] });
-      } catch (error) { toast(`JSON 格式错误：${error.message}`, true); }
-    }, true);
-  $('#editForm [name=definition]').classList.add('code-editor');
+  location.href = `/workflow.html${item.id ? '?id=' + encodeURIComponent(item.id) : ''}`;
 }
 
 async function removeResource(kind, id) {
@@ -865,30 +848,16 @@ async function provisionRagflow(id) {
 }
 
 async function showKnowledgeStatus(id) {
-  try {
-    const result = await api(`/api/knowledge/${id}/documents/status`);
-    const documents = result.documents || [];
-    modal('文档解析状态', documents.length ? `<div class="search-results">${documents.map(item => `
-      <article class="search-hit"><header><span>${esc(item.name || item.source || item.id)}</span><strong>${esc(String(item.run || 'UNKNOWN'))}</strong></header>
-      <div class="search-source">片段 ${Number(item.chunk_count || item.chunks || 0)} · Token ${Number(item.token_count || 0)}</div>
-      <p>${esc(item.progress_msg || (result.backend === 'ragflow' ? 'RAGFlow 异步处理状态' : '本地索引已提交'))}</p></article>`).join('')}</div>` : '<div class="state-inline"><p>暂无文档状态。</p></div>', null, true);
-  } catch (error) { toast(error.message, true); }
+  CodezznKnowledge.openStatus(id, knowledgeUI());
 }
 
 function uploadDoc(id) {
-  const knowledge = cache.knowledge?.find(item => item.id === id) || {};
-  const isRagflow = knowledge.backend === 'ragflow';
-  modal('上传知识文档', `
-    <form id="uploadForm"><label class="drop-field"><input type="file" name="file" required><span class="drop-title">选择知识文档</span><span>${isRagflow ? '文件将转发到 RAGFlow，并异步解析和建立索引。' : '文档会被分块、向量化并写入本地 Milvus。'}</span></label></form>`, async () => {
-    const button = $('#modalSave');
-    try {
-      button.disabled = true; button.textContent = isRagflow ? '提交解析中' : '向量化中';
-      const result = await api(`/api/knowledge/${id}/documents`, { method: 'POST', body: new FormData($('#uploadForm')) });
-      closeModal();
-      toast(result.status === 'processing' ? `文档已提交，解析状态：${result.run || 'UNSTART'}` : `已写入 ${result.chunks} 个片段`);
-      loadPage();
-    } catch (error) { button.disabled = false; button.textContent = '上传'; toast(error.message, true); }
-  }, false, '上传');
+  const knowledge = state.cache.knowledge?.find(item => item.id === id) || {};
+  CodezznKnowledge.openUpload(id, knowledge, knowledgeUI());
+}
+
+function knowledgeUI() {
+  return { api, modal, toast, esc, headers, loadPage };
 }
 
 function testKnowledge(id) {
@@ -1744,7 +1713,7 @@ async function viewWorkflowDraft(draftId) {
     const draft = await api(`/api/workflow-drafts/${encodeURIComponent(draftId)}`);
     const definition = draft.definition || {};
     const editable = draft.status === 'draft';
-    modal(draft.name || '工作流草稿', `<div class="workflow-draft-summary"><p>${esc(draft.description || '检查草稿内容，然后选择保存或丢弃。')}</p><p>状态：${esc(draft.status || 'draft')}</p><pre class="code-output">${esc(JSON.stringify(definition, null, 2))}</pre>${editable ? `<div class="project-card-actions"><button class="button button-quiet button-small" type="button" data-draft-id="${esc(draftId)}" onclick="decideWorkflowDraft(this,'discard')">丢弃草稿</button><button class="button button-primary button-small" type="button" data-draft-id="${esc(draftId)}" onclick="decideWorkflowDraft(this,'save')">保存为工作流</button></div>` : ''}</div>`, null, true);
+    modal(draft.name || '工作流草稿', `<div class="workflow-draft-summary"><p>${esc(draft.description || '检查草稿内容，然后选择保存或丢弃。')}</p><p>状态：${esc(draft.status || 'draft')}</p><pre class="code-output">${esc(JSON.stringify(definition, null, 2))}</pre>${editable ? `<div class="project-card-actions"><a class="button button-quiet button-small" href="/workflow.html?draft_id=${encodeURIComponent(draftId)}">在画布中编辑</a><button class="button button-quiet button-small" type="button" data-draft-id="${esc(draftId)}" onclick="decideWorkflowDraft(this,'discard')">丢弃草稿</button><button class="button button-primary button-small" type="button" data-draft-id="${esc(draftId)}" onclick="decideWorkflowDraft(this,'save')">保存为工作流</button></div>` : ''}</div>`, null, true);
   } catch (error) { toast(error.message, true); }
 }
 

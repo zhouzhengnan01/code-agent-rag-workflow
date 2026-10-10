@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import hashlib
 import io
@@ -7,6 +8,8 @@ import os
 import re
 import threading
 import unicodedata
+import zipfile
+from xml.etree import ElementTree
 from collections import Counter
 from pathlib import PurePosixPath
 
@@ -23,7 +26,8 @@ DEFAULT_EMBEDDING_DIMENSION = 1024
 DEFAULT_RERANK_MODEL = "qwen3-rerank"
 MAX_UPLOAD_BYTES = int(os.getenv("CODEZZN_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MIME_TYPES = {".md": "text/markdown", ".markdown": "text/markdown", ".txt": "text/plain",
-              ".json": "application/json", ".csv": "text/csv", ".pdf": "application/pdf"}
+              ".json": "application/json", ".csv": "text/csv", ".pdf": "application/pdf",
+              ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 
 
 class KnowledgeError(RuntimeError):
@@ -190,7 +194,7 @@ def validate_source(source):
     if PurePosixPath(source).is_absolute() or ".." in PurePosixPath(source).parts:
         raise KnowledgeValidationError("Filename must be a relative source without parent traversal")
     if PurePosixPath(source).suffix.lower() not in MIME_TYPES:
-        raise KnowledgeValidationError("Supported document types: Markdown, JSON, CSV, TXT, PDF")
+        raise KnowledgeValidationError("支持的文档格式：Markdown、JSON、CSV、TXT、PDF、DOCX")
     return source
 
 
@@ -210,7 +214,26 @@ def decode_upload(source, raw, mime_type=None):
     if mime not in allowed:
         raise KnowledgeValidationError("Content type does not match the filename")
     try:
-        if extension == ".pdf":
+        if extension == ".docx":
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                entry = archive.getinfo("word/document.xml")
+                if entry.file_size > MAX_UPLOAD_BYTES:
+                    raise KnowledgeValidationError("DOCX 解压后的正文超过大小限制")
+                document = ElementTree.fromstring(archive.read(entry))
+                ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+                paragraphs = []
+                for paragraph in document.iter(ns + "p"):
+                    parts = []
+                    for element in paragraph.iter():
+                        if element.tag == ns + "t":
+                            parts.append(element.text or "")
+                        elif element.tag == ns + "tab":
+                            parts.append("\t")
+                        elif element.tag in {ns + "br", ns + "cr"}:
+                            parts.append("\n")
+                    paragraphs.append("".join(parts))
+                text = "\n\n".join(paragraphs)
+        elif extension == ".pdf":
             if not raw.startswith(b"%PDF-"):
                 raise KnowledgeValidationError("Invalid PDF signature")
             from pypdf import PdfReader
@@ -228,7 +251,9 @@ def decode_upload(source, raw, mime_type=None):
     except KnowledgeValidationError:
         raise
     except Exception as exc:
-        raise KnowledgeValidationError("Cannot decode document; use valid UTF-8 text or a readable PDF") from exc
+        raise KnowledgeValidationError("无法解析文档；请使用 UTF-8 文本、未损坏的 DOCX 或含可提取文字的 PDF") from exc
+    if not text.strip() and extension == ".pdf":
+        raise KnowledgeValidationError("PDF 未提取到文字，可能是扫描件；请先进行 OCR 后再上传")
     _validate_text(text)
     return source, text, {"mime_type": MIME_TYPES[extension], "upload_bytes": len(raw), "upload_hash": hashlib.sha256(raw).hexdigest()}
 
@@ -308,7 +333,7 @@ def _provider_for(knowledge):
     if not provider_id:
         provider = next((item for item in resource_list("providers") if item.get("enabled") and item.get("api_key")), None)
     if not provider or not provider.get("enabled", True):
-        raise KnowledgeError("No enabled embedding provider configured")
+        raise KnowledgeError("未配置可用的 Embedding 提供方；请编辑知识库并选择已启用的模型提供方")
     return normalize_provider(provider)
 
 
@@ -316,7 +341,7 @@ async def _embed(provider, texts, model, dimension):
     if not texts:
         return []
     if not provider.get("api_key"):
-        raise KnowledgeError("Embedding provider has no API key")
+        raise KnowledgeError("Embedding 提供方尚未配置 API Key")
     url = provider.get("base_url", "").rstrip("/") + "/embeddings"
     headers = {"Content-Type": "application/json", **provider.get("headers", {}), "Authorization": f"Bearer {provider['api_key']}"}
     try:
@@ -330,14 +355,24 @@ async def _embed(provider, texts, model, dimension):
         if any(len(v) != dimension or not all(isinstance(x, (int, float)) and math.isfinite(x) for x in v) or not any(v) for v in vectors):
             raise ValueError("Invalid embedding values or dimensions")
         return vectors
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code
+        advice = "检查模型名称、接口地址和向量维度"
+        if status in {401, 403}:
+            advice = "检查 Embedding 提供方的 API Key 和模型权限"
+        elif status == 429:
+            advice = "检查 Embedding 服务的调用额度或限流设置，稍后重试"
+        raise KnowledgeError(f"Embedding 服务返回 HTTP {status}；{advice}（模型：{model}，维度：{dimension}）") from exc
     except (httpx.HTTPError, ValueError, TypeError, KeyError) as exc:
         raise KnowledgeError(f"Embedding request failed ({type(exc).__name__})") from exc
 
 
-async def ingest(knowledge, source, text, metadata=None, expected_revision=None):
+async def ingest(knowledge, source, text, metadata=None, expected_revision=None, progress=None):
     source = validate_source(source)
     _validate_text(text)
     text = _normalize_text(text)
+    if progress:
+        progress("splitting", 25, {})
     size, overlap = _chunk_settings(knowledge.get("chunk_size", 1200), knowledge.get("chunk_overlap", knowledge.get("overlap", 180)))
     chunks = chunk_document(text, source, size, overlap)
     if not chunks:
@@ -367,12 +402,22 @@ async def ingest(knowledge, source, text, metadata=None, expected_revision=None)
         records.append(record)
     # Stage all vectors first. SQLite is the activation boundary: failed or obsolete
     # stages remain invisible because retrieval only searches committed chunk IDs.
-    client, collection = _ensure_collection(knowledge["id"], dimension, collection)
+    if progress:
+        progress("embedding", 35, {"chunks": len(records), "completed_chunks": 0})
+    try:
+        client, collection = await asyncio.to_thread(_ensure_collection, knowledge["id"], dimension, collection)
+    except Exception as exc:
+        raise KnowledgeError(f"Milvus 索引初始化失败（{type(exc).__name__}）；请检查本地向量服务与数据目录权限") from exc
     for start in range(0, len(records), 20):
         batch = records[start:start + 20]
         vectors = await _embed(provider, [item["content"] for item in batch], model, dimension)
-        client.upsert(collection_name=collection, data=[{**item, "vector": vector} for item, vector in zip(batch, vectors)])
-    client.flush(collection_name=collection)
+        await asyncio.to_thread(client.upsert, collection_name=collection, data=[{**item, "vector": vector} for item, vector in zip(batch, vectors)])
+        if progress:
+            completed = min(start + len(batch), len(records))
+            progress("embedding", 35 + int(55 * completed / len(records)), {"chunks": len(records), "completed_chunks": completed})
+    if progress:
+        progress("indexing", 95, {"chunks": len(records)})
+    await asyncio.to_thread(client.flush, collection_name=collection)
     timestamp = now()
     with connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -410,10 +455,10 @@ def _sync_document_summary(db, knowledge_id):
 
 def document_status(knowledge_id):
     with connect() as db:
-        rows = db.execute("SELECT id,source,metadata,revision,updated_at FROM knowledge_documents WHERE knowledge_id=? ORDER BY source", (knowledge_id,)).fetchall()
+        rows = db.execute("SELECT d.id,d.source,d.metadata,d.revision,d.updated_at,(SELECT count(*) FROM knowledge_chunks c WHERE c.document_id=d.id) AS chunks FROM knowledge_documents d WHERE d.knowledge_id=? ORDER BY d.source", (knowledge_id,)).fetchall()
         legacy = db.execute("SELECT count(*) FROM knowledge_chunks WHERE knowledge_id=? AND document_id=''", (knowledge_id,)).fetchone()[0]
         count = db.execute("SELECT count(*) FROM knowledge_chunks WHERE knowledge_id=?", (knowledge_id,)).fetchone()[0]
-    return {"documents": [{**dict(row), "metadata": json.loads(row["metadata"])} for row in rows],
+    return {"documents": [{**dict(row), "metadata": json.loads(row["metadata"]), "run": "DONE", "status": "completed", "token_count": json.loads(row["metadata"]).get("tokens", 0)} for row in rows],
             "document_count": len(rows), "chunk_count": count, "legacy_chunks": legacy,
             "legacy_reindex": "Re-upload legacy sources to retain original structure",
             "activation": "SQLite committed chunk IDs", "vector_retention": "Inactive staged/old vectors are retained but excluded from retrieval"}

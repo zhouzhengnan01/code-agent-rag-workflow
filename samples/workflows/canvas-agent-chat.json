@@ -1,0 +1,55 @@
+{
+  "name": "智能体问答",
+  "enabled": true,
+  "max_parallel": 4,
+  "description": "将用户问题交给配置的智能体，返回真实模型回答。",
+  "nodes": [
+    {
+      "id": "input_1",
+      "type": "input",
+      "label": "输入"
+    },
+    {
+      "id": "agent_1",
+      "type": "agent",
+      "label": "智能体回答",
+      "prompt": "{{input}}",
+      "agent_id": "",
+      "knowledge_mode": "workflow",
+      "tool_mode": "disabled"
+    },
+    {
+      "id": "output_1",
+      "type": "output",
+      "label": "输出",
+      "template": "{{agent_1}}"
+    }
+  ],
+  "edges": [
+    {
+      "source": "input_1",
+      "target": "agent_1"
+    },
+    {
+      "source": "agent_1",
+      "target": "output_1"
+    }
+  ],
+  "canvas": {
+    "version": 1,
+    "positions": {
+      "input_1": {
+        "x": 50,
+        "y": 100
+      },
+      "agent_1": {
+        "x": 360,
+        "y": 100
+      },
+      "output_1": {
+        "x": 670,
+        "y": 100
+      }
+    }
+  }
+}

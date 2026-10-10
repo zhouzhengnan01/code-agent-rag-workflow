@@ -1,0 +1,15 @@
+{
+  "name": "我的第一个工作流",
+  "description": "无需模型 API 的画布测试",
+  "enabled": true,
+  "max_parallel": 4,
+  "nodes": [
+    { "id": "input_1", "type": "input", "label": "输入" },
+    { "id": "prompt_1", "type": "prompt", "label": "欢迎文本", "template": "你好，{{input}}！工作流已成功运行。" },
+    { "id": "output_1", "type": "output", "label": "输出", "template": "{{prompt_1}}" }
+  ],
+  "edges": [
+    { "source": "input_1", "target": "prompt_1" },
+    { "source": "prompt_1", "target": "output_1" }
+  ]
+}

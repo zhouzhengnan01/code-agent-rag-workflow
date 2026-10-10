@@ -11,3 +11,7 @@ qwen-provider-preview*.png
 __pycache__
 *.pyc
 .pytest_cache
+node_modules
+**/node_modules
+.workflow-venv
+.workflow-qa

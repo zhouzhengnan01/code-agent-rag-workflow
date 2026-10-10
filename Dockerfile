@@ -1,5 +1,14 @@
 ARG BASE_IMAGE=python:3.12-slim
-FROM ${BASE_IMAGE}
+ARG NODE_IMAGE=node:22-bookworm-slim
+FROM ${NODE_IMAGE} AS workflow-editor-build
+WORKDIR /build
+COPY frontend/workflow-editor/package*.json ./frontend/workflow-editor/
+WORKDIR /build/frontend/workflow-editor
+RUN npm ci --no-audit --no-fund
+COPY frontend/workflow-editor/ ./
+RUN npm run build
+
+FROM ${BASE_IMAGE} AS backend
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -28,3 +37,10 @@ USER codezzn
 EXPOSE 8080
 ENTRYPOINT []
 CMD ["/usr/local/bin/python", "-m", "uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# Offline/registry-restricted hosts can build the frontend with local Node first.
+FROM backend AS prebuilt
+RUN test -f /app/web/workflow-editor/index.html
+
+FROM backend AS runtime
+COPY --from=workflow-editor-build --chown=codezzn:codezzn /build/web/workflow-editor ./web/workflow-editor

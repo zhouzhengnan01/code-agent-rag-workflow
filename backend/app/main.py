@@ -20,6 +20,7 @@ from .capabilities import ROLE_TEMPLATES, tool_policy_decision
 from .db import connect, current_tenant, ensure_tenant, init_db, migrate_bailian_providers, new_id, now, reset_tenant, resource_delete, resource_get, resource_list, resource_save, seed_defaults, tenant_ids, use_tenant
 from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, drop_knowledge_index, rag_status
 from .knowledge_eval import evaluate as evaluate_knowledge_backends
+from . import knowledge_jobs
 from .knowledge_service import delete_document as delete_knowledge_document, ensure_remote_dataset, health as knowledge_health, reindex as reindex_knowledge_service, search as search_knowledge_service, status as knowledge_status, upload as upload_knowledge_document
 from .ragflow import RAGFlowError
 from .mcp import mcp_manager
@@ -27,11 +28,12 @@ from .memory import backfill_memory_embeddings, confirm_memory, delete_memory, e
 from .model import BAILIAN_PRESETS, normalize_provider, public_provider, test_provider
 from .sandbox import sandbox_status
 from .tasks import cancel_task, enqueue_task, get_task, list_tasks, task_events, task_queue
-from .workflows import create_run
+from .workflows import create_run, mark_run_cancelled, validate_workflow
+from .workflow_store import WorkflowConflict, prepare_workflow, save_canvas_workflow
 from .worktrees import ensure_worktree, list_worktrees, remove_worktree, worktree_path
 from .workspace import reset_workspace, use_workspace, tenant_workspace
 from .projects import artifact_path, create_project, get_artifact as get_project_artifact, get_artifact_version_content, get_project, list_artifact_versions, list_artifacts, list_projects, update_project
-from .domain_tools import discard_workflow_draft, get_workflow_draft, get_workflow_version, list_workflow_versions, save_workflow_draft
+from .domain_tools import discard_workflow_draft, get_workflow_draft, get_workflow_run, get_workflow_version, list_workflow_versions, save_workflow_draft, update_workflow_draft
 from .intent import classify_intent, parse_project_directive
 from .skill_packages import import_package, read_package_file
 from .code_intelligence import rebuild_index, symbols as code_symbols, references as code_references, graph as code_graph
@@ -151,8 +153,10 @@ async def execute_persistent_task(task):
                     db.execute("UPDATE agent_runs SET status='failed',error=?,updated_at=? WHERE turn_id=? AND status IN ('running','recovering')", (str(exc)[:4000], now(), payload["turn_id"]))
                     if payload.get("thread_id"): db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), payload["thread_id"]))
             raise
+    if task["kind"] == "knowledge_ingest":
+        return await knowledge_jobs.execute(task)
     if task["kind"] == "workflow":
-        workflow = resource_get("workflows", payload.get("workflow_id"))
+        workflow = payload.get("workflow_snapshot") or resource_get("workflows", payload.get("workflow_id"))
         if not workflow:
             raise ValueError("后台任务引用的工作流不存在")
         return await create_run(workflow, payload.get("input"), run_id=payload.get("run_id"), task_id=task["id"], raise_errors=True)
@@ -218,8 +222,9 @@ async def access_control(request: Request, call_next):
     key_valid = bool(key and supplied == key)
     auth_required = os.getenv("CODEZZN_AUTH_REQUIRED", "false").lower() == "true"
     if not public and (auth_required or key) and not user and not key_valid:
-        if path == "/workbench.html":
-            return RedirectResponse("/login?next=/workbench.html", status_code=303)
+        if path in {"/workbench.html", "/workflow.html"}:
+            from urllib.parse import quote
+            return RedirectResponse("/login?next=" + quote(str(request.url.path) + ("?" + str(request.url.query) if request.url.query else ""), safe="/"), status_code=303)
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
     token = use_tenant(user["id"] if user else None)
     try:
@@ -239,6 +244,14 @@ def public_home():
 @app.get("/workbench.html")
 def workbench():
     return FileResponse(WEB / "workbench.html")
+
+
+@app.get("/workflow.html")
+def workflow_editor():
+    path = WEB / "workflow-editor" / "index.html"
+    if not path.is_file():
+        raise HTTPException(503, "请先在 frontend/workflow-editor 执行 npm ci 和 npm run build")
+    return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/login")
@@ -464,6 +477,8 @@ def list_resources(kind: str):
 @app.post("/api/resources/{kind}")
 def create_resource(kind: str, payload: dict = Body(...)):
     valid_kind(kind)
+    if kind == "workflows":
+        return _save_workflow_resource(payload)
     if kind == "providers":
         return public_provider(resource_save(kind, normalize_provider(payload)))
     return resource_save(kind, payload)
@@ -484,12 +499,23 @@ def update_resource(kind: str, item_id: str, payload: dict = Body(...)):
     existing = resource_get(kind, item_id)
     if not existing:
         raise HTTPException(404, "资源不存在")
+    if kind == "workflows":
+        return _save_workflow_resource(payload, item_id)
     if kind == "providers":
         supplied_key = str(payload.get("api_key") or "")
         if not supplied_key or supplied_key.startswith("••••"):
             payload["api_key"] = existing.get("api_key", "")
         return public_provider(resource_save(kind, normalize_provider(payload), item_id))
     return resource_save(kind, payload, item_id)
+
+
+def _save_workflow_resource(payload, workflow_id=None):
+    try:
+        return save_canvas_workflow(payload, workflow_id)
+    except WorkflowConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.delete("/api/resources/{kind}/{item_id}")
@@ -568,13 +594,18 @@ async def provision_ragflow_dataset(knowledge_id: str):
 
 
 @app.post("/api/knowledge/{knowledge_id}/documents")
-async def upload_document(knowledge_id: str, file: UploadFile = File(...)):
+async def upload_document(knowledge_id: str, file: UploadFile = File(...), background: bool = False):
     knowledge = resource_get("knowledge", knowledge_id)
     if not knowledge:
         raise HTTPException(404, "知识库不存在")
-    raw = await file.read()
+    from .knowledge import MAX_UPLOAD_BYTES
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
     filename = file.filename or "document.txt"
     try:
+        if background:
+            result = knowledge_jobs.submit(knowledge, filename, raw, file.content_type)
+            task_queue._wakeup.set()
+            return JSONResponse(result, status_code=202)
         return await upload_knowledge_document(knowledge, filename, raw, file.content_type)
     except KnowledgeValidationError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -592,9 +623,56 @@ async def knowledge_document_status(knowledge_id: str, document_id: str = ""):
     if not knowledge:
         raise HTTPException(404, "知识库不存在")
     try:
-        return await knowledge_status(knowledge, document_id or None)
+        result = await knowledge_status(knowledge, document_id or None)
+        result["uploads"] = knowledge_jobs.list_uploads(knowledge_id)
+        return result
     except (KnowledgeError, RAGFlowError) as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+@app.post("/api/knowledge/{knowledge_id}/uploads/{task_id}/retry")
+async def retry_knowledge_upload(knowledge_id: str, task_id: str):
+    if not resource_get("knowledge", knowledge_id):
+        raise HTTPException(404, "知识库不存在")
+    try:
+        result = knowledge_jobs.retry(knowledge_id, task_id)
+        task_queue._wakeup.set()
+        return result
+    except KeyError as exc:
+        raise HTTPException(404, "上传记录不存在") from exc
+    except KnowledgeConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except KnowledgeValidationError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.get("/api/knowledge/{knowledge_id}/upload-config")
+def knowledge_upload_config(knowledge_id: str):
+    from .knowledge import MAX_UPLOAD_BYTES, MIME_TYPES
+    base = resource_get("knowledge", knowledge_id)
+    if not base:
+        raise HTTPException(404, "知识库不存在")
+    return {"max_upload_bytes": MAX_UPLOAD_BYTES, "max_batch_files": 20,
+            "extensions": list(MIME_TYPES) if base.get("backend", "local") == "local" else [],
+            "backend": base.get("backend", "local")}
+
+
+@app.get("/api/knowledge/{knowledge_id}/documents/{document_id}/chunks")
+def knowledge_document_chunks(knowledge_id: str, document_id: str, offset: int = 0, limit: int = 20):
+    base = resource_get("knowledge", knowledge_id)
+    if not base:
+        raise HTTPException(404, "知识库不存在")
+    if base.get("backend", "local") != "local":
+        raise HTTPException(400, "远端文档片段请在 RAGFlow 查看")
+    if offset < 0 or not 1 <= limit <= 100:
+        raise HTTPException(400, "无效的分页参数")
+    with connect() as connection:
+        document = connection.execute("SELECT source FROM knowledge_documents WHERE id=? AND knowledge_id=?", (document_id, knowledge_id)).fetchone()
+        if not document:
+            raise HTTPException(404, "文档不存在")
+        total = connection.execute("SELECT count(*) FROM knowledge_chunks WHERE document_id=? AND knowledge_id=?", (document_id, knowledge_id)).fetchone()[0]
+        rows = connection.execute("SELECT id,position,content FROM knowledge_chunks WHERE document_id=? AND knowledge_id=? ORDER BY position LIMIT ? OFFSET ?", (document_id, knowledge_id, limit, offset)).fetchall()
+    return {"data": [dict(row) for row in rows], "total": total, "offset": offset, "source": document["source"]}
 
 
 @app.delete("/api/knowledge/{knowledge_id}/documents/{document_id}")
@@ -766,7 +844,30 @@ async def run_workflow_endpoint(workflow_id: str, payload: dict = Body(...)):
     workflow = resource_get("workflows", workflow_id)
     if not workflow:
         raise HTTPException(404, "工作流不存在")
+    _validate_workflow_run(workflow)
     return await create_run(workflow, payload.get("input", ""))
+
+
+def _validate_workflow_run(workflow):
+    if not workflow.get("enabled", True):
+        raise HTTPException(400, "工作流已禁用，请先启用")
+    try:
+        validate_workflow(workflow, runnable=True, check_resources=True)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/workflow-validation")
+def validate_workflow_endpoint(payload: dict = Body(...)):
+    try:
+        prepare_workflow({"name": "工作流", **payload})
+        validate_workflow(payload, runnable=True, check_resources=True)
+        warnings = []
+        if "{{last}}" in json.dumps(payload, ensure_ascii=False) and payload.get("max_parallel", 4) > 1:
+            warnings.append("并行流程中 last 的值取决于完成批次，请优先引用具体上游节点 ID")
+        return {"ok": True, "warnings": warnings}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/workflow-drafts/{draft_id}")
@@ -775,6 +876,14 @@ def read_workflow_draft(draft_id: str):
     if not draft:
         raise HTTPException(404, "Workflow 草稿不存在")
     return draft
+
+
+@app.put("/api/workflow-drafts/{draft_id}")
+def edit_workflow_draft_endpoint(draft_id: str, payload: dict = Body(...)):
+    try:
+        return update_workflow_draft(draft_id, payload)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/workflows/{workflow_id}/versions")
@@ -794,12 +903,12 @@ def workflow_version_endpoint(workflow_id: str, version: int):
 
 
 @app.post("/api/workflow-drafts/{draft_id}/save")
-def save_workflow_draft_endpoint(draft_id: str):
+def save_workflow_draft_endpoint(draft_id: str, payload: dict = Body(default={})):
     draft = get_workflow_draft(draft_id)
     if not draft:
         raise HTTPException(404, "Workflow 草稿不存在")
     try:
-        return save_workflow_draft(draft_id, thread_id=draft["thread_id"], turn_id=draft["turn_id"])
+        return save_workflow_draft(draft_id, thread_id=draft["thread_id"], turn_id=draft["turn_id"], expected_revision=payload.get("expected_revision"))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -817,18 +926,24 @@ def enqueue_workflow_endpoint(workflow_id: str, payload: dict = Body(default={})
     workflow = resource_get("workflows", workflow_id)
     if not workflow:
         raise HTTPException(404, "工作流不存在")
+    _validate_workflow_run(workflow)
     run_id, timestamp = new_id("run"), now()
     input_value = payload.get("input", "")
     with connect() as db:
         db.execute("INSERT INTO workflow_runs(id,workflow_id,status,input,state,created_at,updated_at) VALUES(?,?, 'queued',?,?,?,?)", (run_id, workflow_id, json.dumps(input_value, ensure_ascii=False), "{}", timestamp, timestamp))
-    task = enqueue_task("workflow", payload.get("name") or workflow.get("name") or "工作流任务", {"workflow_id": workflow_id, "run_id": run_id, "input": input_value}, payload.get("max_attempts", 3))
+    try:
+        task = enqueue_task("workflow", payload.get("name") or workflow.get("name") or "工作流任务", {"workflow_id": workflow_id, "workflow_snapshot": workflow, "run_id": run_id, "input": input_value}, payload.get("max_attempts", 3))
+    except Exception as exc:
+        with connect() as db:
+            db.execute("UPDATE workflow_runs SET status='failed',error=?,updated_at=? WHERE id=?", (str(exc), now(), run_id))
+        raise
     return {"task": task, "run_id": run_id}
 
 
 @app.get("/api/workflow-runs")
-def workflow_runs():
+def workflow_runs(workflow_id: str | None = None):
     with connect() as db:
-        rows = db.execute("SELECT * FROM workflow_runs ORDER BY created_at DESC LIMIT 100").fetchall()
+        rows = db.execute("SELECT * FROM workflow_runs WHERE workflow_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100", (workflow_id,)).fetchall() if workflow_id else db.execute("SELECT * FROM workflow_runs ORDER BY created_at DESC,rowid DESC LIMIT 100").fetchall()
     data = []
     for row in rows:
         item = dict(row)
@@ -836,6 +951,33 @@ def workflow_runs():
             item[key] = json.loads(item[key]) if item[key] is not None else None
         data.append(item)
     return {"data": data}
+
+
+@app.get("/api/workflow-runs/{run_id}")
+def workflow_run_endpoint(run_id: str):
+    try:
+        return get_workflow_run(run_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@app.post("/api/workflow-runs/{run_id}/cancel")
+async def cancel_workflow_run_endpoint(run_id: str):
+    try:
+        run = get_workflow_run(run_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if run["status"] not in {"queued", "running"}:
+        return {"cancelled": run["status"] == "cancelled", "status": run["status"], "run": run}
+    with connect() as db:
+        task = db.execute("SELECT id FROM tasks WHERE kind='workflow' AND json_extract(payload,'$.run_id')=? ORDER BY created_at DESC LIMIT 1", (run_id,)).fetchone()
+    if not task:
+        raise HTTPException(400, "此运行不是可取消的后台任务")
+    cancelled = await task_queue.cancel(task["id"])
+    if cancelled or (get_task(task["id"]) or {}).get("status") == "cancelled":
+        mark_run_cancelled(run_id)
+    run = get_workflow_run(run_id)
+    return {"cancelled": run["status"] == "cancelled", "status": run["status"], "run": run}
 
 
 @app.post("/api/agent-tasks")

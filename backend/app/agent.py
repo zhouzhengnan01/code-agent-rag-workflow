@@ -483,6 +483,9 @@ async def build_context(agent, provider=None, model=None, user_message="", threa
 
 
 async def tool_specs(agent):
+    # Model-only workflow nodes must also suppress implicit domain/MCP tools.
+    if agent.get("_workflow_no_tools"):
+        return [], {}
     specs, routes = [], {}
     domain_tools = ("project_list", "project_create", "project_select", "project_artifacts", "workflow_list", "workflow_get", "workflow_versions", "workflow_version_get",
                     "workflow_draft_create", "workflow_draft_update", "workflow_draft_save",

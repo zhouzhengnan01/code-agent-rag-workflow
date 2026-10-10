@@ -1,0 +1,10 @@
+{
+  "status": "ok",
+  "model": "qwen3.7-text-embedding",
+  "dimensions": 1024,
+  "chunks": 3,
+  "retrieval": "hybrid",
+  "diagnostic_status": "ok",
+  "hits": 3,
+  "expected_text_found": true
+}
