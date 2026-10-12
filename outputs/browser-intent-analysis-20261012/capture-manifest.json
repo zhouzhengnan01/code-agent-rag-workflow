@@ -1,0 +1,441 @@
+{
+  "requested_url": "https://cloud.browser-use.com/v4/session/77194822-a143-4d3e-9b9a-3db4ea3e56d2",
+  "final_url": "https://cloud.browser-use.com/v4/session/77194822-a143-4d3e-9b9a-3db4ea3e56d2",
+  "authenticated": false,
+  "html_bytes": 219270,
+  "scripts": [
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/main-app-4b8077866849e9d3.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/main-app-4b8077866849e9d3.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\184e17e76df0-main-app-4b8077866849e9d3.js",
+      "bytes": 572,
+      "sha256": "4f8ecc984e33c10c988d32d8f6f837f6a953643627229fd7588bd11b6e478f3f"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/4bd1b696-100b9d70ed4e49c1.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/4bd1b696-100b9d70ed4e49c1.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\750e72003713-4bd1b696-100b9d70ed4e49c1.js",
+      "bytes": 173025,
+      "sha256": "5421e13a91a9389517b66179f3b4b5eaa0d95245438066d4d7b19ac30aeb809b"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/97bfd92e-664a584b71b90450.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/97bfd92e-664a584b71b90450.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\61079234a42c-97bfd92e-664a584b71b90450.js",
+      "bytes": 69535,
+      "sha256": "98ea1750a202ea0f6001ecbdd7d2c6d588bbfcb9b01e128473c7c05526c9d37e"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/0e5ce63c-9652b3bf57ed44f7.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/0e5ce63c-9652b3bf57ed44f7.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\8f1111180211-0e5ce63c-9652b3bf57ed44f7.js",
+      "bytes": 11789,
+      "sha256": "5610be4513378991bd73eada9d1c23b00be8ce791517862fdaf85bc64b57b921"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/355-c8725f0775c31d9d.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/355-c8725f0775c31d9d.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\9cb48843f047-355-c8725f0775c31d9d.js",
+      "bytes": 417336,
+      "sha256": "3635da9ce3be43a8808569ba14e7ce4994a4fd5b79f4091bc6f9a1c8eabe10b8"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/7022-c7e16310df2a50f0.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/7022-c7e16310df2a50f0.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\7891e24b7602-7022-c7e16310df2a50f0.js",
+      "bytes": 19054,
+      "sha256": "cf7fe1de2c4a9174992890d5208489bf32652d8548497f0f2446bf9608187fae"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/4909-88ccca120d9c2257.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/4909-88ccca120d9c2257.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\312abfa0c31e-4909-88ccca120d9c2257.js",
+      "bytes": 20154,
+      "sha256": "af70b7cc85146b9e1e673a50a42032c06dd65be8a89926a49995a8e0664e0018"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/2619-04bc32f026a0d946.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/2619-04bc32f026a0d946.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\98a1841c9636-2619-04bc32f026a0d946.js",
+      "bytes": 8564,
+      "sha256": "a9b6c2213ea787a015c0169d198b4a90d7a44a0cc17abb0d132e8362d3016ced"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/1255-22c65bbdc70a22fb.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/1255-22c65bbdc70a22fb.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\761b3734dff0-1255-22c65bbdc70a22fb.js",
+      "bytes": 173288,
+      "sha256": "260ca3a060bd1bb14a0292628af8a70446e2f4939f3d2df3e4482cdd41efddaf"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/3829-ee6004070acf7b59.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/3829-ee6004070acf7b59.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\2047b4d6aa03-3829-ee6004070acf7b59.js",
+      "bytes": 24397,
+      "sha256": "e29ce700aea66aa81eab680971fb491920243ab15c9791b3e0393eb0cbf568d7"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/3210-a596c3e5992613d5.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/3210-a596c3e5992613d5.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\f0346d2d8ec5-3210-a596c3e5992613d5.js",
+      "bytes": 7576,
+      "sha256": "bd959cd68ddee866ac493aef322f33b0884071169fc2ef1372bf42627c527caa"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/2204-bc4b7cf45d3a0204.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/2204-bc4b7cf45d3a0204.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\c26bedd661ef-2204-bc4b7cf45d3a0204.js",
+      "bytes": 11442,
+      "sha256": "fc61377f7028cfdaac70545e655e201a842260a4927b87474e620b5395288a4c"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/1596-33bb0acd4b526051.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/1596-33bb0acd4b526051.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\8028b123846b-1596-33bb0acd4b526051.js",
+      "bytes": 12828,
+      "sha256": "20b35747bda2e981250f5bafbec5fa94f7afe0d69922ed38beb8d384d69ef949"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/283-69b58e5ab9f8f820.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/283-69b58e5ab9f8f820.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\3e82fb0d501f-283-69b58e5ab9f8f820.js",
+      "bytes": 14898,
+      "sha256": "fd9d4b3b06a3edd775abd48990478a9710e29d3fb07bc672c54cca50844936e2"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/9683-d400f0cb2e506f29.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/9683-d400f0cb2e506f29.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\1e9f11eb55d4-9683-d400f0cb2e506f29.js",
+      "bytes": 21237,
+      "sha256": "0071c7b39dd874c41472fd7c8f9efc4a0e6058a951c3d1defc4f08161688907a"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/4345-fa2ed994c92f83d9.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/4345-fa2ed994c92f83d9.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\c8a43c9a38e3-4345-fa2ed994c92f83d9.js",
+      "bytes": 14632,
+      "sha256": "c62332c235c9be7aa3bc05e4c708cfb49ef29175f9daaaf138830f935933093e"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/8627-106ab737f4e0ed1b.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/8627-106ab737f4e0ed1b.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\809887ce804a-8627-106ab737f4e0ed1b.js",
+      "bytes": 29840,
+      "sha256": "e1f4e5632a88d6c9549ba13fa88e6f9608d15d6fb16afb9138cc358652c71420"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/2544-9a049dbd193b98b2.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/2544-9a049dbd193b98b2.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\1b9d9f6f17d9-2544-9a049dbd193b98b2.js",
+      "bytes": 27302,
+      "sha256": "a567e5e5853a5b3447be21933e71c2ebcdc1a316c485db4cae4695e1cb04ff7a"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/3555-a21a857d9dd3c3a5.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/3555-a21a857d9dd3c3a5.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\506a98dc5f93-3555-a21a857d9dd3c3a5.js",
+      "bytes": 39446,
+      "sha256": "d0ce7db796d2e6f7aed8966a1c63229873c36b9f4ff8cb140206027ab12095df"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/2499-819ad3c201068731.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/2499-819ad3c201068731.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\c7290b727121-2499-819ad3c201068731.js",
+      "bytes": 28343,
+      "sha256": "d063786acebd1b6505be3185e3d9561a92ab5ef4f989c2fc437460f77be4b147"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/2128-248e95cfd2a65e85.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/2128-248e95cfd2a65e85.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\355001ee4110-2128-248e95cfd2a65e85.js",
+      "bytes": 23168,
+      "sha256": "c6a400e91cf6c83525d60d1ad353d50bb82bc36293866f7fa3305dd59b6c0e8f"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/6745-8d900bcf38229cae.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/6745-8d900bcf38229cae.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\14f3eebf687f-6745-8d900bcf38229cae.js",
+      "bytes": 24645,
+      "sha256": "38be7e94ba6c2b15b44bc25baf35fa06399b439a691a3ee61f032fa91fcc8799"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/5376-92cf67a0a8a4a619.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/5376-92cf67a0a8a4a619.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\65a22c4b5127-5376-92cf67a0a8a4a619.js",
+      "bytes": 8307,
+      "sha256": "22ec62f24bd5e1308fbac08453bc1a3bed2d5af99ddbb7d702f725906e19b385"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/9620-db98fd1236f1e570.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/9620-db98fd1236f1e570.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\9e3143ef6ba4-9620-db98fd1236f1e570.js",
+      "bytes": 17891,
+      "sha256": "d5ca7659bbe5b1f1fb644c7266db2d19597ecf675c00a369cd88022c732cb1bc"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/app/layout-9b20a7daea149ed1.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/app/layout-9b20a7daea149ed1.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\997e7dd90bd7-layout-9b20a7daea149ed1.js",
+      "bytes": 14396,
+      "sha256": "8b1e77195485fdfba11bb2eb9f938c3bfc4e17c08f9b1c0141ecfa6d8f0e3b7e"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/2603-533ca5a93f97eccc.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/2603-533ca5a93f97eccc.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\e657c9c5acce-2603-533ca5a93f97eccc.js",
+      "bytes": 13294,
+      "sha256": "943bcb32024d987e521c0b958e3897a99b9389cdafc4236a2f3985cba84d7ed3"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/7246-e70dd2e115d464e3.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/7246-e70dd2e115d464e3.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\e8150af53fcc-7246-e70dd2e115d464e3.js",
+      "bytes": 6532,
+      "sha256": "87099e10e25ff239146b06b3ebe0a44b86903bece40884147578bce066b0f3e0"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/2963-5588f5d884cd2dfc.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/2963-5588f5d884cd2dfc.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\ccc3a3e663fc-2963-5588f5d884cd2dfc.js",
+      "bytes": 8890,
+      "sha256": "c80bc76ac0c52b2e71783e155a28630f6ef673c37318e24a370c7cca0a4b8ed3"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/app/(auth-protected)/layout-c1f74fbb6d73907f.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/app/(auth-protected)/layout-c1f74fbb6d73907f.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\8da8e9f706a5-layout-c1f74fbb6d73907f.js",
+      "bytes": 13877,
+      "sha256": "1509c193eda152cfb58eec6f0ef8238e13b4420d6ad9579fb6a6ddab4479ee73"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/30a37ab2-cda5830df974d310.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/30a37ab2-cda5830df974d310.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\6f3b4b59c0ad-30a37ab2-cda5830df974d310.js",
+      "bytes": 17559,
+      "sha256": "1d53a0af159025335d7be5276c4edc2f6aa64309c2faec83cf1e803ff51d3f5f"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/5239-54fd487e1fec6af3.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/5239-54fd487e1fec6af3.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\aa05a9f1bafa-5239-54fd487e1fec6af3.js",
+      "bytes": 14269,
+      "sha256": "ecbb6435c22cbe1d56841f7d5f636dbdfe46f44080f43617d3194d475c672796"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/6013-c7863027ba2fafca.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/6013-c7863027ba2fafca.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\19c2162ba755-6013-c7863027ba2fafca.js",
+      "bytes": 8546,
+      "sha256": "8cd0993d99222bd5a563fc76990c12f97297fbb64a277912f7b1e0225c6d4911"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/9da6db1e-42ac4e0bbf52a938.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/9da6db1e-42ac4e0bbf52a938.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\9e5952f1ea87-9da6db1e-42ac4e0bbf52a938.js",
+      "bytes": 189140,
+      "sha256": "ed6dbf19021c52375c9a343a875299a38e8810d9bb155ab6456aebdc4bfaa016"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/9364-ddf712c85e6b23d2.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/9364-ddf712c85e6b23d2.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\1e1cded2225e-9364-ddf712c85e6b23d2.js",
+      "bytes": 109971,
+      "sha256": "c638e5c954a26f171a0728f1ac13b34c43671a5d48ff64bb5e67ee120da5c542"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/7880-c95d9136a22e87f5.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/7880-c95d9136a22e87f5.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\957ede97b4f0-7880-c95d9136a22e87f5.js",
+      "bytes": 53603,
+      "sha256": "adc996665e2d728d3259cab5342899f2e32870353eb67fb0b3dfa7f05f3597dd"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/7752-7899b94af7782c20.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/7752-7899b94af7782c20.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\00c4d93ee957-7752-7899b94af7782c20.js",
+      "bytes": 26245,
+      "sha256": "dd5a7bcab0dbeb411ee578837934f21890bed0dfc88d5cad1edcf789a3f15332"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/3654-c49d518e17b2a139.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/3654-c49d518e17b2a139.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\7d94bdfd05b4-3654-c49d518e17b2a139.js",
+      "bytes": 16749,
+      "sha256": "d1590483dad87a974617e9e18c084ba0079686ac8df5455f9fa72e16c2585c0f"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/8277-c22ebcf454423168.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/8277-c22ebcf454423168.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\5ee33ede12b8-8277-c22ebcf454423168.js",
+      "bytes": 28749,
+      "sha256": "4304caee24bbb75ebbdcab8d50e211bd29ef20ffce680de04de7f695c49e2339"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/app/(auth-protected)/(layout)/layout-9413005c3332108e.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/app/(auth-protected)/(layout)/layout-9413005c3332108e.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\434365de6d84-layout-9413005c3332108e.js",
+      "bytes": 11784,
+      "sha256": "269dddc17ebb3392f848a75edab492e70aa8c87254c8f02cc4a365252d3b8256"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/323-abb9719342b6f6ce.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/323-abb9719342b6f6ce.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\3dfb09563c8b-323-abb9719342b6f6ce.js",
+      "bytes": 104370,
+      "sha256": "f7c7111c4cb53d1c9fb003705bcf88fe59af709583acaa9751ec3e09d4769ccc"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/53c13509-717c1499269138cf.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/53c13509-717c1499269138cf.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\53777b3f9094-53c13509-717c1499269138cf.js",
+      "bytes": 4617,
+      "sha256": "86692baab74df95d3dd42aacb01c21d6ff8a73c7128a889418c693fad79bddc2"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/d3ac728e-3c0aaf3fc47a90b2.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/d3ac728e-3c0aaf3fc47a90b2.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\afa5686acc3d-d3ac728e-3c0aaf3fc47a90b2.js",
+      "bytes": 268237,
+      "sha256": "3b185e4ad9b9a18a586d6ba7607dfc190259d9d3a048ace73adcdff5287fe080"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/363642f4-338199c2ffa8cf12.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/363642f4-338199c2ffa8cf12.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\dbcb9bb8ccea-363642f4-338199c2ffa8cf12.js",
+      "bytes": 161385,
+      "sha256": "ef70a52d2a21634ec188decea45d4a2c126ad0bf5e26fbe7d24dc27b208f7563"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/9936-e2ba7e44eb481c09.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/9936-e2ba7e44eb481c09.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\c79f1b3c800a-9936-e2ba7e44eb481c09.js",
+      "bytes": 89379,
+      "sha256": "6765f8993ba24675a16d0947ba86cc3ae903cd8a60175fa1427b3b7369e14c93"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/7120-e006fd8c2ad90e3e.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/7120-e006fd8c2ad90e3e.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\cb0c1c9a1e9f-7120-e006fd8c2ad90e3e.js",
+      "bytes": 149098,
+      "sha256": "484635e8a467e6ecb53d3e9dae7634ec13d33dcacbb017c71d64b107b478c0bf"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/8250-638dfe85a857ce38.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/8250-638dfe85a857ce38.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\6df75690e5c0-8250-638dfe85a857ce38.js",
+      "bytes": 16004,
+      "sha256": "ab47b40cfd878e191e606e973221355a088377c3083237183d98d662a18fcc22"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/1818-86de838ce417e63f.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/1818-86de838ce417e63f.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\a385b7d6144e-1818-86de838ce417e63f.js",
+      "bytes": 32420,
+      "sha256": "69350a1a5687c47e9e2fe5ad33f067d7de9036237ae8ac62957ff49f0e586e3b"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/7867-56220e69ec066c69.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/7867-56220e69ec066c69.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\e69da9bab5c6-7867-56220e69ec066c69.js",
+      "bytes": 118449,
+      "sha256": "a02c8f5ab4a1329c928573c29b13c840d4a447f681825ab33d167f4f33f3602a"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/5168-7311a7518dc10588.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/5168-7311a7518dc10588.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\b2514593200c-5168-7311a7518dc10588.js",
+      "bytes": 21989,
+      "sha256": "3f4fc03a1766ada0113b80a5eacfadf05ab248a2ad464d1f7525f291188d92a9"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/59-88bb7578746affef.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/59-88bb7578746affef.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\38414c7642f9-59-88bb7578746affef.js",
+      "bytes": 18129,
+      "sha256": "a23151ebc056d0a225d3473a91c7a6bacf6ee35bfa329a440c59c6f38d116855"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/3733-7f7f7f5dc006bde6.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/3733-7f7f7f5dc006bde6.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\7ed7b7a16cac-3733-7f7f7f5dc006bde6.js",
+      "bytes": 30755,
+      "sha256": "46a6e33997d55c3b7cc6d4755831c24fd337f0e8a70ebe862acc35d775802009"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/7288-366a93b2fc92e221.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/7288-366a93b2fc92e221.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\822f36b96b2c-7288-366a93b2fc92e221.js",
+      "bytes": 32983,
+      "sha256": "bd69e8d6473ebc8f3e43985f01e8247e5b03837f6ab161e23df7246d924c92a6"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/9399-d2173213cb23a326.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/9399-d2173213cb23a326.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\d8f6cc9bc379-9399-d2173213cb23a326.js",
+      "bytes": 54050,
+      "sha256": "0a7f6a71df1ababe7e6f0bc1d0f6ac9751af77c4599b0307c697320add0d79d3"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/420-795a6f815479aef4.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/420-795a6f815479aef4.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\c06e3708ed2a-420-795a6f815479aef4.js",
+      "bytes": 22475,
+      "sha256": "11fa00402aa2249a894fab2baad364f6cbe3095e62a1f12e051dae653eff3eec"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/1686-d8da12c9e446321b.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/1686-d8da12c9e446321b.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\f0546bb6aa78-1686-d8da12c9e446321b.js",
+      "bytes": 23556,
+      "sha256": "c5aec4d7a0b50593bea1893680c6382939cd48740715c87f3fa5a00486af3d0a"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/2986-d13cd6f28b2c2f07.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/2986-d13cd6f28b2c2f07.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\c43f80562b2b-2986-d13cd6f28b2c2f07.js",
+      "bytes": 201731,
+      "sha256": "eeb2ec7dcc84902db876825a979f2e333a906a77c028d915e9b28ca2490bc145"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/app/error-e34bff1783d05e83.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/app/error-e34bff1783d05e83.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\d4a28a6f4c89-error-e34bff1783d05e83.js",
+      "bytes": 12029,
+      "sha256": "38955e8ef52324f61a26419f7a070b097c17bd06097ee69fd4f2523029d998e3"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/app/(auth-protected)/(layout)/v4/session/%5BsessionId%5D/page-d8421ddae5b055ef.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/app/(auth-protected)/(layout)/v4/session/%5BsessionId%5D/page-d8421ddae5b055ef.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\d35b8680c0e4-page-d8421ddae5b055ef.js",
+      "bytes": 1781,
+      "sha256": "f4a9a0818f39f32a330897ad9258a1bfa9f54a94e5bc297355beb83adbca9a8a"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/1513-7210f0138a1a3d49.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/1513-7210f0138a1a3d49.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\0078a81a9895-1513-7210f0138a1a3d49.js",
+      "bytes": 98014,
+      "sha256": "3df0fc5e075e3d0bb5944c6bde774be1dae0f3c8ecbd9be9a84b2e078329e81e"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/webpack-7c3e7ff516b77286.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/webpack-7c3e7ff516b77286.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\07c76bbe8ed9-webpack-7c3e7ff516b77286.js",
+      "bytes": 13154,
+      "sha256": "6d2a37a1876212bddab97f76932e6417db6005e25439819d3df0053ac33da262"
+    },
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/polyfills-42372ed130431b0a.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "resolved_url": "https://cloud.browser-use.com/_next/static/chunks/polyfills-42372ed130431b0a.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "path": "outputs\\browser-intent-analysis-20261012\\public-bundles\\6a5a730d5da1-polyfills-42372ed130431b0a.js",
+      "bytes": 112594,
+      "sha256": "0973c1d64c88adc8e3c950410cb58b288f72118d5965b78049438deb8f2f9683"
+    }
+  ],
+  "errors": [
+    {
+      "url": "https://cloud.browser-use.com/_next/static/chunks/6767-1e5866f396c7b4ba.js?dpl=dpl_4x1byKoD7BLwLjGvPqCzJ4nxtwDd",
+      "error": "curl: (28) Operation timed out after 20005 milliseconds with 621673 out of 801054 bytes received\r\n"
+    }
+  ]
+}

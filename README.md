@@ -29,6 +29,8 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 
 本地知识库批量上传、后台文档处理、失败重试与片段预览见 [知识库文档处理说明](docs/knowledge-documents.md)。
 
+会话队列、按需检索、追问恢复、执行中追加/中断与默认项目保存见 [会话交互闭环说明](docs/conversation-interactions.md)。
+
 ```powershell
 cd D:\code-agent-rag-workflow
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
@@ -337,6 +339,8 @@ HTTP：
 - Worktree：当 `/workspace` 本身是 Git 仓库时自动生效；可用 `GET /api/worktrees` 查看，用 `DELETE /api/worktrees/{id}` 清理。清理前确认分支内容已经提交或推送。
 
 ## API 概览
+
+新版对话工作台的附件上传、会话模型切换、历史子菜单及部署/验收方法见 [对话工作台说明](docs/chat-workbench.md)。
 
 - `/api/resources/agents`、`/api/resources/agent_teams`、`/api/resources/providers`、`/api/resources/skills`、`/api/resources/mcp_servers`、`/api/resources/knowledge`、`/api/resources/workflows`：CRUD
 - `GET /api/agent-templates`：角色模板

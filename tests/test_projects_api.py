@@ -189,9 +189,9 @@ def test_project_choice_requires_existing_project_and_safe_paths(tmp_path, monke
         assert no_write_stream.status_code == 409
         token = db.use_tenant(user_id)
         try:
-            assert get_turn_project(legacy.json()["turn_id"]) is None
+            assert get_turn_project(legacy.json()["turn_id"]) == {"project_id": project_id, "save_to_project": True}
             with db.connect() as connection:
-                assert connection.execute("SELECT count(*) FROM turn_projects").fetchone()[0] == 1
+                assert connection.execute("SELECT count(*) FROM turn_projects").fetchone()[0] == 2
         finally:
             db.reset_tenant(token)
         with db.connect() as connection:

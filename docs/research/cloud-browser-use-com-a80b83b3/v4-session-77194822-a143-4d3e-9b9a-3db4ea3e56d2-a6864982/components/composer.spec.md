@@ -1,0 +1,7 @@
+# Composer specification
+Target: web/chat-workbench.css composer rules. Main owns actual controls and handlers.
+.prompt-dock width:min(640px,calc(100% - 48px)), alignself:center; flexshrink0; margin:16px auto 24px; border1pxsolidrgb(231,229,228); radius16px; white; focus subtle border/shadow, no giant full-width strip.
+#chatInput min-height64px max-height180px; border0 noresize, padding14px20px6px; text15px,line-height24px. .prompt-footer/.prompt-tools flex bottomrow gap4; padding6px12px10px. .composer-action iconbutton32px radius6px neutralgrey; .composer-model select #chatModel height36px font13px, borderless, minwidth0 maxwidth240; .composer-send circular36px atfar-right, violet or darkneutral, sendingstop state real.
+.composer-context optionalproject/capabilities compact controls .project-context-bar #projectChip and #capabilityStrip within dock, no fullwidth topsection; font11px muted. .composer-attachments #chatAttachments removable chips with name/status, image preview optional; .attachment-error red visible. .composer-hint under dock subtle11px Enter/ShiftEnter info; separate wrapper ifneeded.
+Interaction: picker/drag/drop files with upload state; model selection saves thread-specific choice; disable conflicting controls while running; stop button accessible; ready attachment-only send allowed; empty send disabled. Show explicit failures, no fake controls or prices.
+Mobile390: widthcalc(100%-24px), margins12px; toolrow wraps or clamps model label, stays visible; attachments wrap; filebutton easytouch>=32px. Focus/reduced-motion accessible.

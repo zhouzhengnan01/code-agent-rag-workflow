@@ -1,0 +1,29 @@
+{
+  "image": "codezzn-app:local",
+  "sha256": "d36d796cd026ad1ab2e70cd15825f68fd440f0fbbdab8a19f08b7640c1eb144e",
+  "backend_regression_passed": 146,
+  "browser_integration_passed": 10,
+  "frontend_passed": 12,
+  "codezzn": "healthy",
+  "sandbox_broker": "healthy",
+  "verified_project_files": [
+    {
+      "name": "hello-algo-github.png",
+      "bytes": 1387694
+    },
+    {
+      "name": "hello-algo-github-2.png",
+      "bytes": 189020
+    }
+  ],
+  "old_approval": "approved",
+  "production_verification": "authenticated HTTP; temporary session removed",
+  "ui_verification": "isolated QA environment",
+  "historical_run_statuses": [
+    "failed",
+    "failed",
+    "completed"
+  ],
+  "active_recovery_tasks": 0,
+  "legacy_startup_note": "Before the new version was deployed, the old startup recovery completed a response using existing tool results; browser tools were not executed again."
+}

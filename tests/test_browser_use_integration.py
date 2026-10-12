@@ -515,6 +515,7 @@ def test_help_project_inventory_uses_current_tenant_not_faq(tmp_path, monkeypatc
 def test_coding_file_request_does_not_report_unsaved_code_as_file(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_module, "WORKSPACE", tmp_path)
     monkeypatch.setattr(agent_module, "get_turn_project", lambda _turn: {"project_id": "prj_aaaaaaaaaaaaaaaa", "save_to_project": True})
+    monkeypatch.setattr(agent_module, "project_artifact_list", lambda _project: [])
     monkeypatch.setattr(agent_module, "_has_turn_artifact", lambda _turn: False)
     monkeypatch.setattr(agent_module, "resource_get", lambda kind, _id: {"id": "pvd_demo", "name": "Mock", "type": "openai", "default_model": "mock", "api_key": "test"} if kind == "providers" else None)
     monkeypatch.setattr(agent_module, "save_agent_run", lambda *args, **kwargs: None)
@@ -537,6 +538,7 @@ def test_coding_file_request_does_not_report_unsaved_code_as_file(monkeypatch, t
 def test_coding_file_request_retries_with_write_tool_then_reports_success(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_module, "WORKSPACE", tmp_path)
     monkeypatch.setattr(agent_module, "get_turn_project", lambda _turn: {"project_id": "prj_aaaaaaaaaaaaaaaa", "save_to_project": True})
+    monkeypatch.setattr(agent_module, "project_artifact_list", lambda _project: [])
     saved = {"value": False}
     monkeypatch.setattr(agent_module, "_has_turn_artifact", lambda _turn: saved["value"])
     monkeypatch.setattr(agent_module, "resource_get", lambda kind, _id: {"id": "pvd_demo", "name": "Mock", "type": "openai", "default_model": "mock", "api_key": "test"} if kind == "providers" else None)

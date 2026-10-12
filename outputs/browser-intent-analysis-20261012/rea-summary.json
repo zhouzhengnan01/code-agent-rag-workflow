@@ -1,0 +1,312 @@
+{
+  "evidence_id": "ev_42d3cab7f36a412aad4021a90603ce6a770331c2da40f2dc94a4096f1ffde59c",
+  "subject": {
+    "name": "D:\\code-agent-rag-workflow\\outputs\\browser-intent-analysis-20261012\\selected-source",
+    "digest": {
+      "sha256": "bfa4c4252ab314f54a26175ca369eeb663041665b0a1ebc9763188f7a43c3cb0"
+    },
+    "format": "directory",
+    "architecture": null,
+    "local_path": "D:\\code-agent-rag-workflow\\outputs\\browser-intent-analysis-20261012\\selected-source"
+  },
+  "provider": {
+    "id": "rea-analysis-view",
+    "name": "REA analysis view projection",
+    "version": "1"
+  },
+  "analysis_profile": null,
+  "predicate_type": "rea.analysis-view",
+  "operation": "inspect_analysis_view",
+  "parameters": {
+    "parent_evidence_id": "ev_a9369bbda105896e3e49655a7b635c168eeb821481b747aa0f20adc347a05d88",
+    "view": {
+      "kind": "summary"
+    }
+  },
+  "raw_result": null,
+  "normalized_result": {
+    "kind": "summary",
+    "view": {
+      "kind": "summary"
+    },
+    "summary": {
+      "input_path": "D:\\code-agent-rag-workflow\\outputs\\browser-intent-analysis-20261012\\selected-source",
+      "format": "directory",
+      "root_artifact_sha256": "bfa4c4252ab314f54a26175ca369eeb663041665b0a1ebc9763188f7a43c3cb0",
+      "statistics": {
+        "relevant_files": 3,
+        "nested_asar_containers": 0,
+        "text_bytes_read": 353795,
+        "invalid_utf8_files": 0,
+        "parsed_javascript_files": 3,
+        "visited_ast_nodes": 98579,
+        "findings": 454,
+        "modules": 49,
+        "parse_failures": 0
+      },
+      "electron": {
+        "browser_windows": 0,
+        "explicit_web_preferences": 0,
+        "preload_entrypoints": 0,
+        "context_bridge_apis": 0,
+        "exposed_api_members": 0,
+        "ipc": {
+          "operations": 0,
+          "literal_channels": 0,
+          "dynamic_channel_operations": 0,
+          "renderer_transmissions": 0,
+          "renderer_listeners": 0,
+          "main_handlers": 0,
+          "paired_renderer_transmissions": 0,
+          "ambiguous_renderer_transmissions": 0,
+          "unpaired_literal_renderer_transmissions": 0
+        },
+        "sender_validation_observations": 0,
+        "utility_processes": 0,
+        "resolved_utility_entrypoints": 0,
+        "native_addon_bindings": 0,
+        "resolved_native_addon_bindings": 0
+      },
+      "coverage": {
+        "application": {
+          "status": "partial",
+          "truncated": false,
+          "omitted_count": null,
+          "limits": [
+            {
+              "name": "javascript_analysis_parent_result_budget_bytes",
+              "value": 2057549108,
+              "unit": "bytes"
+            },
+            {
+              "name": "javascript_analysis_semantic_result_budget_bytes",
+              "value": 0,
+              "unit": "bytes"
+            },
+            {
+              "name": "javascript_analysis_worker_heap_limit_bytes",
+              "value": 1635778560,
+              "unit": "bytes"
+            },
+            {
+              "name": "javascript_analysis_worker_timeout_ms",
+              "value": 60000,
+              "unit": "milliseconds"
+            }
+          ]
+        },
+        "semantic": {
+          "status": "partial",
+          "truncated": true,
+          "omitted_nodes": null,
+          "omitted_relations": null,
+          "limits": [
+            {
+              "name": "javascript_analysis_semantic_result_budget_bytes",
+              "value": 0,
+              "unit": "bytes"
+            },
+            {
+              "name": "javascript_analysis_worker_heap_limit_bytes",
+              "value": 1635778560,
+              "unit": "bytes"
+            },
+            {
+              "name": "javascript_analysis_worker_timeout_ms",
+              "value": 60000,
+              "unit": "milliseconds"
+            },
+            {
+              "name": "semantic_graph_node_ceiling",
+              "value": 100000,
+              "unit": "items"
+            }
+          ],
+          "families": [
+            {
+              "family": "boundary",
+              "status": "partial",
+              "retained_relations": 12,
+              "omitted_relations": null,
+              "unknown_count": 3
+            },
+            {
+              "family": "call-flow",
+              "status": "partial",
+              "retained_relations": 1593,
+              "omitted_relations": null,
+              "unknown_count": 2633
+            },
+            {
+              "family": "child-process",
+              "status": "partial",
+              "retained_relations": 0,
+              "omitted_relations": null,
+              "unknown_count": 1
+            },
+            {
+              "family": "closure",
+              "status": "partial",
+              "retained_relations": 2975,
+              "omitted_relations": null,
+              "unknown_count": 1
+            },
+            {
+              "family": "configuration",
+              "status": "partial",
+              "retained_relations": 0,
+              "omitted_relations": null,
+              "unknown_count": 1
+            },
+            {
+              "family": "data-flow",
+              "status": "partial",
+              "retained_relations": 37036,
+              "omitted_relations": null,
+              "unknown_count": 2777
+            },
+            {
+              "family": "event",
+              "status": "partial",
+              "retained_relations": 0,
+              "omitted_relations": null,
+              "unknown_count": 1
+            },
+            {
+              "family": "object-flow",
+              "status": "partial",
+              "retained_relations": 3486,
+              "omitted_relations": null,
+              "unknown_count": 4343
+            },
+            {
+              "family": "promise-ownership",
+              "status": "partial",
+              "retained_relations": 8,
+              "omitted_relations": null,
+              "unknown_count": 3
+            },
+            {
+              "family": "request",
+              "status": "partial",
+              "retained_relations": 0,
+              "omitted_relations": null,
+              "unknown_count": 1
+            },
+            {
+              "family": "resource-lifecycle",
+              "status": "partial",
+              "retained_relations": 0,
+              "omitted_relations": null,
+              "unknown_count": 1
+            },
+            {
+              "family": "timer",
+              "status": "partial",
+              "retained_relations": 0,
+              "omitted_relations": null,
+              "unknown_count": 10
+            }
+          ]
+        },
+        "application_unknowns": 2,
+        "semantic_unknowns": 9775
+      },
+      "limitation_count": 8
+    },
+    "parent_evidence_id": "ev_a9369bbda105896e3e49655a7b635c168eeb821481b747aa0f20adc347a05d88",
+    "parent_operation": "analyze_javascript_application",
+    "parent_digest": "a9369bbda105896e3e49655a7b635c168eeb821481b747aa0f20adc347a05d88",
+    "view_digest": "278704bef6031f7bf519d2b333db6543ee4179e68b7ae3b2cea889a743568ed6",
+    "artifact": {
+      "path": "D:\\code-agent-rag-workflow\\outputs\\browser-intent-analysis-20261012\\selected-source",
+      "sha256": "bfa4c4252ab314f54a26175ca369eeb663041665b0a1ebc9763188f7a43c3cb0"
+    },
+    "coverage": {
+      "status": "complete-within-view",
+      "examined": 156,
+      "total": 164,
+      "next_offset": null,
+      "exhausted": true
+    },
+    "limitations": [
+      "Boundary extraction covers unshadowed JSON/global coercions plus parse and validation method candidates.",
+      "Child-process extraction covers asynchronous node:child_process creation, literal argv/env/stdio options, exit/error listeners, and kill signals.",
+      "CommonJS and ESM binding relationships were recovered from inert syntax and resolved only within the inventoried artifact container.",
+      "Configuration extraction covers process.env, process.argv, node:fs reads, and direct logical defaults.",
+      "Event extraction covers EventEmitter-style literal registrations, removals, and dispatch candidates; dynamic names remain unknown.",
+      "Function fingerprints are static candidates; equal digests can remain ambiguous and do not prove behavioral equivalence.",
+      "Graph coverage is incomplete; unavailable facts remain explicit and must not be read as absence.",
+      "JavaScript and HTML were parsed as inert text; bundle bootstrap code was never executed.",
+      "Local data flow does not claim control-flow-sensitive reaching definitions or arbitrary dynamic property resolution.",
+      "Promise ownership covers explicit unshadowed Promise construction, static factories, aggregation, chaining, and await syntax only.",
+      "Request extraction covers fetch, WebSocket, node:http/node:https construction, direct option fields, and exact local response consumers.",
+      "Resource constraint during analyze_javascript_application: Expanded application relationships for c43f80562b2b-2986-d13cd6f28b2c2f07.js exceed the parent's result budget; complete static facts were retained on the file node",
+      "Resource extraction covers built-in filesystem/network acquisition and exact local close/destroy/end handles.",
+      "Static imports, entrypoints, workers, endpoints, and storage relationships do not prove runtime execution.",
+      "Static paths and relationships may remain unresolved when expressions are dynamic or obfuscated.",
+      "The semantic graph contains static syntax observations and conservative relationship candidates; it does not claim runtime execution.",
+      "Timer extraction covers global or node:timers scheduling and exact local-handle cancellation.",
+      "Webpack/Rspack factories were recovered from AST literals; REA did not invoke push handlers or bundle bootstrap code.",
+      "c43f80562b2b-2986-d13cd6f28b2c2f07.js: Resource constraint during analyze_javascript_application: c43f80562b2b-2986-d13cd6f28b2c2f07.js: Resource constraint during analyze_javascript_application: The parent reserved its remaining result capacity for static observations; semantic analysis of c43f80562b2b-2986-d13cd6f28b2c2f07.js was not started"
+    ],
+    "unknowns": [
+      "2 application graph unknowns remain in the parent Evidence.",
+      "9775 semantic graph unknowns remain in the parent Evidence.",
+      "Boundary extraction covers unshadowed JSON/global coercions plus parse and validation method candidates.",
+      "Child-process extraction covers asynchronous node:child_process creation, literal argv/env/stdio options, exit/error listeners, and kill signals.",
+      "CommonJS and ESM binding relationships were recovered from inert syntax and resolved only within the inventoried artifact container.",
+      "Configuration extraction covers process.env, process.argv, node:fs reads, and direct logical defaults.",
+      "Event extraction covers EventEmitter-style literal registrations, removals, and dispatch candidates; dynamic names remain unknown.",
+      "Function fingerprints are static candidates; equal digests can remain ambiguous and do not prove behavioral equivalence.",
+      "Graph coverage is incomplete; unavailable facts remain explicit and must not be read as absence.",
+      "JavaScript and HTML were parsed as inert text; bundle bootstrap code was never executed.",
+      "Local data flow does not claim control-flow-sensitive reaching definitions or arbitrary dynamic property resolution.",
+      "Promise ownership covers explicit unshadowed Promise construction, static factories, aggregation, chaining, and await syntax only.",
+      "Request extraction covers fetch, WebSocket, node:http/node:https construction, direct option fields, and exact local response consumers.",
+      "Resource constraint during analyze_javascript_application: Expanded application relationships for c43f80562b2b-2986-d13cd6f28b2c2f07.js exceed the parent's result budget; complete static facts were retained on the file node",
+      "Resource extraction covers built-in filesystem/network acquisition and exact local close/destroy/end handles.",
+      "Static imports, entrypoints, workers, endpoints, and storage relationships do not prove runtime execution.",
+      "Static paths and relationships may remain unresolved when expressions are dynamic or obfuscated.",
+      "The semantic graph contains static syntax observations and conservative relationship candidates; it does not claim runtime execution.",
+      "Timer extraction covers global or node:timers scheduling and exact local-handle cancellation.",
+      "Webpack/Rspack factories were recovered from AST literals; REA did not invoke push handlers or bundle bootstrap code.",
+      "c43f80562b2b-2986-d13cd6f28b2c2f07.js: Resource constraint during analyze_javascript_application: c43f80562b2b-2986-d13cd6f28b2c2f07.js: Resource constraint during analyze_javascript_application: The parent reserved its remaining result capacity for static observations; semantic analysis of c43f80562b2b-2986-d13cd6f28b2c2f07.js was not started",
+      "graph.coverage.status is partial",
+      "semantic_graph.coverage.status is partial"
+    ]
+  },
+  "confidence": "derived",
+  "authority": "shipped-artifact",
+  "environment": null,
+  "limitations": [
+    "Boundary extraction covers unshadowed JSON/global coercions plus parse and validation method candidates.",
+    "Child-process extraction covers asynchronous node:child_process creation, literal argv/env/stdio options, exit/error listeners, and kill signals.",
+    "CommonJS and ESM binding relationships were recovered from inert syntax and resolved only within the inventoried artifact container.",
+    "Configuration extraction covers process.env, process.argv, node:fs reads, and direct logical defaults.",
+    "Event extraction covers EventEmitter-style literal registrations, removals, and dispatch candidates; dynamic names remain unknown.",
+    "Function fingerprints are static candidates; equal digests can remain ambiguous and do not prove behavioral equivalence.",
+    "Graph coverage is incomplete; unavailable facts remain explicit and must not be read as absence.",
+    "JavaScript and HTML were parsed as inert text; bundle bootstrap code was never executed.",
+    "Local data flow does not claim control-flow-sensitive reaching definitions or arbitrary dynamic property resolution.",
+    "Promise ownership covers explicit unshadowed Promise construction, static factories, aggregation, chaining, and await syntax only.",
+    "Request extraction covers fetch, WebSocket, node:http/node:https construction, direct option fields, and exact local response consumers.",
+    "Resource constraint during analyze_javascript_application: Expanded application relationships for c43f80562b2b-2986-d13cd6f28b2c2f07.js exceed the parent's result budget; complete static facts were retained on the file node",
+    "Resource extraction covers built-in filesystem/network acquisition and exact local close/destroy/end handles.",
+    "Static imports, entrypoints, workers, endpoints, and storage relationships do not prove runtime execution.",
+    "Static paths and relationships may remain unresolved when expressions are dynamic or obfuscated.",
+    "The semantic graph contains static syntax observations and conservative relationship candidates; it does not claim runtime execution.",
+    "Timer extraction covers global or node:timers scheduling and exact local-handle cancellation.",
+    "Webpack/Rspack factories were recovered from AST literals; REA did not invoke push handlers or bundle bootstrap code.",
+    "c43f80562b2b-2986-d13cd6f28b2c2f07.js: Resource constraint during analyze_javascript_application: c43f80562b2b-2986-d13cd6f28b2c2f07.js: Resource constraint during analyze_javascript_application: The parent reserved its remaining result capacity for static observations; semantic analysis of c43f80562b2b-2986-d13cd6f28b2c2f07.js was not started"
+  ],
+  "locations": [
+    {
+      "kind": "artifact-path",
+      "path": "D:\\code-agent-rag-workflow\\outputs\\browser-intent-analysis-20261012\\selected-source"
+    }
+  ],
+  "evidence_links": [
+    "ev_a9369bbda105896e3e49655a7b635c168eeb821481b747aa0f20adc347a05d88"
+  ]
+}

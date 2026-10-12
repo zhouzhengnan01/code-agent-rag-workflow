@@ -1,0 +1,20 @@
+{
+  "source": "https://cloud.browser-use.com/v4/session/77194822-a143-4d3e-9b9a-3db4ea3e56d2",
+  "app_root": "D:/code-agent-rag-workflow",
+  "destination": "/workbench.html#chat",
+  "site_key": "cloud-browser-use-com-a80b83b3",
+  "page_key": "v4-session-77194822-a143-4d3e-9b9a-3db4ea3e56d2-a6864982",
+  "artifact_root": "docs/research/cloud-browser-use-com-a80b83b3/v4-session-77194822-a143-4d3e-9b9a-3db4ea3e56d2-a6864982",
+  "screenshot_root": "docs/design-references/cloud-browser-use-com-a80b83b3/v4-session-77194822-a143-4d3e-9b9a-3db4ea3e56d2-a6864982",
+  "approved_changes": [
+    "existing chat page",
+    "workbench global navigation"
+  ],
+  "preserved_routes": [
+    "/workflow.html",
+    "/workbench.html#knowledge",
+    "all other workbench pages"
+  ],
+  "stack": "existing FastAPI + vanilla JS/CSS; no Next.js migration",
+  "asset_policy": "retain Codezzn brand, reuse system fonts and existing/generic SVG icons; do not copy account avatar or billing data"
+}

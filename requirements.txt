@@ -5,6 +5,7 @@ google-auth[requests]>=2.35,<3
 email-validator>=2.2,<3
 python-multipart==0.0.20
 pypdf==5.6.1
+Pillow>=11,<13
 pydantic==2.11.7
 pytest==8.4.1
 pymilvus==2.5.18

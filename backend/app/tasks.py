@@ -89,7 +89,8 @@ class PersistentTaskQueue:
         self.handler = handler
         self.stopping = False
         self.concurrency = max(1, min(int(concurrency), 8))
-        self._wakeup.clear()
+        # Each application lifespan may use a different event loop (tests and reloads).
+        self._wakeup = asyncio.Event()
         timestamp = now()
         for user_id in _active_tenants():
             token = use_tenant(user_id)

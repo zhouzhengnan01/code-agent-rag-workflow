@@ -108,6 +108,11 @@ def init_db():
               thread_id TEXT PRIMARY KEY, items_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL,
               FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS chat_attachments (
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, size INTEGER NOT NULL,
+              mime_type TEXT NOT NULL, kind TEXT NOT NULL, text TEXT,
+              created_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS projects (
               id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
               created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -181,6 +186,26 @@ def init_db():
               FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_turn_checkpoints_thread ON turn_checkpoints(thread_id, status, updated_at);
+            CREATE TABLE IF NOT EXISTS chat_queue_messages (
+              id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+              submission_id TEXT NOT NULL, fingerprint TEXT NOT NULL, content TEXT NOT NULL,
+              payload TEXT NOT NULL DEFAULT '{}', mode TEXT NOT NULL DEFAULT 'queue',
+              status TEXT NOT NULL DEFAULT 'pending', run_status TEXT NOT NULL DEFAULT 'pending',
+              turn_id TEXT, result TEXT, error TEXT, runner_id TEXT,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+              UNIQUE(thread_id,submission_id),
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_queue_dispatch ON chat_queue_messages(status,run_status,created_at);
+            CREATE TABLE IF NOT EXISTS chat_interactions (
+              id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+              queue_message_id TEXT, kind TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+              question TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}',
+              response TEXT, submission_id TEXT, approval_id TEXT UNIQUE, tool_call_id TEXT,
+              runner_id TEXT, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+              FOREIGN KEY(thread_id) REFERENCES threads(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_interactions_thread ON chat_interactions(thread_id,status,created_at);
             CREATE TABLE IF NOT EXISTS turn_events (
               id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, turn_id TEXT NOT NULL,
               sequence INTEGER NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL, created_at INTEGER NOT NULL,
@@ -320,6 +345,8 @@ def init_db():
             db.execute("ALTER TABLE threads ADD COLUMN capability_overrides TEXT NOT NULL DEFAULT '{}'")
         if "active_project_id" not in thread_columns:
             db.execute("ALTER TABLE threads ADD COLUMN active_project_id TEXT")
+        if "model_override" not in thread_columns:
+            db.execute("ALTER TABLE threads ADD COLUMN model_override TEXT NOT NULL DEFAULT '{}'")
         workflow_columns = {row["name"] for row in db.execute("PRAGMA table_info(workflow_runs)")}
         if "state" not in workflow_columns:
             db.execute("ALTER TABLE workflow_runs ADD COLUMN state TEXT NOT NULL DEFAULT '{}'")

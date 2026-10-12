@@ -54,7 +54,12 @@ let state = {
   page: 'dashboard', cache: {}, thread: null, threadScope: 'active', chatThreads: [],
   chatCapabilities: { skill_ids: [], mcp_server_ids: [] }, activeTurn: null,
   projects: [], activeProjectId: null, pendingProjectTurn: null, projectDetailId: null, intentPending: false,
-  filesPanelOpen: true, chatFiles: [],
+  filesPanelOpen: false, chatFiles: [], chatHistoryOpen: true, chatThreadFilter: '',
+  chatModels: [], chatModelError: '', chatAttachments: [], chatDrafts: {}, modelSaving: false,
+  approvalPending: false,
+  chatQueue: [], chatInteractions: [], chatSubmitPending: false, chatUnknownSubmission: null,
+  chatPollTimer: null, chatPollEpoch: 0, chatPollError: '', chatStopPending: false,
+  chatEventSequences: {}, chatEvents: {}, chatMessageSignatures: {}, chatInteractionSignatures: {}, chatInteractionSubmissions: {},
 };
 
 const $ = selector => document.querySelector(selector);
@@ -75,7 +80,7 @@ async function api(path, options = {}) {
   options.headers = { ...headers(!(options.body instanceof FormData)), ...(options.headers || {}) };
   const response = await fetch(path, options);
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+  if (!response.ok) { const error = new Error(data.detail || `HTTP ${response.status}`); error.status = response.status; throw error; }
   return data;
 }
 
@@ -148,12 +153,29 @@ function toggleField(label, name, checked = true, full = false) {
 
 function formData(form) { return Object.fromEntries(new FormData(form).entries()); }
 
-function toggleRail(open) { document.body.classList.toggle('rail-open', open); }
+function toggleRail(open) {
+  document.body.classList.toggle('rail-open', open);
+  syncRailAccessibility();
+  if (window.matchMedia('(max-width: 700px)').matches) {
+    const target = open ? $('#workspaceRail .rail-close') : $('.chat-menu-button') || $('.menu-button');
+    target?.focus();
+  }
+}
+
+function syncRailAccessibility() {
+  const mobile = window.matchMedia('(max-width: 700px)').matches;
+  const open = document.body.classList.contains('rail-open');
+  const rail = $('#workspaceRail');
+  if (rail) { rail.inert = mobile && !open; rail.setAttribute('aria-hidden', String(mobile && !open)); }
+  const main = $('.workspace-main');
+  if (main) main.inert = mobile && open;
+  $$('.menu-button').forEach(button => button.setAttribute('aria-expanded', String(mobile && open)));
+}
 
 function toggleRailExpanded() {
-  const expanded = document.body.classList.toggle('rail-expanded');
-  try { localStorage.codezznRailExpanded = expanded ? 'true' : 'false'; } catch (_) {}
+  document.body.classList.add('rail-expanded');
   syncRailState();
+  syncRailAccessibility();
 }
 
 function syncRailState() {
@@ -169,18 +191,8 @@ function syncRailState() {
 function setupRailBehavior() {
   const rail = $('#workspaceRail');
   if (!rail) return;
-  try { document.body.classList.toggle('rail-expanded', localStorage.codezznRailExpanded === 'true'); } catch (_) {}
+  document.body.classList.add('rail-expanded');
   syncRailState();
-  rail.addEventListener('mouseenter', () => {
-    if (matchMedia('(min-width: 701px)').matches) document.body.classList.add('rail-hover');
-  });
-  rail.addEventListener('mouseleave', () => document.body.classList.remove('rail-hover'));
-  rail.addEventListener('focusin', () => {
-    if (matchMedia('(min-width: 701px)').matches) document.body.classList.add('rail-hover');
-  });
-  rail.addEventListener('focusout', event => {
-    if (!rail.contains(event.relatedTarget)) document.body.classList.remove('rail-hover');
-  });
 }
 
 async function loadSession() {
@@ -221,19 +233,22 @@ function nav() {
         const page = byId[id];
         const active = state.page === id;
         return `
-          <button class="nav-item ${active ? 'is-active' : ''}" type="button" onclick="go('${id}')" aria-label="${esc(page.label)}" title="${esc(page.label)}" ${active ? 'aria-current="page"' : ''}>
+          ${id === 'chat' ? '<div class="nav-chat-row">' : ''}<button class="nav-item ${active ? 'is-active' : ''}" type="button" onclick="go('${id}')" aria-label="${esc(page.label)}" title="${esc(page.label)}" ${active ? 'aria-current="page"' : ''}>
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${navIcons[id]}</svg>
             <span class="nav-label">${page.label}</span><span class="nav-short">${page.short}</span>
-          </button>`;
+          </button>${id === 'chat' ? `<button type="button" class="nav-chat-toggle" onclick="toggleChatHistory()" aria-label="${state.chatHistoryOpen ? '收起' : '展开'}对话历史" aria-expanded="${state.chatHistoryOpen}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="${state.chatHistoryOpen ? 'm6 9 6 6 6-6' : 'm9 6 6 6-6 6'}"/></svg></button></div><div id="chatHistorySubmenu" class="chat-history-submenu" ${state.chatHistoryOpen ? '' : 'hidden'}>${chatHistoryHtml()}</div>` : ''}`;
       }).join('')}
     </section>`).join('');
 }
 
 function go(page) {
+  if (state.chatSubmitPending || state.intentPending || state.approvalPending || state.modelSaving || state.chatAttachments.some(item => item.status === 'uploading')) return toast('请先等待当前操作完成', true);
   if (state.page === 'chat' && page !== 'chat' && state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
+  saveComposerDraft();
   state.page = page;
   toggleRail(false);
   document.body.classList.toggle('page-dashboard', page === 'dashboard');
+  document.body.classList.toggle('page-chat', page === 'chat');
   if (location.hash !== `#${page}`) history.replaceState(null, '', `#${page}`);
   nav();
   $('#pageTitle').textContent = pages.find(item => item.id === page)?.label || page;
@@ -268,6 +283,7 @@ function loading() {
 async function loadPage() {
   if (state.page === 'chat' && state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   const content = $('#content');
+  stopChatPolling();
   document.body.classList.toggle('page-dashboard', state.page === 'dashboard');
   content.classList.toggle('viewport-chat', state.page === 'chat');
   content.innerHTML = loading();
@@ -773,6 +789,7 @@ async function agentForm(item) {
       <section class="form-section control-full"><header><h3>能力装配</h3><p>选择这个智能体可以访问的能力。</p></header></section>
       ${choiceGroup('技能', 'skill_ids', skills, item.skill_ids)}
       ${choiceGroup('知识库', 'knowledge_ids', knowledge, item.knowledge_ids)}
+      ${selectField('知识检索方式', 'retrieval_mode', [['auto','自动：按任务需要检索'],['always','始终：每次回答前检索'],['off','关闭知识检索']].map(([value,label]) => `<option value="${value}" ${(item.retrieval_mode || 'auto') === value ? 'selected' : ''}>${label}</option>`).join(''), true, '自动模式由智能体判断是否需要已绑定的知识库；始终模式提前检索，关闭模式不会访问知识库。旧智能体默认使用自动模式。')}
       ${choiceGroup('MCP 服务', 'mcp_server_ids', mcps, item.mcp_server_ids)}
       ${choiceGroup('LSP 服务', 'lsp_server_ids', lsps, item.lsp_server_ids || [])}
       ${choiceGroup('内置工具', 'builtin_tools', tools, item.builtin_tools || [])}
@@ -851,6 +868,31 @@ async function showKnowledgeStatus(id) {
   CodezznKnowledge.openStatus(id, knowledgeUI());
 }
 
+function chatHistoryHtml() {
+  const archived = state.threadScope === 'archived';
+  return `<button class="sidebar-new-thread" type="button" onclick="newThread()"><span aria-hidden="true">＋</span> 新对话</button>
+    <div class="history-scope" role="tablist" aria-label="会话范围"><button type="button" role="tab" aria-selected="${!archived}" class="${archived ? '' : 'is-active'}" onclick="setThreadScope('active')">会话</button><button type="button" role="tab" aria-selected="${archived}" class="${archived ? 'is-active' : ''}" onclick="setThreadScope('archived')">归档</button></div>
+    <input class="session-search" type="search" aria-label="查找历史对话" placeholder="查找对话" value="${esc(state.chatThreadFilter)}" oninput="filterChatThreads(this.value)">
+    <div class="session-list">${state.chatThreads.map(thread => `<div class="session-item ${state.thread === thread.id ? 'is-active' : ''}" data-thread-id="${esc(thread.id)}" data-name="${esc(thread.name.toLowerCase())}" ${state.chatThreadFilter && !thread.name.toLowerCase().includes(state.chatThreadFilter.toLowerCase()) ? 'hidden' : ''}><button class="session-open" type="button" onclick="selectThread('${thread.id}')" aria-label="打开会话 ${esc(thread.name)}"><span class="session-name">${esc(thread.name)}</span><span class="session-state">${esc(threadStatus(thread.status))}</span></button><button class="session-more" type="button" aria-label="管理会话 ${esc(thread.name)}" aria-haspopup="menu" aria-expanded="false" onclick="toggleSessionMenu(event,'${thread.id}')">···</button></div>`).join('') || '<small class="sidebar-history-empty">暂无历史对话</small>'}</div>`;
+}
+
+function renderChatHistory() {
+  const element = $('#chatHistorySubmenu');
+  if (element) { element.innerHTML = chatHistoryHtml(); element.hidden = !state.chatHistoryOpen; }
+}
+
+function toggleChatHistory() { state.chatHistoryOpen = !state.chatHistoryOpen; nav(); }
+
+function filterChatThreads(value) {
+  state.chatThreadFilter = value;
+  $$('#chatHistorySubmenu .session-item').forEach(item => { item.hidden = !item.dataset.name.includes(value.toLowerCase()); });
+}
+
+function saveComposerDraft() {
+  if (state.page !== 'chat' || !$('#chatInput')) return;
+  state.chatDrafts[state.thread || 'new'] = { content: $('#chatInput').value, attachments: [...state.chatAttachments] };
+}
+
 function uploadDoc(id) {
   const knowledge = state.cache.knowledge?.find(item => item.id === id) || {};
   CodezznKnowledge.openUpload(id, knowledge, knowledgeUI());
@@ -908,7 +950,7 @@ function runWorkflow(id) {
 }
 
 function threadStatus(status) {
-  return ({ idle: '就绪', running: '运行中', waiting_for_approval: '等待审批', error: '出错' })[status] || status || '就绪';
+  return ({ idle: '就绪', running: '运行中', waiting_for_input: '等待回答', waiting_for_project: '选择保存项目', waiting_for_approval: '等待审批', error: '出错' })[status] || status || '就绪';
 }
 
 async function showWorkflowHistory(button) {
@@ -971,18 +1013,22 @@ function toggleSessionMenu(event, threadId) {
 }
 
 function setThreadScope(scope) {
+  if (state.chatSubmitPending || state.intentPending || state.approvalPending || state.modelSaving || state.chatAttachments.some(item => item.status === 'uploading')) return toast('请先等待当前操作完成', true);
   if (state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   closeSessionMenus();
+  saveComposerDraft();
   state.threadScope = scope === 'archived' ? 'archived' : 'active';
   state.thread = null;
-  loadPage();
+  if (state.page !== 'chat') go('chat'); else loadPage();
 }
 
 function selectThread(threadId) {
+  if (state.chatSubmitPending || state.intentPending || state.approvalPending || state.modelSaving || state.chatAttachments.some(item => item.status === 'uploading')) return toast('请先等待当前操作完成', true);
   if (state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   closeSessionMenus();
+  saveComposerDraft();
   state.thread = threadId;
-  loadPage();
+  if (state.page !== 'chat') go('chat'); else loadPage();
 }
 
 function getManagedThread(threadId) {
@@ -1183,19 +1229,22 @@ function renderChatFilesPanel() {
   const hasConversationFiles = (state.currentThread?.messages || []).some(message =>
     message.role === 'assistant' && Array.isArray(message.project_artifacts) &&
     message.project_artifacts.some(artifact => artifact.project_id === state.activeProjectId));
-  const visible = hasConversationFiles && state.filesPanelOpen;
+  const visible = state.filesPanelOpen;
+  const outputs = state.currentThread?.conversation_artifacts || [];
+  const totalFiles = state.chatFiles.length + outputs.length;
   studio.classList.toggle('has-file-panel', visible);
   panel.hidden = !visible;
   const toggle = $('#filesPanelToggle');
   if (toggle) {
-    toggle.hidden = !hasConversationFiles;
+    toggle.hidden = false;
     toggle.setAttribute('aria-pressed', String(visible));
-    toggle.innerHTML = `<span aria-hidden="true">▤</span> Files <small>${state.chatFiles.length}</small>`;
+    toggle.innerHTML = `<span aria-hidden="true">▤</span> Files <small>${totalFiles}</small>`;
   }
   const projectId = state.activeProjectId;
-  panel.innerHTML = `<header class="chat-files-header"><div><strong>▤ Files <small>${state.chatFiles.length}</small></strong></div><button type="button" onclick="toggleChatFiles()" aria-label="关闭文件面板">×</button></header>
-    <div class="chat-files-toolbar"><span>${state.chatFiles.length} files</span>${projectId && state.chatFiles.length ? `<button type="button" onclick="downloadProjectArchive('${esc(projectId)}')">↓ Download all</button>` : ''}</div>
-    <div class="chat-files-tree">${!projectId ? '<div class="chat-files-empty"><p>选择一个项目，在这里查看智能体创建的文件。</p><button type="button" onclick="openProjectPicker()">选择项目</button></div>' : state.chatFiles.length ? fileTreeHtml(state.chatFiles, projectId) : '<div class="chat-files-empty"><p>这个项目还没有已保存的文件。</p></div>'}</div>`;
+  panel.innerHTML = `<header class="chat-files-header"><div><strong>▤ Files <small>${totalFiles}</small></strong></div><button type="button" onclick="toggleChatFiles()" aria-label="关闭文件面板">×</button></header>
+    <div class="chat-files-toolbar"><span>${totalFiles} files</span>${projectId && state.chatFiles.length ? `<button type="button" onclick="downloadProjectArchive('${esc(projectId)}')">↓ Download all</button>` : ''}</div>
+    <div class="chat-files-tree">${!projectId ? '<div class="chat-files-empty"><p>选择一个项目，在这里查看智能体创建的文件。</p><button type="button" onclick="openProjectPicker()">选择项目</button></div>' : state.chatFiles.length ? fileTreeHtml(state.chatFiles, projectId) : '<div class="chat-files-empty"><p>这个项目还没有已保存的文件。</p></div>'}${outputs.length ? `<section class="conversation-file-list"><h3>对话产物</h3>${outputs.map(item => artifactOutputHtml({ ...item, canPreview: item.previewable, previewable: false })).join('')}</section>` : ''}</div>`;
+  hydrateChatAttachmentPreviews();
 }
 
 function toggleChatFiles() {
@@ -1374,6 +1423,7 @@ async function projectArtifactResponse(projectId, artifactId) {
 
 async function viewProjectArtifact(projectId, artifactId) {
   const item = (await api(`/api/projects/${encodeURIComponent(projectId)}/artifacts`)).data.find(value => value.id === artifactId);
+  if (item && /\.(png|jpe?g|webp)$/i.test(item.path)) return viewArtifactImage({ dataset: { url: `/api/projects/${projectId}/artifacts/${artifactId}/download`, fileName: item.path } });
   if (!item) return toast('文件不存在', true);
   if (!/\.(py|js|ts|tsx|jsx|html|css|json|md|txt|yaml|yml|toml|sh|ps1|sql)$/i.test(item.path)) return downloadProjectArtifact(projectId, artifactId, item.path);
   try {
@@ -1428,9 +1478,12 @@ async function downloadProjectArtifactVersion(button) {
 }
 
 async function chat() {
+  stopChatPolling();
+  clearChatAttachmentPreviews();
+  document.body.classList.add('page-chat');
   const archived = state.threadScope === 'archived';
-  const [agents, skills, mcps, threadResult] = await Promise.all([
-    load('agents'), load('skills'), load('mcp_servers'), api(`/api/threads?archived=${archived}`), refreshProjects(),
+  const [agents, skills, mcps, threadResult, modelResult] = await Promise.all([
+    load('agents'), load('skills'), load('mcp_servers'), api(`/api/threads?archived=${archived}`), api('/api/chat/models').catch(error => ({ data: [], error: error.message })), refreshProjects(),
   ]);
   const threads = threadResult.data;
   state.chatThreads = threads;
@@ -1447,51 +1500,53 @@ async function chat() {
     mcp_server_ids: Array.isArray(overrides.mcp_server_ids) ? overrides.mcp_server_ids : (selectedAgentConfig.mcp_server_ids || []),
   };
   state.currentThread = current;
+  state.chatQueue = current?.queue_messages || [];
+  state.chatInteractions = current?.interactions || [];
+  restoreChatInteractionSubmissions(state.thread);
+  state.chatMessageSignatures = {}; state.chatInteractionSignatures = {};
+  state.chatUnknownSubmission = readUnknownChatSubmission(state.thread);
+  syncActiveChatTurn();
+  state.chatModels = modelResult.data || [];
+  state.chatModelError = modelResult.error || '';
+  const draft = state.chatDrafts[state.thread || 'new'] || { content: '', attachments: [] };
+  state.chatAttachments = [...draft.attachments];
   state.activeProjectId = current?.active_project_id || null;
   state.chatFiles = [];
   $('#content').innerHTML = `
-    <div class="chat-studio page-enter">
-      <aside class="session-browser">
-        <header class="session-header">
-          <div class="session-heading"><span>${archived ? '已归档' : '调试会话'}</span><strong>${threads.length}</strong></div>
-          <button class="button button-primary button-small" type="button" onclick="newThread()">新对话</button>
-          <div class="session-tabs" role="tablist" aria-label="会话范围">
-            <button class="${archived ? '' : 'is-active'}" type="button" role="tab" aria-selected="${!archived}" onclick="setThreadScope('active')">会话</button>
-            <button class="${archived ? 'is-active' : ''}" type="button" role="tab" aria-selected="${archived}" onclick="setThreadScope('archived')">归档</button>
-          </div>
-        </header>
-        <div class="session-list">
-          ${threads.length ? threads.map(thread => `
-            <div class="session-item ${state.thread === thread.id ? 'is-active' : ''}" data-thread-id="${esc(thread.id)}">
-              <button class="session-open" type="button" onclick="selectThread('${thread.id}')" aria-label="打开会话 ${esc(thread.name)}">
-                <span class="session-name">${esc(thread.name)}</span><span class="session-state">${esc(threadStatus(thread.status))}</span>
-              </button>
-              <button class="session-more" type="button" aria-label="管理会话 ${esc(thread.name)}" aria-haspopup="menu" aria-expanded="false" onclick="toggleSessionMenu(event,'${thread.id}')"><span aria-hidden="true">•••</span></button>
-            </div>`).join('') : `<div class="state-inline"><p>${archived ? '还没有已归档的会话。' : '还没有会话。'}</p></div>`}
-        </div>
-      </aside>
+    <div class="chat-studio cloud-chat page-enter">
       <section class="conversation">
         <div class="conversation-top">
           <header class="conversation-bar">
-            <div class="conversation-title"><span>当前会话</span><strong>${esc(current?.name || '新对话')}</strong></div>
+            <div class="conversation-title"><button class="icon-button menu-button chat-menu-button" type="button" onclick="toggleRail(true)" aria-label="打开导航" aria-controls="workspaceRail" aria-expanded="false">${chatIcon('menu')}</button><strong>${esc(current?.name || '新对话')}</strong></div>
             <div class="conversation-header-actions"><button class="chat-files-toggle" id="filesPanelToggle" type="button" onclick="toggleChatFiles()" aria-label="切换文件面板" aria-pressed="${state.filesPanelOpen}"><span aria-hidden="true">▤</span> Files <small>0</small></button><label class="agent-selector"><span>运行智能体</span><select id="chatAgent" aria-label="选择智能体" onchange="changeChatAgent(this.value)">${agents.map(agent => `<option value="${agent.id}" ${selectedAgent === agent.id ? 'selected' : ''}>${esc(agent.name)}</option>`).join('')}</select></label></div>
           </header>
-          <div class="capability-strip" id="capabilityStrip">${capabilityBarHtml(skills, mcps)}</div>
-          <div class="project-context-bar"><span>当前项目</span><div id="projectChip">${projectChipHtml()}</div><span class="project-context-help">代码与文件仅在确认后写入项目</span></div>
           ${assetStripHtml(current?.messages || [])}
         </div>
         <div class="message-stream" id="messages" aria-live="polite">
-          ${current?.messages?.length || approvals.length ? `${(current?.messages || []).map(messageHtml).join('')}${approvals.map(approvalHtml).join('')}` : `
-            <div class="conversation-empty"><span class="empty-mark" aria-hidden="true">${codezznLogoHtml}</span><h2>开始调试智能体</h2><p>输入任务，查看模型、工具和知识库如何协同运行。</p></div>`}
+          ${current?.messages?.length || approvals.length || state.chatInteractions.length ? `${persistentChatTimelineHtml(current?.messages || [], state.chatInteractions)}${approvals.filter(approval => !state.chatInteractions.some(item => item.turn_id === approval.turn_id && ['question','tool_approval'].includes(item.kind) && item.payload?.tool_name === approval.tool_name)).map(approvalHtml).join('')}` : `
+            <div class="conversation-empty"><span class="empty-mark" aria-hidden="true">${codezznLogoHtml}</span><h2>今天想让智能体做什么？</h2><p>分析资料、编写代码，或让工具完成任务。</p><div class="chat-suggestions"><button type="button" onclick="fillChatPrompt('请帮我分析上传的文档，提炼重点和待办事项。')">${chatIcon('file')}<span>分析文档资料<small>提炼重点、比较信息</small></span></button><button type="button" onclick="fillChatPrompt('请帮我审查这段代码，找出错误并给出修复建议。')">${chatIcon('code')}<span>编写与审查代码<small>从想法到可运行的代码</small></span></button></div></div>`}
         </div>
         <footer class="prompt-dock">
-          <textarea id="chatInput" aria-label="消息" rows="1" placeholder="向智能体发送任务"></textarea>
-          <div class="prompt-footer"><span>Enter 发送　Shift+Enter 换行</span><button class="button button-primary" id="sendBtn" type="button" onclick="sendMessage()">发送</button></div>
+          <div class="chat-queue" id="chatQueue" aria-live="polite"></div>
+          <div class="composer-attachments" id="chatAttachments" aria-live="polite"></div>
+          <textarea id="chatInput" aria-label="消息" rows="2" placeholder="向智能体发送任务…">${esc(draft.content)}</textarea>
+          <div class="prompt-footer"><div class="prompt-tools composer-tools"><button type="button" class="composer-action" id="attachBtn" onclick="document.getElementById('chatAttachmentInput').click()" aria-label="上传附件" title="上传文档、代码或图片">${chatIcon('attach')}</button><input type="file" id="chatAttachmentInput" aria-label="选择对话附件" multiple hidden accept=".txt,.md,.markdown,.pdf,.docx,.json,.csv,.py,.js,.ts,.tsx,.jsx,.html,.css,.yaml,.yml,.xml,.log,.sql,.sh,.png,.jpg,.jpeg,.webp" onchange="uploadChatAttachments(Array.from(this.files));this.value=''">
+            <label class="composer-model">${chatIcon('model')}<select id="chatModel" aria-label="选择模型" onchange="changeChatModel(this.value)">${chatModelOptions(selectedAgentConfig)}</select></label>
+          </div><button class="composer-interrupt" id="interruptBtn" type="button" onclick="sendMessage({interrupt:true})" hidden title="停止当前任务后立即执行输入框中的新指令">立即调整</button><button class="composer-stop" id="stopBtn" type="button" onclick="stopGeneration()" hidden aria-label="停止当前任务" title="停止当前任务，保留待执行队列"><span class="stop-glyph" aria-hidden="true"></span></button><button class="button button-primary composer-send" id="sendBtn" type="button" onclick="sendMessage()" aria-label="发送消息" title="发送消息">${chatIcon('send')}</button></div>
+          <div class="composer-context"><div class="project-context-bar"><div id="projectChip">${projectChipHtml()}</div></div><div class="capability-strip" id="capabilityStrip">${capabilityBarHtml(skills, mcps)}</div></div>
+          <div class="attachment-error" id="chatComposerError" role="alert">${state.chatModelError ? `模型列表加载失败：${esc(state.chatModelError)}` : ''}</div>
+          <div class="composer-hint" id="chatQueueHint">Enter 发送 · Shift+Enter 换行 · 可拖入附件</div>
         </footer>
       </section>
       <aside class="chat-files-panel" id="chatFilesPanel" aria-label="项目文件"></aside>
     </div>`;
   renderChatFilesPanel();
+  syncRailAccessibility();
+  renderChatHistory();
+  renderChatAttachments();
+  renderChatQueue();
+  updateComposerControls();
+  startChatPolling();
   window.setTimeout(() => {
     if (state.page !== 'chat') return;
     bindComposer();
@@ -1507,6 +1562,171 @@ async function chat() {
       }
     }
   }, 0);
+}
+
+function chatIcon(name) {
+  const paths = { attach: '<path d="m21 11-8.5 8.5a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.5 5.5l-9 9a2 2 0 0 1-2.8-2.8l8.3-8.3"/>', send: '<path d="M12 19V5m-7 7 7-7 7 7"/>', menu: '<path d="M4 6h16M4 12h16M4 18h16"/>', model: '<path d="m12 3 3 6 6 3-6 3-3 6-3-6-6-3 6-3z"/>', file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>', code: '<path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-13-2 20"/>' };
+  return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`;
+}
+
+function chatModelOptions(agent = {}) {
+  const chosen = state.currentThread?.model_override || {};
+  const selected = chosen.provider_id && chosen.model ? encodeURIComponent(JSON.stringify({ provider_id: chosen.provider_id, model: chosen.model })) : '';
+  const groups = new Map();
+  state.chatModels.forEach(model => { const label = model.provider_name || '模型提供方'; if (!groups.has(label)) groups.set(label, []); groups.get(label).push(model); });
+  const unavailable = selected && !state.chatModels.some(item => item.provider_id === chosen.provider_id && item.model === chosen.model);
+  return `<option value="" ${!selected ? 'selected' : ''}>${esc(agent.model || '继承智能体模型')} · 默认</option>${unavailable ? `<option value="${esc(selected)}" selected disabled>${esc(chosen.model)} · 暂不可用</option>` : ''}${[...groups].map(([name, models]) => `<optgroup label="${esc(name)}">${models.map(model => { const value = encodeURIComponent(JSON.stringify({ provider_id: model.provider_id, model: model.model })); return `<option value="${esc(value)}" ${selected === value ? 'selected' : ''}>${esc(model.model)}</option>`; }).join('')}</optgroup>`).join('')}`;
+}
+
+async function changeChatModel(value) {
+  if (state.activeTurn || state.chatQueue.some(item => ['pending','dispatching'].includes(item.status)) || state.intentPending || state.approvalPending || state.pendingProjectTurn || state.modelSaving) return;
+  const select = $('#chatModel');
+  state.modelSaving = true; if (select) select.disabled = true; updateComposerControls();
+  try {
+    const id = await ensureChatThread($('#chatAgent')?.value || state.cache.agents?.[0]?.id);
+    const override = value ? JSON.parse(decodeURIComponent(value)) : {};
+    const updated = await api(`/api/threads/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ model_override: override }) });
+    state.currentThread = { ...state.currentThread, ...updated };
+    toast(value ? `当前会话已选择 ${override.model}` : '当前会话使用智能体默认模型');
+  } catch (error) { toast(`模型切换失败：${error.message}`, true); }
+  finally {
+    state.modelSaving = false;
+    if (select) { select.innerHTML = chatModelOptions((state.cache.agents || []).find(agent => agent.id === $('#chatAgent')?.value)); select.disabled = false; }
+    updateComposerControls();
+  }
+}
+
+function fillChatPrompt(value) { const input = $('#chatInput'); if (input && !input.disabled) { input.value = value; input.dispatchEvent(new Event('input')); input.focus(); } }
+
+function attachmentHtml(attachment, removableIndex = null) {
+  const name = attachment.name || '附件';
+  const available = /^att_[0-9a-f]{16}$/.test(attachment.id || '');
+  return `<span class="chat-attachment ${attachment.status === 'failed' ? 'is-error' : ''}">${attachment.kind === 'image' && available ? `<img data-attachment-preview="${attachment.id}" alt="${esc(name)}">` : chatIcon('file')}${available ? `<a href="/api/chat/attachments/${attachment.id}/download" data-attachment-id="${attachment.id}" data-file-name="${esc(name)}" onclick="event.preventDefault();downloadChatAttachment(this)" download>${esc(name)}</a>` : `<span>${esc(name)}</span>`}${attachment.status === 'uploading' ? '<small>上传中…</small>' : ''}${attachment.error ? `<small>${esc(attachment.error)}</small>` : ''}${removableIndex !== null ? `<button type="button" onclick="removeChatAttachment(${removableIndex})" aria-label="移除附件 ${esc(name)}">×</button>` : ''}</span>`;
+}
+
+const chatAttachmentPreviews = new Map();
+
+function clearChatAttachmentPreviews() {
+  for (const entry of chatAttachmentPreviews.values()) if (entry.url) URL.revokeObjectURL(entry.url);
+  chatAttachmentPreviews.clear();
+}
+
+async function fetchChatAttachment(id) {
+  if (!/^att_[0-9a-f]{16}$/.test(id || '')) throw new Error('附件不存在');
+  const response = await fetch(`/api/chat/attachments/${id}/download`, { headers: headers(false) });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
+  return response.blob();
+}
+
+async function fetchArtifactFile(url) {
+  if (!/^\/api\/(?:threads\/thr_[0-9a-f]{16}|projects\/prj_[0-9a-f]{16})\/artifacts\/art_[0-9a-f]{16}\/download$/.test(url || '')) throw new Error('产物下载地址无效');
+  const response = await fetch(url, { headers: headers(false) });
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
+  return response.blob();
+}
+
+function artifactOutputHtml(item) {
+  const url = item.download_url;
+  if (!url) return '';
+  return `<section class="chat-output-card"><header><strong>${esc(item.name || item.path)}</strong><small>${item.storage === 'project' ? '项目文件' : '对话产物'}</small></header>${item.previewable ? `<button type="button" class="chat-output-preview" data-url="${esc(url)}" data-file-name="${esc(item.name || item.path)}" onclick="viewArtifactImage(this)"><img data-artifact-preview="${esc(url)}" alt="${esc(item.name || item.path)}"><span>查看截图</span></button>` : item.canPreview ? `<button class="button button-quiet button-small" type="button" data-url="${esc(url)}" data-file-name="${esc(item.name || item.path)}" onclick="viewArtifactImage(this)">查看截图</button>` : ''}<button class="button button-quiet button-small" type="button" data-url="${esc(url)}" data-file-name="${esc(item.name || item.path)}" onclick="downloadArtifactFile(this)">下载</button></section>`;
+}
+
+async function viewArtifactImage(button) {
+  try {
+    const url = URL.createObjectURL(await fetchArtifactFile(button.dataset.url));
+    modal(button.dataset.fileName, `<img class="artifact-image-full" src="${url}" alt="${esc(button.dataset.fileName)}">`, null, true);
+    $('#modalRoot .drawer-header span').textContent = '截图预览';
+    $('#modalRoot .drawer-footer button').textContent = '关闭';
+    const layer = $('#modalRoot .drawer-layer');
+    const observer = new MutationObserver(() => { if (!layer?.isConnected) { URL.revokeObjectURL(url); observer.disconnect(); } });
+    observer.observe($('#modalRoot'), { childList: true });
+  } catch (error) { toast(error.message, true); }
+}
+
+async function downloadArtifactFile(button) {
+  try {
+    const url = URL.createObjectURL(await fetchArtifactFile(button.dataset.url));
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = button.dataset.fileName || 'artifact';
+    document.body.append(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { toast(error.message, true); }
+}
+
+function hydrateChatAttachmentPreviews() {
+  const images = $$('img[data-attachment-preview], img[data-artifact-preview]');
+  const visible = new Set(images.map(image => image.dataset.attachmentPreview || image.dataset.artifactPreview));
+  for (const [id, entry] of chatAttachmentPreviews) if (!visible.has(id)) {
+    if (entry.url) URL.revokeObjectURL(entry.url);
+    chatAttachmentPreviews.delete(id);
+  }
+  for (const image of images) {
+    const id = image.dataset.attachmentPreview || image.dataset.artifactPreview;
+    let entry = chatAttachmentPreviews.get(id);
+    if (!entry) {
+      entry = {};
+      chatAttachmentPreviews.set(id, entry);
+      entry.promise = (image.dataset.artifactPreview ? fetchArtifactFile(id) : fetchChatAttachment(id)).then(blob => {
+        if (chatAttachmentPreviews.get(id) !== entry) return null;
+        entry.url = URL.createObjectURL(blob);
+        return entry.url;
+      }).catch(() => null);
+    }
+    entry.promise.then(url => {
+      if (!image.isConnected) return;
+      if (url && chatAttachmentPreviews.get(id) === entry) image.src = url;
+      else { image.hidden = true; image.parentElement.title = '图片预览暂不可用，可点击文件名重试下载'; }
+    });
+  }
+}
+
+async function downloadChatAttachment(link) {
+  try {
+    const url = URL.createObjectURL(await fetchChatAttachment(link.dataset.attachmentId));
+    const anchor = document.createElement('a');
+    anchor.href = url; anchor.download = link.dataset.fileName || 'attachment';
+    document.body.append(anchor); anchor.click(); anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) { toast(`附件下载失败：${error.message}`, true); }
+}
+
+function renderChatAttachments() {
+  const container = $('#chatAttachments');
+  if (container) { container.innerHTML = state.chatAttachments.map((item, index) => attachmentHtml(item, index)).join(''); container.hidden = !state.chatAttachments.length; }
+  hydrateChatAttachmentPreviews(); saveComposerDraft(); updateComposerControls();
+}
+
+function removeChatAttachment(index) {
+  if (state.chatSubmitPending || state.chatAttachments[index]?.status === 'uploading') return;
+  state.chatAttachments.splice(index, 1); renderChatAttachments();
+}
+
+async function uploadChatAttachments(files) {
+  if (state.chatSubmitPending || state.modelSaving) return toast('请等待当前提交完成，再上传附件', true);
+  const errorBox = $('#chatComposerError'); if (errorBox) errorBox.textContent = '';
+  for (const file of files) {
+    if (state.chatAttachments.length >= 8) { if (errorBox) errorBox.textContent = '一次最多添加 8 个附件'; break; }
+    if (!file.size || file.size > 10 * 1024 * 1024) { if (errorBox) errorBox.textContent = `${file.name}：文件不能为空，且不能超过 10 MB`; continue; }
+    const item = { name: file.name, size: file.size, status: 'uploading' }; state.chatAttachments.push(item); renderChatAttachments();
+    const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), 60000);
+    try { const body = new FormData(); body.append('file', file); const result = await api('/api/chat/attachments', { method: 'POST', body, signal: controller.signal }); Object.assign(item, result, { status: 'ready' }); }
+    catch (error) { item.status = 'failed'; item.error = error.name === 'AbortError' ? '上传超时，请重新选择文件' : error.message; }
+    finally { clearTimeout(timeout); renderChatAttachments(); }
+  }
+}
+
+function updateComposerControls() {
+  const running = !!state.activeTurn;
+  const configurationLocked = running || state.chatQueue.some(item => ['pending','dispatching'].includes(item.status));
+  const busy = state.chatSubmitPending || state.modelSaving || state.chatAttachments.some(item => item.status === 'uploading');
+  const hasContent = !!$('#chatInput')?.value.trim() || state.chatAttachments.some(item => item.status === 'ready');
+  const button = $('#sendBtn');
+  if (button) { button.disabled = busy || !!state.chatUnknownSubmission || !hasContent; button.setAttribute?.('aria-label', running ? '排队发送消息' : '发送消息'); button.title = running ? '排队发送，当前任务完成后执行' : '发送消息'; }
+  const model = $('#chatModel'); if (model) model.disabled = configurationLocked || busy;
+  const attach = $('#attachBtn'); if (attach) attach.disabled = state.chatSubmitPending || state.modelSaving;
+  const agentSelect = $('#chatAgent'); if (agentSelect) agentSelect.disabled = configurationLocked || busy;
+  const input = $('#chatInput'); if (input) input.disabled = false;
+  const stop = $('#stopBtn'); if (stop) { stop.hidden = !running; stop.disabled = state.chatStopPending; stop.title = state.chatStopPending ? '正在请求停止…' : '停止当前任务，保留待执行队列'; }
+  const interrupt = $('#interruptBtn'); if (interrupt) { interrupt.hidden = !running; interrupt.disabled = busy || !!state.chatUnknownSubmission || !hasContent || state.chatStopPending; }
+  const hint = $('#chatQueueHint'); if (hint) hint.textContent = running ? '运行中可继续输入 · Enter 排队 · 立即调整会先停止当前任务' : 'Enter 发送 · Shift+Enter 换行 · 可拖入附件';
 }
 
 function enqueueWorkflow(id) {
@@ -1542,11 +1762,15 @@ function renderCapabilityBar() {
   if (target) target.innerHTML = capabilityBarHtml();
 }
 
-async function ensureChatThread() {
+async function ensureChatThread(agentId) {
   if (state.thread) return state.thread;
-  const agent = $('#chatAgent')?.value || state.cache.agents?.[0]?.id;
+  const agent = agentId || $('#chatAgent')?.value || state.cache.agents?.[0]?.id;
+  const draft = state.chatDrafts.new;
   const result = await api('/api/threads', { method: 'POST', body: JSON.stringify({ name: '新对话', agent_id: agent }) });
   state.thread = result.id;
+  state.currentThread = result;
+  if (draft) { state.chatDrafts[result.id] = draft; delete state.chatDrafts.new; }
+  state.chatThreads.unshift(result); renderChatHistory();
   return result.id;
 }
 
@@ -1615,7 +1839,7 @@ function openCapabilityPicker() {
 }
 
 async function changeChatAgent(agentId) {
-  if (state.activeTurn) return;
+  if (state.activeTurn || state.chatQueue.some(item => ['pending','dispatching'].includes(item.status))) return;
   const agent = (state.cache.agents || []).find(item => item.id === agentId);
   if (!agent) return;
   state.chatCapabilities = {
@@ -1625,7 +1849,9 @@ async function changeChatAgent(agentId) {
   renderCapabilityBar();
   if (!state.thread) return;
   try {
-    await api(`/api/threads/${state.thread}`, { method: 'PATCH', body: JSON.stringify({ agent_id: agentId }) });
+    const updated = await api(`/api/threads/${state.thread}`, { method: 'PATCH', body: JSON.stringify({ agent_id: agentId, model_override: {} }) });
+    state.currentThread = { ...state.currentThread, ...updated };
+    if ($('#chatModel')) $('#chatModel').innerHTML = chatModelOptions(agent);
   } catch (error) { toast(error.message, true); }
 }
 
@@ -1643,19 +1869,22 @@ function messageHtml(message) {
   const missingFile = assistant && choice?.save_to_project && !artifacts.length && !message.resource_assets?.length
     ? '<p class="artifact-missing-note">这条回复没有关联到实际文件。代码块不是项目文件；请让智能体继续创建文件，或重新发送任务。</p>' : '';
   const decision = choice ? `<section class="project-decision-summary" aria-label="本次项目选择"><span class="project-decision-check" aria-hidden="true">✓</span><span><strong>${choice.save_to_project ? '已确认保存到项目' : '已选择仅回答，不保存'}</strong>${choice.project_id ? `<small>${esc(projectName(choice.project_id))}</small>` : ''}</span></section>` : '';
-  const artifactCards = artifacts.map(item => `<section class="project-result-card" aria-label="项目文件 ${esc(item.path)}"><span class="project-result-icon" aria-hidden="true">⌘</span><span class="project-result-copy"><strong>${esc(item.path)}</strong><small>已保存到 ${esc(projectName(item.project_id))}</small></span><button type="button" onclick="viewProjectArtifact('${esc(item.project_id)}','${esc(item.id)}')">打开</button><button type="button" onclick="downloadProjectArtifact('${esc(item.project_id)}','${esc(item.id)}',decodeURIComponent('${encodeURIComponent(item.path).replace(/'/g, '%27')}'))">下载</button></section>`).join('');
+  const artifactCards = artifacts.filter(item => item.kind !== 'screenshot').map(item => `<section class="project-result-card" aria-label="项目文件 ${esc(item.path)}"><span class="project-result-icon" aria-hidden="true">⌘</span><span class="project-result-copy"><strong>${esc(item.path)}</strong><small>已保存到 ${esc(projectName(item.project_id))}</small></span><button type="button" onclick="viewProjectArtifact('${esc(item.project_id)}','${esc(item.id)}')">打开</button><button type="button" onclick="downloadProjectArtifact('${esc(item.project_id)}','${esc(item.id)}',decodeURIComponent('${encodeURIComponent(item.path).replace(/'/g, '%27')}'))">下载</button></section>`).join('');
   const resourceCards = assistant ? (Array.isArray(message.resource_assets) ? message.resource_assets : []).map(resourceAssetHtml).join('') : '';
-  const workTrace = assistant && !message.error ? `<details class="agent-work-trace"><summary>Worked${elapsed ? ` for ${elapsed}` : ''}</summary>${toolEvents.length ? `<div class="agent-work-events">${toolEvents.map(event => `<div><span>${event.type === 'tool_started' ? '运行' : event.type === 'tool_failed' ? '失败' : '完成'}</span><strong>${esc(event.name || '')}</strong></div>`).join('')}</div>` : '<div class="agent-work-events"><span>已完成回复</span></div>'}</details>` : '';
+  const workTrace = assistant && !message.error && !message.meta?.error ? `<details class="agent-work-trace"><summary>Worked${elapsed ? ` for ${elapsed}` : ''}</summary>${toolEvents.length ? `<div class="agent-work-events">${toolEvents.map(event => `<div><span>${event.type === 'tool_started' ? '运行' : event.type === 'tool_failed' ? '失败' : '完成'}</span><strong>${esc(event.name || '')}</strong></div>`).join('')}</div>` : '<div class="agent-work-events"><span>已完成回复</span></div>'}</details>` : '';
   return `
-    <article class="message-turn ${assistant ? 'assistant' : 'user'} ${message.error ? 'is-error' : ''}">
+    <article class="message-turn ${assistant ? 'assistant' : 'user'} ${message.error || message.meta?.error ? 'is-error' : ''}">
       <div class="turn-avatar" aria-hidden="true">${assistant ? codezznLogoHtml : '你'}</div>
       <div class="turn-content">
         <header><strong>${assistant ? 'Codezzn' : '你'}</strong>${model ? `<span>${esc(model)}</span>` : ''}</header>
         ${decision}
         ${workTrace}
         <div class="message-copy">${richText(message.content, artifacts)}</div>
+        ${message.meta?.attachments?.length ? `<div class="message-attachments">${message.meta.attachments.map(item => attachmentHtml(item)).join('')}</div>` : ''}
         ${missingFile}
         ${artifactCards}
+        ${(message.conversation_artifacts || []).map(artifactOutputHtml).join('')}
+        ${artifacts.filter(item => item.kind === 'screenshot').map(item => artifactOutputHtml({ ...item, name: item.path.split('/').at(-1), previewable: true, storage: 'project', download_url: `/api/projects/${item.project_id}/artifacts/${item.id}/download` })).join('')}
         ${resourceCards}
         ${sources.length ? `<div class="source-list"><span>知识来源</span><div>${sources.map((source, index) => `<button type="button">[${index + 1}] ${esc(source.source)} #片段${Number(source.position) + 1}</button>`).join('')}</div></div>` : ''}
       </div>
@@ -1800,8 +2029,11 @@ function answerUserQuestion(approvalId) {
 }
 
 async function resolveApproval(approvalId, decision, reason = '') {
+  if (state.approvalPending) return;
+  state.approvalPending = true;
+  updateComposerControls();
   const card = document.getElementById(`approval_${approvalId}`);
-  const buttons = card ? [...card.querySelectorAll('button')] : [];
+  const buttons = card ? [...card.querySelectorAll('button, input')] : [];
   buttons.forEach(button => { button.disabled = true; });
   const action = decision === 'approved' ? '正在执行并继续对话' : '正在拒绝并继续对话';
   const heading = card?.querySelector('.approval-heading span, .project-confirm-head strong');
@@ -1815,9 +2047,24 @@ async function resolveApproval(approvalId, decision, reason = '') {
     toast(card?.querySelector('.project-confirm-card') ? '回答已提交，智能体继续执行' : decision === 'approved' ? '已允许工具调用' : '已拒绝工具调用');
     await loadPage();
   } catch (error) {
-    buttons.forEach(button => { button.disabled = false; });
-    if (heading) heading.textContent = originalHeading;
-    toast(error.message, true);
+    const status = await api(`/api/approvals/${encodeURIComponent(approvalId)}`).catch(() => null);
+    if (status && status.status !== 'pending') {
+      card?.remove();
+      await loadPage();
+      toast(status.error ? `回答已接收，后续执行失败：${status.error}` : '该回答已提交；已刷新会话状态，请勿重复点击', !!status.error);
+    } else if (status?.status === 'pending') {
+      buttons.forEach(button => { button.disabled = false; });
+      if (heading) heading.textContent = originalHeading;
+      toast(error.message, true);
+    } else {
+      if (heading) heading.textContent = '提交结果尚未确认';
+      card?.querySelector('.turn-content')?.insertAdjacentHTML('beforeend', '<button class="button button-quiet button-small" type="button" onclick="loadPage()">刷新会话状态</button>');
+      toast('提交结果尚未确认，请刷新会话状态后再操作；不会重复提交旧回答', true);
+    }
+  } finally {
+    state.approvalPending = false;
+    updateComposerControls();
+    refreshSidebarThreads();
   }
 }
 
@@ -1828,21 +2075,30 @@ function scrollMessages(smooth = false) {
 
 function bindComposer() {
   const input = $('#chatInput');
-  scrollMessages();
+  scrollMessages(true);
   if (!input) return;
   input.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendMessage(); }
   });
   input.addEventListener('input', () => {
-    input.style.height = '54px';
+    input.style.height = '64px';
     input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
+    saveComposerDraft(); updateComposerControls();
   });
+  const dock = $('.prompt-dock');
+  dock?.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); dock.classList.add('is-dragging'); } });
+  dock?.addEventListener('dragleave', () => dock.classList.remove('is-dragging'));
+  dock?.addEventListener('drop', event => { event.preventDefault(); dock.classList.remove('is-dragging'); uploadChatAttachments(Array.from(event.dataTransfer.files)); });
+  input.addEventListener('paste', event => { const files = Array.from(event.clipboardData?.files || []); if (files.length) { event.preventDefault(); uploadChatAttachments(files); } });
+  updateComposerControls();
   input.focus();
 }
 
 async function newThread() {
+  if (state.chatSubmitPending || state.intentPending || state.approvalPending || state.modelSaving || state.chatAttachments.some(item => item.status === 'uploading')) return toast('请先等待当前操作完成', true);
   if (state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   try {
+    saveComposerDraft();
     state.threadScope = 'active';
     const agent = $('#chatAgent')?.value || state.cache.agents?.[0]?.id;
     const result = await api('/api/threads', { method: 'POST', body: JSON.stringify({ name: '新对话', agent_id: agent }) });
@@ -1927,6 +2183,7 @@ function selectedAgentWriteCapability(agentId, kind = '') {
   const tools = agent.builtin_tools || [];
   const policy = agent.tool_policy || {};
   const rules = policy.tools || {};
+  if (kind === 'browser_artifact') return { allowed: !!agent.allow_browser && ['workspace-write', 'danger-full-access'].includes(agent.sandbox_mode) && rules.screenshot !== 'deny' && rules.browser !== 'deny' && policy.default !== 'deny', reason: '请启用浏览器能力、允许截图工具，并使用工作区可写模式' };
   const allows = name => (tools.includes(name) || agent.role_template === 'coding' && ['write_file', 'apply_patch'].includes(name))
     && rules[name] !== 'deny' && (rules[name] || policy.default) !== 'deny';
   const domainAllows = name => rules[name] !== 'deny' && (rules[name] || policy.default) !== 'deny';
@@ -1947,7 +2204,7 @@ function projectDecisionCardHtml(step = 'project') {
   if (!pending) return '';
   const name = projectName(state.activeProjectId);
   const capability = selectedAgentWriteCapability(pending.agent, pending.kind);
-  const target = pending.kind === 'workflow' ? '工作流' : pending.kind === 'project' ? '项目' : '代码和文件';
+  const target = pending.kind === 'workflow' ? '工作流' : pending.kind === 'project' ? '项目' : pending.kind === 'browser_artifact' ? '截图与浏览器文件' : '代码和文件';
   const title = step === 'permission' ? `当前智能体还不能创建或修改${target}`
     : step === 'save' ? `是否将本次${target}任务关联到“${name}”？`
     : step === 'create' ? '为这次任务创建项目' : pending.unresolvedTargetName ? `找不到“${pending.unresolvedTargetName}”，请选择目标项目` : '是否为这次任务关联一个项目？';
@@ -1999,6 +2256,7 @@ async function cancelPendingProject() {
   const input = $('#chatInput');
   if (input) { input.value = pending.content; input.focus(); input.dispatchEvent(new Event('input')); }
   state.pendingProjectTurn = null;
+  updateComposerControls();
   if (Object.hasOwn(pending, 'priorProjectId') && pending.priorProjectId !== state.activeProjectId) {
     try { await setActiveProject(pending.priorProjectId); }
     catch (error) { toast(`恢复原项目失败：${error.message}`, true); }
@@ -2044,239 +2302,416 @@ async function continuePendingProject(saveToProject) {
   }
   state.pendingProjectTurn = null;
   document.getElementById(pending.cardId)?.remove();
-  await sendMessage({ content: pending.content, agent: pending.agent, project_id: state.activeProjectId, save_to_project: saveToProject, intent_kind: pending.kind, preRendered: true });
+  await sendMessage({ content: pending.content, agent: pending.agent, attachments: pending.attachments, project_id: state.activeProjectId, save_to_project: saveToProject, intent_kind: pending.kind, preRendered: true });
 }
 
-async function sendMessage(decision = null) {
-  let input = $('#chatInput');
-  let button = $('#sendBtn');
-  let agentSelect = $('#chatAgent');
-  if (state.activeTurn) return stopGeneration();
-  if (state.intentPending) return;
-  if (!input || !button || button.disabled) return;
-  if (state.pendingProjectTurn && !decision) return toast('请先选择如何处理上一个项目确认', true);
-  const content = decision?.content || input.value.trim();
-  const agent = decision?.agent || agentSelect?.value;
-  if (!content) return;
-  if (!agent) { toast('请先创建并选择智能体', true); return; }
-  const messages = $('#messages');
-  const suffix = Date.now();
-  const userId = decision?.preRendered ? null : `projectUser_${suffix}`;
-  const pendingId = `pending_${suffix}`;
-  messages?.querySelector('.conversation-empty')?.remove();
-  messages?.insertAdjacentHTML('beforeend', `${userId ? `<div id="${userId}">${messageHtml({ role: 'user', content })}</div>` : ''}
-    <article class="message-turn assistant is-pending" id="${pendingId}"><div class="turn-avatar" aria-hidden="true">${codezznLogoHtml}</div><div class="turn-content"><header><strong>Codezzn</strong></header><div class="thinking-line"><span></span><span></span><span></span><b>Thinking · 正在理解任务</b></div></div></article>`);
-  input.value = '';
-  input.style.height = '54px';
-  scrollMessages(true);
-  state.intentPending = true;
-  button.disabled = true;
-  try {
-    if (!state.thread) await ensureChatThread();
-  } catch (error) {
-    const pending = document.getElementById(pendingId);
-    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: `请求失败：${error.message}`, error: true });
-    toast(error.message, true);
-    return;
-  } finally {
-    state.intentPending = false;
-    button.disabled = false;
-  }
-  let intent = null;
-  let intentError = false;
-  if (!decision) {
-    state.intentPending = true;
-    button.disabled = true;
-    try {
-      const pending = document.getElementById(pendingId);
-      if (pending) pending.querySelector('.thinking-line b').textContent = 'Thinking · 正在判断是否需要项目确认';
-      intent = await api('/api/agent/intent', { method: 'POST', body: JSON.stringify({ content, agent_id: agent, thread_id: state.thread }) });
-      if (typeof intent?.requires_project !== 'boolean') throw new Error('意图检查返回无效结果');
-    } catch (error) {
-      intentError = true;
-      if (!selectedAgentWriteCapability(agent).allowed) {
-        document.getElementById(pendingId)?.remove();
-        if (userId) document.getElementById(userId)?.remove();
-        input.value = content;
-        toast(`无法检查任务意图：${error.message}`, true);
-        return;
-      }
-    } finally {
-      state.intentPending = false;
-      button.disabled = false;
-    }
-  }
-  if (!decision && intent?.project_switch_only) {
-    try {
-      const result = await api(`/api/threads/${encodeURIComponent(state.thread)}/project-switch`, {
-        method: 'POST', body: JSON.stringify({ content, project_name: intent.target_project_name }),
-      });
-      state.activeProjectId = result.project.id;
-      const freshThread = await api(`/api/threads/${encodeURIComponent(state.thread)}`);
-      state.currentThread = freshThread;
-      await refreshProjects();
-      renderProjectChip();
-      document.getElementById(pendingId)?.remove();
-      messages?.insertAdjacentHTML('beforeend', messageHtml({ role: 'assistant', content: result.content }));
-      await refreshChatFiles();
-      scrollMessages(true);
-    } catch (error) {
-      const pending = document.getElementById(pendingId);
-      if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: `请求失败：${error.message}`, error: true });
-      toast(error.message, true);
-      openProjectPicker('activate');
-    }
-    return;
-  }
-  if (!decision && intent?.target_project_id) {
-    try {
-      intent.priorProjectId = state.activeProjectId;
-      await setActiveProject(intent.target_project_id);
-    } catch (error) {
-      const pending = document.getElementById(pendingId);
-      if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: `项目切换失败：${error.message}`, error: true });
-      toast(error.message, true);
-      return;
-    }
-  }
-  if (!decision && (intent?.requires_project || intentError)) {
-    const kind = intent?.kind || '';
-    const step = !selectedAgentWriteCapability(agent, kind).allowed ? 'permission' : intent?.unresolved_target ? 'project' : state.activeProjectId ? 'save' : 'project';
-    state.pendingProjectTurn = { content, agent, kind, cardId: `projectConfirm_${suffix}`, userId, suggestedName: String(intent?.target_project_name || intent?.suggested_name || content).replace(/[。！!？?].*$/, '').slice(0, 32), step, intentError, unresolvedTargetName: intent?.unresolved_target ? intent.target_project_name : null, ...(Object.hasOwn(intent || {}, 'priorProjectId') ? { priorProjectId: intent.priorProjectId } : {}) };
-    document.getElementById(pendingId)?.remove();
-    renderProjectDecision(state.pendingProjectTurn.step);
-    return;
-  }
-  const runningPending = document.getElementById(pendingId);
-  if (runningPending) runningPending.querySelector('.thinking-line b').textContent = 'Thinking · 正在运行';
+// Chat is a persistent server queue. A browser disconnect never stops execution.
+const chatTerminalStatuses = new Set(['completed', 'failed', 'cancelled']);
+
+async function conversationApi(path, options = {}) {
   const controller = new AbortController();
-  const activeTurn = { controller, pendingId, cancelled: false };
-  state.activeTurn = activeTurn;
-  button.classList.add('is-running');
-  button.setAttribute('aria-label', '停止生成');
-  button.innerHTML = '<span class="stop-glyph" aria-hidden="true"></span><span>停止</span>';
-  agentSelect.disabled = true;
-  input.disabled = true;
-  scrollMessages(true);
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try { return await api(path, { ...options, signal: controller.signal }); }
+  catch (error) { if (error.name === 'AbortError') throw new Error('请求超时，后台状态尚未确认'); throw error; }
+  finally { clearTimeout(timeout); }
+}
+
+function chatSubmissionId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  const values = new Uint8Array(16);
+  if (typeof crypto === 'undefined' || !crypto.getRandomValues) throw new Error('当前浏览器不支持安全的提交标识，请使用现代浏览器');
+  crypto.getRandomValues(values); values[6] = (values[6] & 15) | 64; values[8] = (values[8] & 63) | 128;
+  const hex = [...values].map(value => value.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+
+function readUnknownChatSubmission(threadId) {
+  if (!threadId) return null;
+  try { return JSON.parse(localStorage.getItem?.(`codezzn.queue.unknown.${threadId}`) || 'null'); } catch (_) { return null; }
+}
+
+function rememberUnknownChatSubmission(value) {
+  state.chatUnknownSubmission = value;
+  try { const key = `codezzn.queue.unknown.${state.thread}`; if (value) localStorage.setItem?.(key, JSON.stringify(value)); else localStorage.removeItem?.(key); } catch (_) { /* The in-memory guard still prevents resubmission. */ }
+}
+
+function restoreChatInteractionSubmissions(threadId) {
+  state.chatInteractionSubmissions = {};
+  if (!threadId) return;
   try {
-    const turnPayload = { content, agent_id: agent };
-    if (decision) {
-      turnPayload.project_id = decision.project_id ?? null;
-      turnPayload.save_to_project = decision.save_to_project === true;
-      if (decision.intent_kind) turnPayload.intent_kind = decision.intent_kind;
+    const saved = JSON.parse(localStorage.getItem?.(`codezzn.interactions.unknown.${threadId}`) || '{}');
+    for (const [key, value] of Object.entries(saved)) {
+      const id = key.split(':')[0]; const interaction = state.chatInteractions.find(item => item.id === id);
+      if (interaction?.status === 'pending' && !(key.includes(':') && interaction.response?.cards?.[key.slice(id.length + 1)])) state.chatInteractionSubmissions[key] = { ...value, pending: false, unknown: true };
     }
-    const response = await fetch(`/api/threads/${state.thread}/turns/stream`, {
-      method: 'POST', headers: headers(), body: JSON.stringify(turnPayload), signal: controller.signal,
-    });
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
-    const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = ''; let renderedAnswer = ''; const events = []; let streamError = ''; let resultStatus = ''; let approvalId = ''; let completedTurnId = '';
-    const renderPending = () => {
-      const pending = document.getElementById(pendingId);
-      if (!pending) return;
-      const progress = events.filter(event => ['tool_started', 'tool_completed', 'tool_failed', 'assistant_status', 'model_fallback'].includes(event.type)).slice(-4).map(event => {
-        if (event.type === 'tool_started') return `正在使用 ${event.name || '工具'}`;
-        if (event.type === 'tool_completed') return `${event.name || '工具'} 已完成`;
-        if (event.type === 'tool_failed') return `${event.name || '工具'} 执行失败`;
-        if (event.type === 'model_fallback') return '正在切换模型';
-        return event.status === 'saving_project_file' ? '正在保存项目文件' : '正在整理结果';
-      });
-      pending.querySelector('.turn-content').innerHTML = `<header><strong>Codezzn</strong></header>
-        <div class="agent-live-thinking" aria-live="polite"><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Thinking</span></div>
-        ${progress.length ? `<div class="agent-live-steps">${progress.map(item => `<div>${esc(item)}</div>`).join('')}</div>` : '<div class="agent-live-steps"><div>正在理解任务并准备下一步</div></div>'}
-        ${renderedAnswer ? `<div class="message-copy">${richText(renderedAnswer)}</div>` : ''}`;
-      scrollMessages();
-    };
-    const animator = createStreamTextAnimator(text => { renderedAnswer = text; renderPending(); });
-    activeTurn.animator = animator;
-    while (true) {
-      const { value, done } = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-      const parts = buffer.split(/\n\n/);
-      buffer = parts.pop();
-      for (const part of parts) {
-        const line = part.split('\n').find(item => item.startsWith('data:'));
-        if (!line) continue;
-        const event = JSON.parse(line.slice(5));
-        events.push(event);
-        if (event.type === 'assistant_delta') {
-          const delta = event.content || '';
-          answer += delta;
-          animator.append(delta);
-        } else {
-          if (event.type === 'turn_result') {
-            answer = event.content || answer;
-            resultStatus = event.status || '';
-            approvalId = event.approval_id || '';
-            completedTurnId = event.turn_id || '';
-            animator.replace(answer);
-          }
-          if (event.type === 'turn_error') streamError = event.message || event.reason || '运行失败';
-          if (event.type === 'turn_cancelled') activeTurn.cancelled = true;
-          renderPending();
-        }
-      }
-      if (done) break;
-    }
-    if (streamError) throw new Error(streamError);
-    await animator.flush();
-    const pending = document.getElementById(pendingId);
-    if (pending && resultStatus === 'waiting_for_approval') {
-      const inbox = await api(`/api/threads/${state.thread}/approvals/inbox`).catch(() => ({ data: [] }));
-      const approval = inbox.data.find(item => item.id === approvalId) || inbox.data.at(-1);
-      pending.outerHTML = approval
-        ? approvalHtml(approval)
-        : messageHtml({ role: 'assistant', content: '工具调用正在等待审批，请刷新页面后处理。', meta: { events, usage: {}, runtime: {}, sources: [] } });
-    } else if (pending) {
-      const freshThread = completedTurnId && resultStatus === 'completed'
-        ? await api(`/api/threads/${state.thread}`).catch(() => null)
-        : null;
-      const persisted = freshThread?.messages?.find(item => item.turn_id === completedTurnId && item.role === 'assistant');
-      if (freshThread) {
-        await refreshProjects().catch(() => null);
-        state.currentThread = freshThread;
-        state.activeProjectId = freshThread.active_project_id || null;
-        renderProjectChip();
-      }
-      pending.outerHTML = persisted
-        ? messageHtml(persisted)
-        : messageHtml({ role: 'assistant', content: activeTurn.cancelled ? '已停止生成。' : (answer || '模型返回了空响应。'), meta: { events, usage: {}, runtime: {}, sources: [] } });
-      if (persisted) {
-        const prior = state.currentThread?.messages || [];
-        const strip = $('#conversationAssets');
-        if (strip) strip.outerHTML = assetStripHtml([...prior, persisted]);
-      }
-    }
-    scrollMessages(true);
-    await refreshChatFiles();
-  } catch (error) {
-    const pending = document.getElementById(pendingId);
-    const cancelled = activeTurn.cancelled || error.name === 'AbortError';
-    if (pending) pending.outerHTML = messageHtml({ role: 'assistant', content: cancelled ? '已停止生成。' : `请求失败：${error.message}`, error: !cancelled });
-    if (!cancelled) toast(error.message, true);
-    scrollMessages(true);
-  } finally {
-    button = $('#sendBtn'); input = $('#chatInput'); agentSelect = $('#chatAgent');
-    activeTurn.animator?.cancel();
-    if (state.activeTurn === activeTurn) state.activeTurn = null;
-    if (button) { button.disabled = false; button.classList.remove('is-running', 'is-stopping'); button.setAttribute('aria-label', '发送消息'); button.textContent = '发送'; }
-    if (agentSelect) agentSelect.disabled = false;
-    if (input) { input.disabled = false; input.focus(); }
+  } catch (_) { /* Server interaction state remains authoritative. */ }
+}
+
+function persistChatInteractionSubmissions() {
+  if (!state.thread) return;
+  const saved = Object.fromEntries(Object.entries(state.chatInteractionSubmissions).filter(([, value]) => value.pending || value.unknown));
+  try { const key = `codezzn.interactions.unknown.${state.thread}`; if (Object.keys(saved).length) localStorage.setItem?.(key, JSON.stringify(saved)); else localStorage.removeItem?.(key); } catch (_) { /* In-memory guards still apply. */ }
+}
+
+function queueMessageActive(message) {
+  if (!message || ['pending', 'cancelled', 'failed'].includes(message.status)) return false;
+  return !chatTerminalStatuses.has(message.run_status || '') && (message.status === 'dispatching' || message.status === 'consumed');
+}
+
+function clearConfirmedChatDraft(unknown) {
+  const input = $('#chatInput');
+  if (input?.value.trim() === unknown.payload?.content) input.value = '';
+  state.chatAttachments = state.chatAttachments.filter(item => !(unknown.payload?.attachment_ids || []).includes(item.id));
+  renderChatAttachments(); rememberUnknownChatSubmission(null);
+}
+
+function syncActiveChatTurn() {
+  const message = state.chatQueue.find(queueMessageActive);
+  const interaction = state.chatInteractions.find(item => ['pending', 'submitting'].includes(item.status) && item.kind !== 'decision_cards');
+  const legacyRunning = ['running','waiting_for_input','waiting_for_project','waiting_for_approval'].includes(state.currentThread?.status);
+  state.activeTurn = message ? { turn_id: message.turn_id, queue_message_id: message.id, status: message.run_status } : interaction ? { turn_id: interaction.turn_id, queue_message_id: interaction.queue_message_id, status: 'waiting_for_input' } : legacyRunning ? { turn_id: state.currentThread.messages?.at(-1)?.turn_id, status: state.currentThread.status } : null;
+}
+
+function persistedChatMessagesHtml(messages) {
+  return messages.map((message, index) => {
+    const key = message.id || `${message.turn_id || 'history'}_${message.role}_${index}`;
+    const html = messageHtml(message); state.chatMessageSignatures[key] = html;
+    return `<div class="persisted-chat-message" id="chatMessage_${esc(key)}">${html}</div>`;
+  }).join('');
+}
+
+function persistentChatTimelineHtml(messages, interactions) {
+  const records = messages.map((message, index) => ({ kind: 'message', item: message, index })).concat(interactions.map((item, index) => ({ kind: 'interaction', item, index: messages.length + index })));
+  const timestamp = item => typeof item.created_at === 'number' ? item.created_at * 1000 : Date.parse(item.created_at || '') || 0;
+  records.sort((a, b) => timestamp(a.item) - timestamp(b.item) || a.index - b.index);
+  return records.map(record => {
+    if (record.kind === 'interaction') { state.chatInteractionSignatures[record.item.id] = chatInteractionSignature(record.item); return chatInteractionHtml(record.item); }
+    const message = record.item; const key = message.id || `${message.turn_id || 'history'}_${message.role}_${record.index}`;
+    const html = messageHtml(message); state.chatMessageSignatures[key] = html;
+    return `<div class="persisted-chat-message" id="chatMessage_${esc(key)}">${html}</div>`;
+  }).join('');
+}
+
+function chatInteractionHtml(interaction) {
+  const payload = interaction.payload || {};
+  const pending = interaction.status === 'pending';
+  const locked = !pending || !!state.chatInteractionSubmissions[interaction.id]?.unknown;
+  const disabled = locked ? 'disabled' : '';
+  const statusLabel = ({ pending: '需要你的回答', submitting: '回答已接收，正在继续', answered: '已回答', cancelled: '已取消', superseded: '已由新指令替代' })[interaction.status] || interaction.status;
+  const attrs = `data-interaction-id="${esc(interaction.id)}"`;
+  let body = '';
+  if (interaction.kind === 'question') {
+    body = `<div class="interaction-options">${(payload.options || []).map(option => `<button type="button" ${attrs} data-option-id="${esc(option.id)}" ${disabled} onclick="answerChatOption(this)"><strong>${esc(option.label)}</strong>${option.description ? `<small>${esc(option.description)}</small>` : ''}</button>`).join('')}</div><label class="interaction-answer"><span>补充回答</span><textarea id="interactionAnswer_${esc(interaction.id)}" rows="2" ${disabled} placeholder="填写你的回答"></textarea></label><div class="interaction-actions"><button type="button" class="button button-primary button-small" ${attrs} ${disabled} onclick="answerChatQuestion(this)">提交回答</button><button type="button" class="button button-quiet button-small" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'denied'})">取消此任务</button></div>`;
+  } else if (interaction.kind === 'tool_approval') {
+    body = `<p class="interaction-tool-name">${esc(payload.tool_name || payload.name || '工具调用')}</p>${payload.description ? `<p>${esc(payload.description)}</p>` : ''}<details class="interaction-tool-details"><summary>查看调用参数</summary><pre>${esc(JSON.stringify(payload.args || payload.arguments || {}, null, 2))}</pre></details><div class="interaction-actions"><button type="button" class="button button-primary button-small" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'approved'})">允许并继续</button><button type="button" class="button button-quiet button-small" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'denied'})">拒绝调用</button></div>`;
+  } else if (interaction.kind === 'project_confirmation') {
+    body = `<label class="interaction-answer"><span>保存到已有项目</span><select id="interactionProject_${esc(interaction.id)}" ${disabled}><option value="">请选择项目</option>${(payload.projects || []).map(project => `<option value="${esc(project.id)}">${esc(project.name)}</option>`).join('')}</select></label><div class="interaction-actions"><button type="button" class="button button-primary button-small" ${attrs} ${disabled} onclick="answerChatProject(this,false)">使用所选项目</button></div>${payload.allow_create !== false ? `<label class="interaction-answer"><span>或创建新项目</span><input id="interactionProjectName_${esc(interaction.id)}" value="${esc(payload.suggested_name || '')}" ${disabled} placeholder="项目名称"></label><div class="interaction-actions"><button type="button" class="button button-quiet button-small" ${attrs} ${disabled} onclick="answerChatProject(this,true)">创建并继续</button></div>` : ''}<div class="interaction-actions"><button type="button" class="button button-quiet button-small" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'denied'})">取消此任务</button></div>`;
+  } else if (interaction.kind === 'decision_cards') {
+    body = `<div class="decision-card-grid">${(payload.cards || []).map(card => {
+      const answered = !!interaction.response?.cards?.[card.id];
+      const cardSubmission = state.chatInteractionSubmissions[`${interaction.id}:${card.id}`];
+      const cardDisabled = answered || interaction.status !== 'pending' || cardSubmission?.pending || cardSubmission?.unknown || cardSubmission?.accepted ? 'disabled' : '';
+      return `<section class="decision-card ${answered ? 'is-answered' : ''}"><span class="decision-card-kind">${esc(({ idea:'想法',opportunity:'机会',risk:'风险',ready:'就绪' })[card.kind] || '下一步')}</span><h4>${esc(card.title)}</h4><p>${esc(card.description)}</p><div class="interaction-actions">${(card.actions || []).map(action => `<button type="button" class="button button-quiet button-small" ${attrs} data-card-id="${esc(card.id)}" data-action-id="${esc(action.id)}" title="${esc(action.description || action.label)}" ${cardDisabled} onclick="answerChatDecision(this)">${esc(action.label)}</button>`).join('')}</div>${answered ? '<small>已提交</small>' : ''}${cardSubmission?.error ? `<p class="interaction-error">${esc(cardSubmission.error)}</p>` : ''}${cardSubmission?.unknown ? `<button type="button" class="button button-quiet button-small" ${attrs} data-card-id="${esc(card.id)}" onclick="refreshChatInteractionStatus(this)">刷新提交状态</button>` : ''}</section>`;
+    }).join('')}</div>`;
   }
+  const submission = state.chatInteractionSubmissions[interaction.id];
+  const error = interaction.error || submission?.error || '';
+  const answered = !pending && interaction.kind !== 'decision_cards';
+  const response = interaction.response || {};
+  const responseLabel = response.answer || (response.option_id ? (payload.options || []).find(option => option.id === response.option_id)?.label : '') || response.new_project_name || (response.project_id ? (payload.projects || []).find(project => project.id === response.project_id)?.name : '') || (response.decision === 'approved' ? '已允许' : response.decision === 'denied' ? '已拒绝 / 取消' : '');
+  return `<article class="message-turn assistant interaction-turn" id="interaction_${esc(interaction.id)}" data-status="${esc(interaction.status)}"><div class="turn-content"><section class="chat-interaction"><header><strong>${esc(statusLabel)}</strong></header>${interaction.question ? `<p class="interaction-question">${esc(interaction.question)}</p>` : ''}${answered ? `<p class="interaction-response">${esc(responseLabel || statusLabel)}</p>` : body}<p class="interaction-error" id="interactionError_${esc(interaction.id)}" role="alert">${esc(error)}</p>${submission?.unknown ? `<button type="button" class="button button-quiet button-small" ${attrs} onclick="refreshChatInteractionStatus(this)">刷新提交状态</button>` : ''}</section></div></article>`;
+}
+
+function chatInteractionSignature(item) { return JSON.stringify([item.kind, item.status, item.question, item.payload, item.response, item.error]); }
+
+function renderChatQueue() {
+  const container = $('#chatQueue'); if (!container) return;
+  const items = state.chatQueue.filter(item => item.status === 'pending' || item.status === 'dispatching' || item.status === 'failed' || item.run_status === 'failed');
+  const recent = items.filter(item => item.status !== 'failed' && item.run_status !== 'failed').concat(items.filter(item => item.status === 'failed' || item.run_status === 'failed').slice(-2));
+  container.hidden = !recent.length && !state.chatUnknownSubmission && !state.chatPollError;
+  container.innerHTML = `${state.chatUnknownSubmission ? `<div class="queue-uncertain"><span>提交结果尚未确认，发送已锁定，避免重复执行。</span><button type="button" onclick="refreshUnknownChatSubmission()">刷新提交状态</button>${state.chatUnknownSubmission.retryAllowed ? '<button type="button" onclick="retryUnknownChatSubmission()" title="复用原提交标识，不创建第二个任务">重试原提交</button>' : ''}</div>` : ''}${state.chatPollError ? `<div class="queue-connection-error">${esc(state.chatPollError)}</div>` : ''}${recent.map(item => `<div class="chat-queue-item"><span><small>${item.status === 'pending' ? '待执行' : item.status === 'dispatching' ? '准备执行' : '执行失败'}</small><strong>${esc(item.content)}</strong>${item.error ? `<small class="queue-item-error">${esc(item.error)}</small>` : ''}</span>${item.status === 'pending' ? `<button type="button" data-message-id="${esc(item.id)}" onclick="cancelQueuedChatMessage(this)" aria-label="取消排队任务">×</button>` : item.status === 'failed' || item.run_status === 'failed' ? `<button type="button" data-message-id="${esc(item.id)}" onclick="retryQueuedChatMessage(this)">重试</button>` : ''}</div>`).join('')}`;
+}
+
+function stopChatPolling() { state.chatPollEpoch++; if (state.chatPollTimer) clearTimeout(state.chatPollTimer); state.chatPollTimer = null; }
+
+function startChatPolling() {
+  stopChatPolling();
+  if (state.page !== 'chat' || !state.thread) return;
+  const epoch = state.chatPollEpoch; const threadId = state.thread;
+  const poll = async () => {
+    if (epoch !== state.chatPollEpoch || state.thread !== threadId || state.page !== 'chat') return;
+    await refreshPersistentChat(threadId, epoch);
+    if (epoch === state.chatPollEpoch && state.thread === threadId && state.page === 'chat') state.chatPollTimer = setTimeout(poll, 1000);
+  };
+  state.chatPollTimer = setTimeout(poll, 100);
+}
+
+async function refreshPersistentChat(threadId = state.thread, epoch = state.chatPollEpoch) {
+  if (!threadId) return;
+  const started = Date.now();
+  try {
+    const [thread, queue, interactions] = await Promise.all([conversationApi(`/api/threads/${encodeURIComponent(threadId)}`), conversationApi(`/api/threads/${encodeURIComponent(threadId)}/queue`), conversationApi(`/api/threads/${encodeURIComponent(threadId)}/interactions`)]);
+    if (threadId !== state.thread || epoch !== state.chatPollEpoch || started < (state.chatLastMutationAt || 0)) return;
+    const priorActive = state.activeTurn?.turn_id;
+    const stream = $('#messages');
+    const followLatest = stream && stream.scrollHeight - stream.scrollTop - stream.clientHeight < 90;
+    const priorArtifacts = JSON.stringify((state.currentThread?.messages || []).map(item => [item.id, item.project_artifacts, item.meta?.artifacts]));
+    state.currentThread = thread; state.chatQueue = queue.data || thread.queue_messages || []; state.chatInteractions = interactions.data || thread.interactions || []; state.chatPollError = '';
+    state.activeProjectId = thread.active_project_id || null; syncActiveChatTurn();
+    if (state.chatUnknownSubmission) {
+      const found = state.chatQueue.find(item => item.submission_id === state.chatUnknownSubmission.submission_id);
+      if (found) clearConfirmedChatDraft(state.chatUnknownSubmission);
+    }
+    applyPersistentChatMessages(thread.messages || []);
+    applyPersistentChatInteractions();
+    renderChatLiveTurn(); renderChatQueue(); updateComposerControls(); renderProjectChip();
+    const title = $('.conversation-title strong'); if (title && thread.name) title.textContent = thread.name;
+    if (state.activeTurn?.turn_id) await refreshChatEvents(threadId, state.activeTurn.turn_id, epoch);
+    if (threadId !== state.thread || epoch !== state.chatPollEpoch) return;
+    if (followLatest) scrollMessages();
+    if (priorActive !== state.activeTurn?.turn_id) refreshSidebarThreads();
+    const artifacts = JSON.stringify((thread.messages || []).map(item => [item.id, item.project_artifacts, item.meta?.artifacts]));
+    if (artifacts !== priorArtifacts) { const strip = $('#conversationAssets'); if (strip) strip.outerHTML = assetStripHtml(thread.messages || []); refreshProjects().then(() => refreshChatFiles()).catch(() => {}); hydrateChatAttachmentPreviews(); }
+  } catch (error) {
+    if (threadId !== state.thread || epoch !== state.chatPollEpoch) return;
+    state.chatPollError = `连接暂时中断，后台任务继续执行：${error.message}`;
+    renderChatQueue();
+  }
+}
+
+function applyPersistentChatMessages(messages) {
+  const stream = $('#messages'); if (!stream) return;
+  const atBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 90;
+  if (messages.length || state.chatInteractions.length || state.chatQueue.length) stream.querySelector?.('.conversation-empty')?.remove();
+  messages.forEach((message, index) => {
+    const key = message.id || `${message.turn_id || 'history'}_${message.role}_${index}`;
+    const html = messageHtml(message); if (state.chatMessageSignatures[key] === html) return;
+    const existing = document.getElementById(`chatMessage_${key}`);
+    if (existing) existing.innerHTML = html;
+    else { const anchor = stream.querySelector?.('#chatLiveTurn'); if (anchor) anchor.insertAdjacentHTML('beforebegin', `<div class="persisted-chat-message" id="chatMessage_${esc(key)}">${html}</div>`); else stream.insertAdjacentHTML?.('beforeend', `<div class="persisted-chat-message" id="chatMessage_${esc(key)}">${html}</div>`); }
+    state.chatMessageSignatures[key] = html;
+  });
+  if (atBottom) scrollMessages();
+}
+
+function applyPersistentChatInteractions() {
+  const stream = $('#messages'); if (!stream) return;
+  state.chatInteractions.forEach(item => {
+    const signature = chatInteractionSignature(item);
+    const existing = document.getElementById(`interaction_${item.id}`);
+    if (existing && state.chatInteractionSignatures[item.id] === signature) return;
+    const submitting = state.chatInteractionSubmissions[item.id];
+    if (existing && item.status === 'pending' && submitting?.pending) return;
+    // Preserve an unfinished answer or project choice while a pending card polls.
+    if (existing && existing.dataset?.status === 'pending' && item.status === 'pending' && item.kind !== 'decision_cards' && state.chatInteractionSignatures[item.id]) {
+      const error = document.getElementById(`interactionError_${item.id}`); if (error) error.textContent = item.error || submitting?.error || '';
+    } else if (existing) existing.outerHTML = chatInteractionHtml(item);
+    else { const live = document.getElementById('chatLiveTurn'); if (live) live.insertAdjacentHTML?.('beforebegin', chatInteractionHtml(item)); else stream.insertAdjacentHTML?.('beforeend', chatInteractionHtml(item)); }
+    state.chatInteractionSignatures[item.id] = signature;
+    if (item.status !== 'pending') delete state.chatInteractionSubmissions[item.id];
+  });
+  persistChatInteractionSubmissions();
+}
+
+function renderChatLiveTurn() {
+  let live = document.getElementById('chatLiveTurn');
+  const active = state.activeTurn;
+  if (!active || String(active.status).startsWith('waiting_')) { live?.remove(); return; }
+  const events = state.chatEvents[active.turn_id] || [];
+  const parts = events.filter(event => ['tool_started','tool_completed','tool_failed','assistant_status','model_fallback'].includes(event.type)).slice(-4).map(event => event.type === 'tool_started' ? `正在使用 ${event.name || '工具'}` : event.type === 'tool_completed' ? `${event.name || '工具'} 已完成` : event.type === 'tool_failed' ? `${event.name || '工具'} 执行失败` : event.type === 'model_fallback' ? '正在切换模型' : '正在整理结果');
+  const text = events.filter(event => event.type === 'assistant_delta').map(event => event.content || '').join('');
+  const html = `<div class="turn-content"><div class="agent-live-thinking"><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>${state.chatStopPending ? '正在请求停止…' : '正在运行'}</span></div>${parts.length ? `<div class="agent-live-steps">${parts.map(part => `<div>${esc(part)}</div>`).join('')}</div>` : ''}${text ? `<div class="message-copy">${richText(text)}</div>` : ''}</div>`;
+  if (!live) { $('#messages')?.insertAdjacentHTML?.('beforeend', '<article class="message-turn assistant is-pending" id="chatLiveTurn"></article>'); live = document.getElementById('chatLiveTurn'); }
+  if (live && live.innerHTML !== html) live.innerHTML = html;
+}
+
+async function refreshChatEvents(threadId, turnId, epoch) {
+  try {
+    const response = await conversationApi(`/api/threads/${encodeURIComponent(threadId)}/events?turn_id=${encodeURIComponent(turnId)}&since=${state.chatEventSequences[turnId] || 0}`);
+    if (threadId !== state.thread || epoch !== state.chatPollEpoch) return;
+    const events = (response.data || []).map(row => ({ ...row, ...(row.data || {}), sequence: row.sequence }));
+    const prior = state.chatEvents[turnId] || [];
+    events.forEach(event => { const key = event.sequence ?? event.id; if (key == null || !prior.some(old => (old.sequence ?? old.id) === key)) prior.push(event); });
+    state.chatEvents[turnId] = prior;
+    state.chatEventSequences[turnId] = Math.max(state.chatEventSequences[turnId] || 0, ...events.map(event => Number(event.sequence) || 0));
+    renderChatLiveTurn();
+  } catch (_) { /* Thread state remains authoritative; retry events on the next poll. */ }
+}
+
+async function sendMessage(options = null) {
+  const input = $('#chatInput'); const agent = options?.agent || $('#chatAgent')?.value;
+  if (!input || state.chatSubmitPending || state.modelSaving) return;
+  if (state.chatUnknownSubmission) return toast('上次提交结果尚未确认，请先刷新提交状态', true);
+  if (state.chatAttachments.some(item => item.status === 'uploading')) return toast('请等待附件上传完成', true);
+  const attachments = options?.attachments || state.chatAttachments.filter(item => item.status === 'ready');
+  const content = options?.content || input.value.trim() || (attachments.length ? '请分析附件内容。' : '');
+  if (!content) return;
+  if (!agent) return toast('请先创建并选择智能体', true);
+  const payload = { content, agent_id: agent, attachment_ids: attachments.map(item => item.id), interrupt: options?.interrupt === true, submission_id: chatSubmissionId() };
+  if (state.activeProjectId) { payload.project_id = state.activeProjectId; payload.save_to_project = true; }
+  if (options && Object.hasOwn(options, 'save_to_project')) { payload.save_to_project = options.save_to_project === true; payload.project_id = options.project_id ?? null; }
+  state.chatSubmitPending = true; updateComposerControls();
+  try {
+    await ensureChatThread(agent);
+    const threadId = state.thread;
+    let result;
+    try { result = await conversationApi(`/api/threads/${encodeURIComponent(threadId)}/queue`, { method: 'POST', body: JSON.stringify(payload) }); }
+    catch (error) {
+      const confirmed = await conversationApi(`/api/threads/${encodeURIComponent(threadId)}/queue?submission_id=${encodeURIComponent(payload.submission_id)}`).catch(() => null);
+      const found = confirmed?.data?.find(item => item.submission_id === payload.submission_id);
+      if (found) result = { message: found };
+      else if (confirmed && [400,401,403,404,409,422].includes(error.status)) throw error;
+      else { rememberUnknownChatSubmission({ submission_id: payload.submission_id, payload, error: error.message }); renderChatQueue(); toast('提交结果尚未确认，已锁定发送；请刷新提交状态，避免重复执行', true); return; }
+    }
+    const message = result?.message;
+    if (!message?.id) { rememberUnknownChatSubmission({ submission_id: payload.submission_id, payload }); renderChatQueue(); return; }
+    state.chatLastMutationAt = Date.now();
+    if (!state.chatQueue.some(item => item.id === message.id)) state.chatQueue.push(message);
+    if (result.interaction && !state.chatInteractions.some(item => item.id === result.interaction.id)) state.chatInteractions.push(result.interaction);
+    if (input.value.trim() === content || (!input.value.trim() && attachments.length)) input.value = '';
+    input.style.height = '64px';
+    state.chatAttachments = state.chatAttachments.filter(item => !attachments.some(sent => sent.id === item.id));
+    renderChatAttachments(); syncActiveChatTurn(); renderChatQueue();
+    startChatPolling();
+    toast(payload.interrupt ? '调整指令已提交，停止当前任务后执行' : message.status === 'pending' ? '已加入待执行队列' : '任务已提交');
+  } catch (error) { toast(`提交失败：${error.message}`, true); }
+  finally { state.chatSubmitPending = false; updateComposerControls(); saveComposerDraft(); }
+}
+
+async function refreshUnknownChatSubmission() {
+  const unknown = state.chatUnknownSubmission; if (!unknown || !state.thread) return;
+  const threadId = state.thread;
+  try {
+    const response = await conversationApi(`/api/threads/${encodeURIComponent(threadId)}/queue?submission_id=${encodeURIComponent(unknown.submission_id)}`);
+    if (threadId !== state.thread || unknown.submission_id !== state.chatUnknownSubmission?.submission_id) return;
+    const message = response.data?.find(item => item.submission_id === unknown.submission_id);
+    if (!message) { rememberUnknownChatSubmission({ ...unknown, retryAllowed: true }); renderChatQueue(); return toast('暂未找到原提交，可继续刷新，或用原提交标识重试；不会创建第二个任务', true); }
+    clearConfirmedChatDraft(unknown);
+    if (!state.chatQueue.some(item => item.id === message.id)) state.chatQueue.push(message);
+    renderChatAttachments(); syncActiveChatTurn(); renderChatQueue(); updateComposerControls(); startChatPolling(); toast('提交已确认，已恢复任务状态');
+  } catch (error) { toast(`无法确认提交：${error.message}`, true); }
+}
+
+async function retryUnknownChatSubmission() {
+  const unknown = state.chatUnknownSubmission;
+  if (!unknown?.retryAllowed || state.chatSubmitPending) return;
+  state.chatSubmitPending = true; updateComposerControls();
+  try {
+    const result = await conversationApi(`/api/threads/${encodeURIComponent(state.thread)}/queue`, { method: 'POST', body: JSON.stringify(unknown.payload) });
+    if (!result.message?.id || result.message.submission_id !== unknown.submission_id) throw new Error('服务端未返回可确认的原提交状态');
+    clearConfirmedChatDraft(unknown);
+    state.chatLastMutationAt = Date.now();
+    if (!state.chatQueue.some(item => item.id === result.message.id)) state.chatQueue.push(result.message);
+    syncActiveChatTurn(); renderChatQueue(); startChatPolling(); toast('原提交已确认');
+  } catch (error) { toast(`原提交仍未确认：${error.message}`, true); }
+  finally { state.chatSubmitPending = false; updateComposerControls(); }
 }
 
 async function stopGeneration() {
-  const active = state.activeTurn;
-  if (!active || !state.thread || active.cancelled) return;
-  active.cancelled = true;
-  const button = $('#sendBtn');
-  if (button) {
-    button.classList.add('is-stopping');
-    button.innerHTML = '<span class="stop-glyph" aria-hidden="true"></span><span>停止中</span>';
-  }
-  const cancellation = api(`/api/threads/${state.thread}/turns/active`, { method: 'DELETE' }).catch(() => null);
-  active.animator?.cancel();
-  active.controller.abort();
-  await cancellation;
+  if (!state.thread || !state.activeTurn || state.chatStopPending) return;
+  state.chatStopPending = true; updateComposerControls(); renderChatLiveTurn();
+  try {
+    await conversationApi(`/api/threads/${encodeURIComponent(state.thread)}/turns/active`, { method: 'DELETE' });
+    state.chatLastMutationAt = Date.now();
+    await refreshPersistentChat();
+    toast('已请求停止当前任务；排队任务已保留');
+  } catch (error) { toast(`停止失败：${error.message}；后台任务可能仍在执行，请刷新状态`, true); }
+  finally { state.chatStopPending = false; updateComposerControls(); renderChatLiveTurn(); }
+}
+
+async function cancelQueuedChatMessage(button) {
+  if (!state.thread || button.disabled) return;
+  button.disabled = true;
+  try { await conversationApi(`/api/threads/${encodeURIComponent(state.thread)}/queue/${encodeURIComponent(button.dataset.messageId)}`, { method: 'DELETE' }); state.chatLastMutationAt = Date.now(); await refreshPersistentChat(); toast('已取消排队任务'); }
+  catch (error) { button.disabled = false; toast(`取消失败：${error.message}`, true); }
+}
+
+function retryQueuedChatMessage(button) {
+  const item = state.chatQueue.find(message => message.id === button.dataset.messageId);
+  if (!item || !['failed','cancelled'].includes(item.run_status || item.status)) return;
+  return sendMessage({ content: item.content, agent: item.agent_id || $('#chatAgent')?.value, attachments: (item.attachment_ids || []).map(id => ({ id, status: 'ready' })) });
+}
+
+function answerChatOption(button) { return answerChatInteraction(button, { option_id: button.dataset.optionId }); }
+function answerChatQuestion(button) { const answer = document.getElementById(`interactionAnswer_${button.dataset.interactionId}`)?.value.trim(); if (!answer) return toast('请输入回答', true); return answerChatInteraction(button, { answer }); }
+function answerChatProject(button, create) { const id = button.dataset.interactionId; const value = document.getElementById(`${create ? 'interactionProjectName' : 'interactionProject'}_${id}`)?.value.trim(); if (!value) return toast(create ? '请输入项目名称' : '请选择项目', true); return answerChatInteraction(button, create ? { new_project_name: value } : { project_id: value }); }
+function answerChatDecision(button) { return answerChatInteraction(button, { card_id: button.dataset.cardId, action_id: button.dataset.actionId }); }
+
+async function answerChatInteraction(button, answer) {
+  const id = button.dataset.interactionId; const item = state.chatInteractions.find(interaction => interaction.id === id);
+  if (!item || item.status !== 'pending' || button.disabled) return;
+  const key = answer.card_id ? `${id}:${answer.card_id}` : id;
+  const previous = state.chatInteractionSubmissions[key];
+  if (previous?.pending || previous?.unknown) return;
+  const payload = { ...answer, submission_id: previous?.submission_id || chatSubmissionId() };
+  state.chatInteractionSubmissions[key] = { submission_id: payload.submission_id, payload, pending: true };
+  state.chatAnswersPendingCount = (state.chatAnswersPendingCount || 0) + 1; state.approvalPending = true;
+  persistChatInteractionSubmissions();
+  const card = document.getElementById(`interaction_${id}`);
+  const controls = answer.card_id ? button.closest?.('.decision-card')?.querySelectorAll('button,input,textarea,select') : card?.querySelectorAll('button,input,textarea,select');
+  controls?.forEach(control => { control.disabled = true; });
+  try {
+    const result = await conversationApi(`/api/threads/${encodeURIComponent(state.thread)}/interactions/${encodeURIComponent(id)}/answer`, { method: 'POST', body: JSON.stringify(payload) });
+    state.chatLastMutationAt = Date.now();
+    if (result.interaction) state.chatInteractions = state.chatInteractions.map(old => old.id === id ? result.interaction : old);
+    state.chatInteractionSubmissions[key] = { ...state.chatInteractionSubmissions[key], pending: false, accepted: true };
+    if (card && result.interaction) { card.outerHTML = chatInteractionHtml(result.interaction); state.chatInteractionSignatures[id] = chatInteractionSignature(result.interaction); }
+    syncActiveChatTurn(); updateComposerControls(); toast('回答已接收，后台继续执行'); startChatPolling();
+  } catch (error) {
+    const response = await conversationApi(`/api/threads/${encodeURIComponent(state.thread)}/interactions`).catch(() => null);
+    const found = response?.data?.find(interaction => interaction.id === id);
+    const accepted = found && (answer.card_id ? !!found.response?.cards?.[answer.card_id] : found.status !== 'pending' || found.submission_id === payload.submission_id || found.response?.submission_id === payload.submission_id);
+    if (accepted) { state.chatInteractions = state.chatInteractions.map(old => old.id === id ? found : old); state.chatInteractionSubmissions[key] = { ...state.chatInteractionSubmissions[key], pending: false, accepted: true }; if (card) card.outerHTML = chatInteractionHtml(found); toast('回答已接收，已恢复后台状态'); }
+    else {
+      const definiteFailure = found && [400,401,403,404,409,422].includes(error.status);
+      state.chatInteractionSubmissions[key] = { ...state.chatInteractionSubmissions[key], pending: false, unknown: !definiteFailure, error: definiteFailure ? error.message : '提交结果尚未确认，请刷新状态，避免重复提交。' };
+      const errorBox = document.getElementById(`interactionError_${id}`); if (errorBox) errorBox.textContent = state.chatInteractionSubmissions[key].error;
+      if (definiteFailure) controls?.forEach(control => { control.disabled = false; });
+      else card?.querySelector('.chat-interaction')?.insertAdjacentHTML('beforeend', `<button class="button button-quiet button-small" type="button" data-interaction-id="${esc(id)}" data-card-id="${esc(answer.card_id || '')}" onclick="refreshChatInteractionStatus(this)">刷新提交状态</button>`);
+      toast(state.chatInteractionSubmissions[key].error, true);
+    }
+  } finally { state.chatAnswersPendingCount--; state.approvalPending = state.chatAnswersPendingCount > 0; persistChatInteractionSubmissions(); }
+}
+
+async function refreshChatInteractionStatus(button) {
+  const id = button.dataset.interactionId; const key = button.dataset.cardId ? `${id}:${button.dataset.cardId}` : id;
+  const threadId = state.thread;
+  try {
+    const response = await conversationApi(`/api/threads/${encodeURIComponent(threadId)}/interactions`);
+    if (threadId !== state.thread) return;
+    const item = response.data?.find(interaction => interaction.id === id); if (!item) return toast('未找到交互状态，请刷新会话', true);
+    const submission = state.chatInteractionSubmissions[key];
+    const accepted = button.dataset.cardId ? !!item.response?.cards?.[button.dataset.cardId] : item.status !== 'pending' || item.submission_id === submission?.submission_id;
+    if (!accepted) {
+      if (submission && item.status === 'pending') {
+        submission.retryAllowed = true;
+        button.disabled = true;
+        button.insertAdjacentHTML?.('afterend', `<button type="button" class="button button-quiet button-small" data-interaction-id="${esc(id)}" data-card-id="${esc(button.dataset.cardId || '')}" onclick="retryChatInteractionSubmission(this)" title="复用原回答和原提交标识">重试原回答</button>`);
+        return toast('暂未找到已接收状态；可以用原提交标识重试原回答，其他回答保持锁定', true);
+      }
+      return toast('提交状态仍未确认，原回答保持锁定，请稍后刷新', true);
+    }
+    state.chatInteractions = state.chatInteractions.map(old => old.id === id ? item : old); delete state.chatInteractionSubmissions[key];
+    const card = document.getElementById(`interaction_${id}`); if (card) card.outerHTML = chatInteractionHtml(item);
+    persistChatInteractionSubmissions(); syncActiveChatTurn(); updateComposerControls(); startChatPolling(); toast('已确认回答状态');
+  } catch (error) { toast(`状态刷新失败：${error.message}`, true); }
+}
+
+function retryChatInteractionSubmission(button) {
+  const key = button.dataset.cardId ? `${button.dataset.interactionId}:${button.dataset.cardId}` : button.dataset.interactionId;
+  const submission = state.chatInteractionSubmissions[key];
+  if (!submission?.retryAllowed || submission.pending) return;
+  submission.unknown = false;
+  return answerChatInteraction(button, submission.payload);
+}
+
+async function refreshSidebarThreads() {
+  try {
+    const result = await api(`/api/threads?archived=${state.threadScope === 'archived'}`);
+    state.chatThreads = result.data; renderChatHistory();
+    const current = result.data.find(item => item.id === state.thread);
+    const title = $('.conversation-title strong'); if (current && title) title.textContent = current.name;
+  } catch (_) { /* Current conversation remains usable if history refresh fails. */ }
 }
 
 function openSettings() {
@@ -2308,6 +2743,7 @@ document.addEventListener('keydown', event => {
 
 document.addEventListener('click', closeSessionMenus);
 window.addEventListener('resize', closeSessionMenus);
+window.addEventListener('resize', syncRailAccessibility);
 
 window.addEventListener('hashchange', () => {
   const page = location.hash.slice(1);
@@ -2321,3 +2757,4 @@ $('#pageTitle').textContent = pages.find(item => item.id === state.page).label;
 checkHealth();
 loadSession();
 loadPage();
+refreshSidebarThreads();

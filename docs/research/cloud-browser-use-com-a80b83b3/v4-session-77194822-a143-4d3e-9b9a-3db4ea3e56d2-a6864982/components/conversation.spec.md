@@ -1,0 +1,8 @@
+# Conversation specification
+Target: web/chat-workbench.css conversation and filepanel rules. Main owns markup.
+.cloud-chat on .chat-studio has one .conversation and optional .chat-files-panel; no session-browser child. .chat-studio default one-column grid, .has-file-panel adds320px right panel. Default files closed.
+Main white canvas, no rounded enclosing dashboard card or lavender surround. .conversation height100%, displayflex column min-height0. Header .conversation-bar slim48px, transparent/light white borderbottomrgb(231,229,228); title13px; right Agent selector and filesbutton. .conversation-top no big capability/project bars (moved composer).
+.message-stream flex1 overflowauto padding24px; all .message-turn max-width640px;margin horizontalauto. User .turn-content right bubble bg#f5f5f4 radius14px, padding10px14px, widthfit-content; hide repeated user avatar/header. Assistant transparent full640, body15px/24px; Codezzn header subdued12px, worktracecollapsedgray12px. .turn-avatar hide to match source.
+Empty: .conversation-empty within640 centered; restrained32px title and small logo; suggestion buttons .chat-suggestions 2columns desktop with icons; suggestions fill input, do not autosend.
+Preserve markdown code/table/math/copy, source and artifact controls; never hide actual approvals. .conversation-assets narrow coherent strip. Optional files320px right side, mobile overlay only when explicitly opened; no page horizontal overflow.
+At390: padding16px, bubblemax100%, suggestions singlecolumn, header Agent select narrower. Only stream scrolls; composer not pushed offscreen.

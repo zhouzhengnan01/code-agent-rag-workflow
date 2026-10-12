@@ -21,6 +21,10 @@ from .db import connect, current_tenant, ensure_tenant, init_db, migrate_bailian
 from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, drop_knowledge_index, rag_status
 from .knowledge_eval import evaluate as evaluate_knowledge_backends
 from . import knowledge_jobs
+from . import chat_inputs
+from . import conversation_artifacts
+from . import chat_sessions
+from . import conversation_control
 from .knowledge_service import delete_document as delete_knowledge_document, ensure_remote_dataset, health as knowledge_health, reindex as reindex_knowledge_service, search as search_knowledge_service, status as knowledge_status, upload as upload_knowledge_document
 from .ragflow import RAGFlowError
 from .mcp import mcp_manager
@@ -67,6 +71,10 @@ def _thread_payload(row):
         value["capability_overrides"] = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         value["capability_overrides"] = {}
+    try:
+        value["model_override"] = json.loads(value.pop("model_override", "{}") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        value["model_override"] = {}
     return value
 
 
@@ -81,11 +89,13 @@ def _capability_ids(value, kind):
 
 
 def _agent_for_thread(agent, thread):
-    scoped = dict(agent)
-    # A selected project is context, not permission to modify its files.
+    scoped = chat_inputs.apply_override(agent, thread["model_override"] if "model_override" in thread.keys() else {})
+    # User-approved default: selected project is the destination for new artifacts.
+    # Tool policies, sandbox restrictions and explicit per-turn declines still apply.
     active_project_id = thread["active_project_id"] if "active_project_id" in thread.keys() else None
     if active_project_id:
         scoped["_project_id"] = active_project_id
+        scoped["_project_save"] = True
         scoped["memory_project_id"] = active_project_id
     raw = thread["capability_overrides"] if "capability_overrides" in thread.keys() else "{}"
     try:
@@ -114,6 +124,13 @@ async def run_agent_isolated(agent, history, prompt, *, task_id=None, thread_id=
         return await run_agent(agent, history, prompt, thread_id=thread_id, current_task_id=task_id, **kwargs)
     finally:
         if token is not None: reset_workspace(token)
+
+
+def reconcile_failed_checkpoints():
+    """A failed approval continuation is terminal, not an interrupted task."""
+    with connect() as db:
+        result = db.execute("UPDATE agent_runs SET status='failed',error=COALESCE(error,'此前审批续跑已失败；回答已接收，请发起新任务继续'),updated_at=? WHERE status IN ('running','waiting') AND turn_id IN (SELECT turn_id FROM turn_checkpoints WHERE status='failed')", (now(),))
+    return result.rowcount
 
 
 async def execute_persistent_task(task):
@@ -179,8 +196,9 @@ async def lifespan(_app: FastAPI):
         try:
             expire_memories()
             backfill_memory_embeddings()
+            reconcile_failed_checkpoints()
             with connect() as db:
-                interrupted = db.execute("SELECT * FROM agent_runs WHERE status='running' AND task_id IS NULL").fetchall()
+                interrupted = db.execute("SELECT * FROM agent_runs WHERE status='running' AND task_id IS NULL AND turn_id NOT IN (SELECT turn_id FROM chat_queue_messages WHERE turn_id IS NOT NULL)").fetchall()
             for row in interrupted:
                 state = json.loads(row["state"] or "{}")
                 enqueue_task("agent_resume", "恢复中断的智能体任务", {"agent_id":row["agent_id"],"thread_id":row["thread_id"],"turn_id":row["turn_id"],"prompt":state.get("user_message", "")}, max_attempts=3)
@@ -188,9 +206,11 @@ async def lifespan(_app: FastAPI):
         finally:
             reset_tenant(token)
     await task_queue.start(execute_persistent_task, int(os.getenv("CODEZZN_TASK_WORKERS", "4")))
+    await conversation_control.conversation_runtime.start(chat_sessions.execute_message, chat_sessions.resume_interaction)
     try:
         yield
     finally:
+        await conversation_control.conversation_runtime.close()
         await task_queue.close()
         await mcp_manager.close()
         await lsp_manager.close()
@@ -198,6 +218,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Codezzn", version="0.3.0", description="可部署的智能体开发与运行平台", lifespan=lifespan)
+chat_sessions.install(app, globals())
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 LANDING_ASSETS = ROOT / "public" / "sites" / "browser-use-com-ef244017" / "web-agents-4de235c6"
@@ -455,7 +476,8 @@ async def agent_intent(payload: dict = Body(...)):
             raise HTTPException(404, "对话不存在")
         agent = _agent_for_thread(agent, thread)
     try:
-        return await classify_intent(agent, content, list(reversed(history)), projects=list_projects())
+        attachments=chat_inputs.resolve_ids(payload.get('attachment_ids', []))
+        return await classify_intent(agent, content, list(reversed(history)), projects=list_projects(), attachments=attachments)
     except ValueError as exc:
         raise HTTPException(503, str(exc)) from exc
 
@@ -477,6 +499,8 @@ def list_resources(kind: str):
 @app.post("/api/resources/{kind}")
 def create_resource(kind: str, payload: dict = Body(...)):
     valid_kind(kind)
+    if kind == 'agents' and payload.get('retrieval_mode','auto') not in {'auto','always','off'}:
+        raise HTTPException(400,'retrieval_mode 必须为 auto、always 或 off')
     if kind == "workflows":
         return _save_workflow_resource(payload)
     if kind == "providers":
@@ -496,6 +520,8 @@ def get_resource(kind: str, item_id: str):
 @app.put("/api/resources/{kind}/{item_id}")
 def update_resource(kind: str, item_id: str, payload: dict = Body(...)):
     valid_kind(kind)
+    if kind == 'agents' and payload.get('retrieval_mode','auto') not in {'auto','always','off'}:
+        raise HTTPException(400,'retrieval_mode 必须为 auto、always 或 off')
     existing = resource_get(kind, item_id)
     if not existing:
         raise HTTPException(404, "资源不存在")
@@ -1284,6 +1310,8 @@ def _agent_can_save_project_files(agent: dict | None, intent_kind: str = "file")
         return False
     if agent.get("sandbox_mode") not in {"workspace-write", "danger-full-access"}:
         return False
+    if intent_kind == "browser_artifact":
+        return bool(agent.get("allow_browser")) and tool_policy_decision(agent, "screenshot") != "deny" and tool_policy_decision(agent, "browser") != "deny"
     file_writer = any(
         (name in (agent.get("builtin_tools") or []) or agent.get("role_template") == "coding")
         and tool_policy_decision(agent, name) != "deny"
@@ -1316,8 +1344,12 @@ def _validate_turn_project_choice(db, payload: dict, agent: dict | None = None):
 def _turn_project_choice(db, thread_id: str, turn_id: str, payload: dict, timestamp: int, agent: dict | None = None):
     """Persist explicit turn intent before the agent starts or streams."""
     if "project_id" not in payload and "save_to_project" not in payload:
-        return
-    project_id, save = _validate_turn_project_choice(db, payload, agent)
+        if not agent or not agent.get('_project_id'):
+            return
+        # This records the default destination, not approval for a particular tool.
+        project_id, save = agent['_project_id'], True
+    else:
+        project_id, save = _validate_turn_project_choice(db, payload, agent)
     db.execute(
         "INSERT INTO turn_projects(turn_id,thread_id,project_id,save_to_project,created_at) VALUES(?,?,?,?,?)",
         (turn_id, thread_id, project_id, int(save), timestamp),
@@ -1330,12 +1362,29 @@ def _turn_project_choice(db, thread_id: str, turn_id: str, payload: dict, timest
         db.execute("UPDATE threads SET active_project_id=? WHERE id=?", (project_id, thread_id))
 
 
+@app.get("/api/chat/models")
+def chat_model_catalog():
+    return {"data": chat_inputs.catalog()}
+
+
+@app.post("/api/chat/attachments")
+async def upload_chat_attachment(file: UploadFile = File(...)):
+    raw = await file.read(chat_inputs.MAX_FILE_BYTES + 1)
+    return await asyncio.to_thread(chat_inputs.save, file.filename, raw, file.content_type)
+
+
+@app.get("/api/chat/attachments/{attachment_id}/download")
+def download_chat_attachment(attachment_id: str):
+    attachment = chat_inputs.get(attachment_id)
+    return FileResponse(chat_inputs.file_path(attachment_id), filename=attachment["name"], media_type=attachment["mime_type"], headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private, no-store"})
+
+
 @app.post("/api/threads")
 def create_thread(payload: dict = Body(default={})):
     thread_id, timestamp = new_id("thr"), now()
     with connect() as db:
         db.execute("INSERT INTO threads(id,name,agent_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (thread_id, payload.get("name", "新对话"), payload.get("agent_id"), "idle", timestamp, timestamp))
-    return {"id": thread_id, "name": payload.get("name", "新对话"), "agent_id": payload.get("agent_id"), "status": "idle", "capability_overrides": {}, "active_project_id": None, "created_at": timestamp, "updated_at": timestamp}
+    return {"id": thread_id, "name": payload.get("name", "新对话"), "agent_id": payload.get("agent_id"), "status": "idle", "capability_overrides": {}, "model_override": {}, "active_project_id": None, "created_at": timestamp, "updated_at": timestamp}
 
 
 @app.get("/api/threads")
@@ -1389,11 +1438,11 @@ def fork_thread(thread_id: str, payload: dict = Body(default={} )):
         raise HTTPException(404, "对话不存在")
     new_thread, timestamp = new_id("thr"), now()
     with connect() as db:
-        db.execute("INSERT INTO threads(id,name,agent_id,status,capability_overrides,active_project_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)", (new_thread, payload.get("name") or f"{source['name']} (fork)", source["agent_id"], "idle", source["capability_overrides"], source["active_project_id"], timestamp, timestamp))
+        db.execute("INSERT INTO threads(id,name,agent_id,status,capability_overrides,model_override,active_project_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (new_thread, payload.get("name") or f"{source['name']} (fork)", source["agent_id"], "idle", source["capability_overrides"], source["model_override"], source["active_project_id"], timestamp, timestamp))
         db.execute("INSERT INTO thread_projects(thread_id,project_id,created_at) SELECT ?,project_id,? FROM thread_projects WHERE thread_id=?", (new_thread, timestamp, thread_id))
         for message in messages:
             db.execute("INSERT INTO messages(id,thread_id,turn_id,role,type,content,meta,created_at) VALUES(?,?,?,?,?,?,?,?)", (new_id("msg"), new_thread, message["turn_id"], message["role"], message["type"], message["content"], message["meta"], message["created_at"]))
-    return {"id": new_thread, "name": payload.get("name") or f"{source['name']} (fork)", "agent_id": source["agent_id"], "status": "idle", "capability_overrides": json.loads(source["capability_overrides"] or "{}"), "active_project_id": source["active_project_id"]}
+    return {"id": new_thread, "name": payload.get("name") or f"{source['name']} (fork)", "agent_id": source["agent_id"], "status": "idle", "capability_overrides": json.loads(source["capability_overrides"] or "{}"), "model_override": json.loads(source["model_override"] or "{}"), "active_project_id": source["active_project_id"]}
 
 
 @app.get("/api/threads/{thread_id}")
@@ -1429,12 +1478,52 @@ def read_thread(thread_id: str):
         "resource_assets": resources_by_turn.get(row["turn_id"], []) if row["role"] == "assistant" else [],
     } for row in messages]
     result["project_ids"] = [row["project_id"] for row in project_rows]
+    outputs = conversation_artifacts.list_for_thread(thread_id)
+    result["conversation_artifacts"] = outputs
+    for message in result["messages"]:
+        message["conversation_artifacts"] = [item for item in outputs if item["turn_id"] == message["turn_id"]] if message["role"] == "assistant" else []
+    result['queue_messages'] = conversation_control.messages(thread_id)
+    result['interactions'] = conversation_control.interactions(thread_id)
     return result
+
+
+@app.get("/api/threads/{thread_id}/artifacts/{artifact_id}/download")
+def download_conversation_artifact(thread_id: str, artifact_id: str):
+    try: target = conversation_artifacts.get(thread_id, artifact_id)
+    except (ValueError, FileNotFoundError): raise HTTPException(404, "对话产物不存在")
+    return FileResponse(target, filename=target.name, headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/api/approvals/{approval_id}")
+def read_approval(approval_id: str):
+    with connect() as db:
+        row = db.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchone()
+        if not row: raise HTTPException(404, "审批不存在")
+        thread = db.execute("SELECT status FROM threads WHERE id=?", (row["thread_id"],)).fetchone()
+        run = db.execute("SELECT error FROM agent_runs WHERE turn_id=? AND error IS NOT NULL ORDER BY updated_at DESC LIMIT 1", (row["turn_id"],)).fetchone()
+    return {"id": row["id"], "status": row["status"], "thread_id": row["thread_id"], "turn_id": row["turn_id"], "thread_status": thread["status"] if thread else None, "error": run["error"] if run else None}
 
 
 @app.patch("/api/threads/{thread_id}")
 def update_thread(thread_id: str, payload: dict = Body(...)):
     updates, values = [], []
+    guarded = any(key in payload for key in ('model_override','agent_id','capability_overrides','active_project_id'))
+    if guarded:
+        with connect() as db:
+            row=db.execute('SELECT status FROM threads WHERE id=?',(thread_id,)).fetchone()
+            queued=db.execute("SELECT 1 FROM chat_queue_messages WHERE thread_id=? AND (status IN ('pending','dispatching') OR run_status IN ('running','waiting_for_input','waiting_for_project','waiting_for_approval')) LIMIT 1",(thread_id,)).fetchone()
+        if row and (row['status'] in {'running','waiting_for_approval','waiting_for_input','waiting_for_project'} or queued):
+            raise HTTPException(409,'请先完成或停止会话任务，再切换运行配置')
+    if "model_override" in payload:
+        selected = chat_inputs.validate_override(payload["model_override"])
+        with connect() as db:
+            existing = db.execute("SELECT status FROM threads WHERE id=?", (thread_id,)).fetchone()
+        if not existing:
+            raise HTTPException(404, "会话不存在")
+        if existing["status"] in {"running", "waiting_for_approval"}:
+            raise HTTPException(409, "请先停止运行或处理审批，再切换模型")
+        updates.append("model_override=?")
+        values.append(json.dumps(selected))
     if "name" in payload:
         name = str(payload.get("name") or "").strip()
         if not name:
@@ -1485,7 +1574,10 @@ def update_thread(thread_id: str, payload: dict = Body(...)):
     values.append(now())
     values.append(thread_id)
     with connect() as db:
-        cur = db.execute(f"UPDATE threads SET {', '.join(updates)} WHERE id=?", values)
+        eligibility = " AND status NOT IN ('running','waiting_for_approval','waiting_for_input','waiting_for_project') AND NOT EXISTS(SELECT 1 FROM chat_queue_messages q WHERE q.thread_id=threads.id AND (q.status IN ('pending','dispatching') OR q.run_status IN ('running','waiting_for_input','waiting_for_project','waiting_for_approval')))" if guarded else ""
+        cur = db.execute(f"UPDATE threads SET {', '.join(updates)} WHERE id=?{eligibility}", values)
+        if not cur.rowcount and "model_override" in payload and db.execute("SELECT id FROM threads WHERE id=?", (thread_id,)).fetchone():
+            raise HTTPException(409, "请先停止运行或处理审批，再切换模型")
         if cur.rowcount and payload.get("active_project_id"):
             db.execute("INSERT OR IGNORE INTO thread_projects(thread_id,project_id,created_at) VALUES(?,?,?)", (thread_id, payload["active_project_id"], now()))
         thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
@@ -1527,7 +1619,21 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
     if lock.locked():
         raise HTTPException(409, "该会话已有任务正在运行")
     await lock.acquire()
+    consumed = False
     try:
+        # Validate the conversation model before consuming an approval. A
+        # disabled provider should leave its checkpoint waiting for the user
+        # to repair configuration, rather than strand the thread as running.
+        with connect() as db:
+            waiting = db.execute("SELECT agent_id FROM turn_checkpoints WHERE turn_id=? AND status='waiting'", (turn_id,)).fetchone()
+            thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
+        if not waiting:
+            raise HTTPException(409, "审批检查点不存在或已被续跑")
+        agent = resource_get("agents", waiting["agent_id"])
+        if not agent:
+            raise ValueError("审批对应的智能体不存在")
+        if thread:
+            agent = _agent_for_thread(agent, thread)
         timestamp = now()
         with connect() as db:
             cur = db.execute(
@@ -1548,10 +1654,10 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
             if not claimed.rowcount:
                 raise HTTPException(409, "审批检查点已被其他请求续跑")
             db.execute("UPDATE threads SET status='running',updated_at=? WHERE id=?", (timestamp, thread_id))
-        agent = resource_get("agents", checkpoint["agent_id"])
-        if not agent:
-            raise ValueError("审批对应的智能体不存在")
+        consumed = True
         state = json.loads(checkpoint["state"])
+        # run_agent restores the paused model from this checkpoint while
+        # retaining inherited Agent fallback policies.
         with connect() as db:
             row = db.execute("SELECT COALESCE(MAX(sequence),0) AS value FROM turn_events WHERE turn_id=?", (turn_id,)).fetchone()
         event_sequence = int(row["value"])
@@ -1560,6 +1666,7 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
             nonlocal event_sequence
             event_sequence += 1
             persist_event(event, thread_id, turn_id, event_sequence)
+            chat_sessions.persist_cards(thread_id, turn_id, event)
 
         result = await run_agent_isolated(
             agent, [], "", on_event=emit, streaming=False, thread_id=thread_id, turn_id=turn_id,
@@ -1578,12 +1685,22 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
             db.execute("UPDATE turn_checkpoints SET status='completed',updated_at=? WHERE turn_id=?", (now(), turn_id))
             db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
         return {"approval": {**dict(approval), "status": decision, "resolution": reason, "arguments": json.loads(approval["arguments"])}, "turn_id": turn_id, **result}
-    except HTTPException:
+    except asyncio.CancelledError:
+        with connect() as db:
+            db.execute("UPDATE turn_checkpoints SET status='cancelled',updated_at=? WHERE turn_id=? AND status IN ('waiting','resuming')", (now(), turn_id))
+            db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?", (now(), thread_id))
+            db.execute("UPDATE agent_runs SET status='cancelled',updated_at=? WHERE turn_id=? AND status IN ('running','waiting')", (now(), turn_id))
+        chat_sessions.append_assistant(thread_id, turn_id, '后续执行已停止。已完成的操作和生成的文件保留。', {'cancelled': True})
         raise
     except Exception as exc:
+        if isinstance(exc, HTTPException) and not consumed:
+            raise
         with connect() as db:
             db.execute("UPDATE turn_checkpoints SET status='failed',updated_at=? WHERE turn_id=?", (now(), turn_id))
             db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=?", (now(), thread_id))
+            db.execute("UPDATE agent_runs SET status='failed',error=?,updated_at=? WHERE turn_id=? AND status IN ('running','waiting')", (str(exc)[:4000], now(), turn_id))
+            if consumed:
+                db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", "你的回答已接收，但后续执行失败：" + str(exc)[:1200] + "。已生成的文件仍可查看；请发起新任务继续，不要重复提交旧审批。", json.dumps({"error": True, "approval_processed": True}, ensure_ascii=False), now()))
         raise HTTPException(502, str(exc))
     finally:
         lock.release()
@@ -1643,12 +1760,20 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
     last_event_id = request.headers.get("Last-Event-ID")
     with connect() as db:
         thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
-        history = db.execute("SELECT role,content FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
+        history = db.execute("SELECT role,content,meta FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
     if not thread: raise HTTPException(404, "对话不存在")
-    agent_id, content = payload.get("agent_id") or thread["agent_id"], payload.get("content", "").strip()
+    agent_id = payload.get("agent_id") or thread["agent_id"]
+    content = payload.get("content", "")
+    if not isinstance(content, str): raise HTTPException(400, "消息必须为文本")
+    content = content.strip()
+    attachments = chat_inputs.resolve_ids(payload.get("attachment_ids", []))
+    if not content and attachments: content = "请分析附件内容。"
     agent = resource_get("agents", agent_id)
     if not agent or not content: raise HTTPException(400, "请选择有效的智能体并提供消息")
     agent = _agent_for_thread(agent, thread)
+    history = chat_inputs.history_inputs([dict(item) for item in history])
+    chat_inputs.validate_model_inputs(agent, content, attachments, history)
+    agent["_turn_attachments"] = attachments
     with connect() as db:
         _validate_turn_project_choice(db, payload, agent)
     lock = await thread_lock(thread_id)
@@ -1658,7 +1783,7 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
     turn_id, timestamp = new_id("turn"), now()
     try:
         with connect() as db:
-            db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
+            db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, json.dumps({"attachments": [chat_inputs.public(item) for item in attachments]}, ensure_ascii=False), timestamp))
             _turn_project_choice(db, thread_id, turn_id, payload, timestamp, agent)
             db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
     except Exception:
@@ -1734,6 +1859,10 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
 
 @app.delete("/api/threads/{thread_id}/turns/active")
 async def cancel_active_turn(thread_id: str):
+    chat_sessions.thread_row(thread_id)
+    if await conversation_control.conversation_runtime.cancel(thread_id):
+        conversation_control.conversation_runtime.notify()
+        return {'cancelled':True}
     active = ACTIVE_TURNS.get(thread_id)
     if not active or active["task"].done():
         return {"cancelled": False}
@@ -1745,7 +1874,7 @@ async def cancel_active_turn(thread_id: str):
 async def start_turn(thread_id: str, payload: dict = Body(...)):
     with connect() as db:
         thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
-        history = db.execute("SELECT role,content FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
+        history = db.execute("SELECT role,content,meta FROM messages WHERE thread_id=? ORDER BY created_at", (thread_id,)).fetchall()
     if not thread:
         raise HTTPException(404, "对话不存在")
     agent_id = payload.get("agent_id") or thread["agent_id"]
@@ -1753,9 +1882,16 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
     if not agent:
         raise HTTPException(400, "请选择有效的智能体")
     agent = _agent_for_thread(agent, thread)
-    content = payload.get("content", "").strip()
+    content = payload.get("content", "")
+    if not isinstance(content, str): raise HTTPException(400, "消息必须为文本")
+    content = content.strip()
+    attachments = chat_inputs.resolve_ids(payload.get("attachment_ids", []))
+    if not content and attachments: content = "请分析附件内容。"
     if not content:
         raise HTTPException(400, "消息不能为空")
+    history = chat_inputs.history_inputs([dict(item) for item in history])
+    chat_inputs.validate_model_inputs(agent, content, attachments, history)
+    agent["_turn_attachments"] = attachments
     with connect() as db:
         _validate_turn_project_choice(db, payload, agent)
     lock = await thread_lock(thread_id)
@@ -1765,7 +1901,7 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
     turn_id, timestamp = new_id("turn"), now()
     try:
         with connect() as db:
-            db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,created_at) VALUES(?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, timestamp))
+            db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "user", content, json.dumps({"attachments": [chat_inputs.public(item) for item in attachments]}, ensure_ascii=False), timestamp))
             _turn_project_choice(db, thread_id, turn_id, payload, timestamp, agent)
             db.execute("UPDATE threads SET agent_id=?,status='running',updated_at=? WHERE id=?", (agent_id, timestamp, thread_id))
     except Exception:

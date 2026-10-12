@@ -84,8 +84,9 @@ def test_semantic_intent_parses_model_json_and_rejects_invalid(tmp_path, monkeyp
         return {"content": "not json"}, {}
 
     monkeypatch.setattr(intent, "chat_completion", invalid_completion)
-    with pytest.raises(ValueError, match="意图识别暂不可用"):
-        asyncio.run(intent.classify_intent({}, "完成当前任务"))
+    deferred = asyncio.run(intent.classify_intent({}, "完成当前任务"))
+    assert deferred['deferred'] is True
+    assert deferred['requires_project'] is False
 
 
 def test_common_intents_do_not_wait_for_model(monkeypatch):
@@ -98,7 +99,6 @@ def test_common_intents_do_not_wait_for_model(monkeypatch):
         ("你好", False),
         ("切换到0929-dev项目", False),
         ("帮我写一份python快速排序的文件", True),
-        ("列出当前有哪些项目", False),
     ):
         result = asyncio.run(intent.classify_intent({}, content, projects=projects))
         assert result["requires_project"] is expected

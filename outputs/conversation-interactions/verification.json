@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-12",
+  "image_sha256": "70c37c18b8de88ceeea2fb8d2f05289e75248fd2e6564e6c2670aac426f362d9",
+  "backend_tests_passed": 211,
+  "backend_tests_deselected": 4,
+  "frontend_tests_passed": 28,
+  "main_service": "healthy",
+  "sandbox_broker": "healthy",
+  "existing_project_screenshot_downloads_verified": 2,
+  "queue_and_interaction_endpoints_verified": true,
+  "isolated_question_answer_continuation_verified": true,
+  "qa_model": "simulated; no paid user-model calls",
+  "screenshot_evidence_id": "ev_dfb393025c3f1bd8e8d5be6dcfb54a18cf40a07b37377823301e7b76f2dd8d42",
+  "database_backup_count": 9,
+  "database_backup_directory": "data/backups/before-conversation-20261012T082057Z",
+  "reference_behavior": "Public cloud frontend evidence and official source; private cloud backend equivalence not established"
+}
