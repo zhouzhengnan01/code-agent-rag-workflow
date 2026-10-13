@@ -34,6 +34,54 @@ def session_store(tmp_path,monkeypatch):
 
 def token(): return str(uuid.uuid4())
 
+def test_retry_is_linked_atomically_and_keeps_the_original_failure(session_store):
+    thread,settings,runtime,calls=session_store
+    original,_=control.enqueue(thread['id'],settings['id'],'原任务',{'attachment_ids':[]},token())
+    control.finish_message(original['id'],'failed',error='原网络错误')
+    retry_token=token()
+    payload={'attachment_ids':[],'retry_of':original['id']}
+    retried,created=control.enqueue(thread['id'],settings['id'],'原任务',payload,retry_token)
+    assert created
+    original_after=control.get_message(thread['id'],original['id'])
+    assert original_after['run_status']=='failed' and original_after['error']=='原网络错误'
+    assert control.public_message(original_after)['retried_by']==retried['id']
+    assert control.public_message(retried)['retry_of']==original['id']
+    same,created_again=control.enqueue(thread['id'],settings['id'],'原任务',payload,retry_token)
+    assert not created_again and same['id']==retried['id']
+    with pytest.raises(main.HTTPException) as exc:
+        control.enqueue(thread['id'],settings['id'],'原任务',payload,token())
+    assert exc.value.status_code==409
+    assert len(control.messages(thread['id']))==2
+    control.finish_message(retried['id'],'failed',error='本次错误')
+    next_retry,_=control.enqueue(thread['id'],settings['id'],'原任务',{'attachment_ids':[],'retry_of':retried['id']},token())
+    assert control.public_message(control.get_message(thread['id'],retried['id']))['retried_by']==next_retry['id']
+
+def test_retry_rejects_other_threads_and_running_tasks_without_hiding_errors(session_store):
+    thread,settings,runtime,calls=session_store
+    original,_=control.enqueue(thread['id'],settings['id'],'原任务',{'attachment_ids':[]},token())
+    other=main.create_thread({'agent_id':settings['id']})
+    with pytest.raises(main.HTTPException) as exc:
+        control.enqueue(other['id'],settings['id'],'原任务',{'attachment_ids':[],'retry_of':original['id']},token())
+    assert exc.value.status_code==404
+    with pytest.raises(main.HTTPException) as exc:
+        control.enqueue(thread['id'],settings['id'],'原任务',{'attachment_ids':[],'retry_of':original['id']},token())
+    assert exc.value.status_code==409
+    assert len(control.messages(thread['id']))==1
+    assert not control.public_message(control.get_message(thread['id'],original['id']))['retried_by']
+
+def test_retry_http_contract_persists_the_link(session_store):
+    thread,settings,runtime,calls=session_store
+    original,_=control.enqueue(thread['id'],settings['id'],'原任务',{'attachment_ids':[]},token())
+    control.finish_message(original['id'],'failed',error='原错误')
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),base_url='http://test') as client:
+            response=await client.post(f"/api/threads/{thread['id']}/queue",json={'content':'原任务','agent_id':settings['id'],'submission_id':token(),'retry_of':original['id']})
+            assert response.status_code==200
+            assert response.json()['message']['retry_of']==original['id']
+            listing=(await client.get(f"/api/threads/{thread['id']}/queue")).json()['data']
+            assert listing[0]['retried_by']==response.json()['message']['id']
+    asyncio.run(scenario())
+
 async def wait_message(thread_id,message_id,status='completed',timeout=3):
     deadline=asyncio.get_running_loop().time()+timeout
     while asyncio.get_running_loop().time()<deadline:

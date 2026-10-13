@@ -365,6 +365,10 @@ def init_db():
                 db.execute(f"ALTER TABLE memories ADD COLUMN {name} {definition}")
         db.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document ON knowledge_chunks(document_id)")
 
+    if current_tenant() is None:
+        from .cli_auth import init_cli_auth_tables
+        init_cli_auth_tables()
+
 
 def resource_list(kind):
     with connect() as db:

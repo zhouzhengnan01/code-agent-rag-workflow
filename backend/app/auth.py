@@ -122,6 +122,9 @@ def clear_session(request: Request, response):
 
 
 def request_user(request: Request) -> dict | None:
+    if request.headers.get("Authorization") is not None:
+        from .cli_auth import resolve_cli_user
+        return resolve_cli_user(request)
     token = request.cookies.get(SESSION_COOKIE)
     if not token:
         return None

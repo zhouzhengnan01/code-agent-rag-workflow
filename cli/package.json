@@ -1,0 +1,10 @@
+{
+  "name": "@codezzn/cli",
+  "version": "0.1.0",
+  "description": "Windows-first terminal client for a Codezzn server",
+  "license": "UNLICENSED",
+  "engines": { "node": ">=20" },
+  "bin": { "codezzn": "bin/codezzn.js" },
+  "scripts": { "test": "node --test ../tests/test_windows_cli.cjs" },
+  "files": ["bin", "lib", "README.md"]
+}

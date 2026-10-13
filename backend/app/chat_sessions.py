@@ -207,6 +207,10 @@ async def submit_message(thread_id:str,payload:dict=Body(...)):
     agent=current_agent(thread,payload.get('agent_id'))
     chat_inputs.validate_model_inputs(agent,content,attachments,[])
     saved={'attachment_ids':[item['id'] for item in attachments],'model_override':json.loads(thread['model_override'] or '{}')}
+    if 'retry_of' in payload:
+        if not isinstance(payload['retry_of'], str) or not 1 <= len(payload['retry_of']) <= 100:
+            raise HTTPException(400, 'retry_of 必须为有效的原任务 ID')
+        saved['retry_of'] = payload['retry_of']
     if 'project_id' in payload or 'save_to_project' in payload:
         # A destination is not permission to execute a writing tool. Read-only
         # Agents can still answer in selected projects; actual tools enforce policy.

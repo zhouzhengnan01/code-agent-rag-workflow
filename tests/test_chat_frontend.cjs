@@ -4,6 +4,49 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
+test('retry removes the original failure banner only after the new submission is accepted', async () => {
+  const app = workbench((url, options) => {
+    const payload = JSON.parse(options.body);
+    return { message: { id: 'new_retry', content: payload.content, agent_id: payload.agent_id,
+      attachment_ids: payload.attachment_ids, retry_of: payload.retry_of, status: 'pending', run_status: 'pending' } };
+  });
+  app.run("state.chatQueue=[{id:'old_failure',content:'地图问题',agent_id:'a',status:'consumed',run_status:'failed',error:'旧网络错误'}];renderChatQueue();");
+  assert.match(app.nodes.get('#chatQueue').innerHTML, /旧网络错误/);
+  await app.context.retryQueuedChatMessage({ dataset: { messageId: 'old_failure' }, disabled: false });
+  assert.equal(JSON.parse(app.calls[0].options.body).retry_of, 'old_failure');
+  assert.doesNotMatch(app.nodes.get('#chatQueue').innerHTML, /旧网络错误|执行失败/);
+  assert.match(app.nodes.get('#chatQueue').innerHTML, /待执行/);
+  assert.equal(app.run('state.chatQueue[0].error'), '旧网络错误');
+  assert.equal(app.run('state.chatQueue[0].retried_by'), 'new_retry');
+  app.run("state.chatQueue[1].status='consumed';state.chatQueue[1].run_status='running';renderChatQueue();");
+  assert.equal(app.nodes.get('#chatQueue').hidden, true);
+  app.run("state.chatQueue[1].run_status='failed';state.chatQueue[1].error='新的错误';renderChatQueue();");
+  assert.match(app.nodes.get('#chatQueue').innerHTML, /新的错误/);
+  assert.doesNotMatch(app.nodes.get('#chatQueue').innerHTML, /旧网络错误/);
+});
+
+test('persisted retry links survive reload even when the retry is outside the queue window', () => {
+  const app = workbench();
+  app.run("state.chatQueue=[{id:'old',content:'question',status:'consumed',run_status:'failed',error:'old error',retried_by:'new'}];renderChatQueue();");
+  assert.equal(app.nodes.get('#chatQueue').hidden, true);
+});
+
+test('legacy retries hide superseded failures but unrelated tasks retain their error', () => {
+  const app = workbench();
+  app.run("state.chatQueue=[{id:'old',content:'question',agent_id:'a',status:'consumed',run_status:'failed',error:'old error'}, {id:'new',content:'question',agent_id:'a',status:'consumed',run_status:'running'}];renderChatQueue();");
+  assert.equal(app.nodes.get('#chatQueue').hidden, true);
+  app.run("state.chatQueue[1].content='different question';renderChatQueue();");
+  assert.match(app.nodes.get('#chatQueue').innerHTML, /old error/);
+  app.run("state.chatQueue[1].content='question';state.chatQueue[1].attachment_ids=['different-file'];renderChatQueue();");
+  assert.match(app.nodes.get('#chatQueue').innerHTML, /old error/);
+});
+
+test('an unconfirmed retry leaves the original failure visible', () => {
+  const app = workbench();
+  app.run("state.chatQueue=[{id:'old',content:'question',status:'consumed',run_status:'failed',error:'old error'}];state.chatUnknownSubmission={submission_id:'unknown',payload:{retry_of:'old'}};renderChatQueue();");
+  assert.match(app.nodes.get('#chatQueue').innerHTML, /old error/);
+});
+
 function workbench(responder = () => ({})) {
   const calls = [];
   const nodes = new Map();

@@ -219,6 +219,8 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Codezzn", version="0.3.0", description="可部署的智能体开发与运行平台", lifespan=lifespan)
 chat_sessions.install(app, globals())
+from . import cli_auth
+app.include_router(cli_auth.router)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 LANDING_ASSETS = ROOT / "public" / "sites" / "browser-use-com-ef244017" / "web-agents-4de235c6"
@@ -229,7 +231,7 @@ app.mount(
 )
 
 
-PUBLIC_PATHS = {"/", "/healthz", "/login", "/register", "/api/help/faq"}
+PUBLIC_PATHS = {"/", "/healthz", "/login", "/register", "/api/help/faq", "/cli/authorize"}
 
 
 @app.middleware("http")
@@ -237,7 +239,10 @@ async def access_control(request: Request, call_next):
     key = os.getenv("CODEZZN_ADMIN_KEY")
     path = request.url.path
     public = path in PUBLIC_PATHS or path.startswith("/assets/") or path.startswith("/site-assets/") or path.startswith("/api/auth/")
-    user = request_user(request) if not public or path in {"/api/auth/me", "/api/help/faq", "/api/help/ask"} else None
+    try:
+        user = request_user(request) if not public or path in {"/api/auth/me", "/api/help/faq", "/api/help/ask"} else None
+    except HTTPException as exc:
+        return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     request.state.user = user
     supplied = request.headers.get("X-Codezzn-Key") or request.query_params.get("api_key")
     key_valid = bool(key and supplied == key)

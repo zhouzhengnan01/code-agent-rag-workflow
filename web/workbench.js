@@ -2424,9 +2424,30 @@ function chatInteractionHtml(interaction) {
 
 function chatInteractionSignature(item) { return JSON.stringify([item.kind, item.status, item.question, item.payload, item.response, item.error]); }
 
+function chatMessageRetried(item, index) {
+  if (item.retried_by || state.chatQueue.some(candidate => candidate.retry_of === item.id)) return true;
+  // Older clients did not send a retry link. A later identical submission
+  // supersedes only the old failure banner, never the execution history.
+  return state.chatQueue.slice(index + 1).some(candidate => candidate.content === item.content && candidate.agent_id === item.agent_id &&
+    JSON.stringify(candidate.attachment_ids || []) === JSON.stringify(item.attachment_ids || []));
+}
+
+function acceptQueuedChatMessage(message) {
+  const existing = state.chatQueue.find(item => item.id === message.id);
+  if (existing) Object.assign(existing, message);
+  else state.chatQueue.push(message);
+  if (message.retry_of) {
+    const original = state.chatQueue.find(item => item.id === message.retry_of);
+    if (original) original.retried_by = message.id;
+  }
+}
+
 function renderChatQueue() {
   const container = $('#chatQueue'); if (!container) return;
-  const items = state.chatQueue.filter(item => item.status === 'pending' || item.status === 'dispatching' || item.status === 'failed' || item.run_status === 'failed');
+  const items = state.chatQueue.filter((item, index) => {
+    if (item.status === 'failed' || item.run_status === 'failed') return !chatMessageRetried(item, index);
+    return item.status === 'pending' || item.status === 'dispatching';
+  });
   const recent = items.filter(item => item.status !== 'failed' && item.run_status !== 'failed').concat(items.filter(item => item.status === 'failed' || item.run_status === 'failed').slice(-2));
   container.hidden = !recent.length && !state.chatUnknownSubmission && !state.chatPollError;
   container.innerHTML = `${state.chatUnknownSubmission ? `<div class="queue-uncertain"><span>提交结果尚未确认，发送已锁定，避免重复执行。</span><button type="button" onclick="refreshUnknownChatSubmission()">刷新提交状态</button>${state.chatUnknownSubmission.retryAllowed ? '<button type="button" onclick="retryUnknownChatSubmission()" title="复用原提交标识，不创建第二个任务">重试原提交</button>' : ''}</div>` : ''}${state.chatPollError ? `<div class="queue-connection-error">${esc(state.chatPollError)}</div>` : ''}${recent.map(item => `<div class="chat-queue-item"><span><small>${item.status === 'pending' ? '待执行' : item.status === 'dispatching' ? '准备执行' : '执行失败'}</small><strong>${esc(item.content)}</strong>${item.error ? `<small class="queue-item-error">${esc(item.error)}</small>` : ''}</span>${item.status === 'pending' ? `<button type="button" data-message-id="${esc(item.id)}" onclick="cancelQueuedChatMessage(this)" aria-label="取消排队任务">×</button>` : item.status === 'failed' || item.run_status === 'failed' ? `<button type="button" data-message-id="${esc(item.id)}" onclick="retryQueuedChatMessage(this)">重试</button>` : ''}</div>`).join('')}`;
@@ -2548,6 +2569,7 @@ async function sendMessage(options = null) {
   if (!content) return;
   if (!agent) return toast('请先创建并选择智能体', true);
   const payload = { content, agent_id: agent, attachment_ids: attachments.map(item => item.id), interrupt: options?.interrupt === true, submission_id: chatSubmissionId() };
+  if (options?.retry_of) payload.retry_of = options.retry_of;
   if (state.activeProjectId) { payload.project_id = state.activeProjectId; payload.save_to_project = true; }
   if (options && Object.hasOwn(options, 'save_to_project')) { payload.save_to_project = options.save_to_project === true; payload.project_id = options.project_id ?? null; }
   state.chatSubmitPending = true; updateComposerControls();
@@ -2566,7 +2588,7 @@ async function sendMessage(options = null) {
     const message = result?.message;
     if (!message?.id) { rememberUnknownChatSubmission({ submission_id: payload.submission_id, payload }); renderChatQueue(); return; }
     state.chatLastMutationAt = Date.now();
-    if (!state.chatQueue.some(item => item.id === message.id)) state.chatQueue.push(message);
+    acceptQueuedChatMessage(message);
     if (result.interaction && !state.chatInteractions.some(item => item.id === result.interaction.id)) state.chatInteractions.push(result.interaction);
     if (input.value.trim() === content || (!input.value.trim() && attachments.length)) input.value = '';
     input.style.height = '64px';
@@ -2587,7 +2609,7 @@ async function refreshUnknownChatSubmission() {
     const message = response.data?.find(item => item.submission_id === unknown.submission_id);
     if (!message) { rememberUnknownChatSubmission({ ...unknown, retryAllowed: true }); renderChatQueue(); return toast('暂未找到原提交，可继续刷新，或用原提交标识重试；不会创建第二个任务', true); }
     clearConfirmedChatDraft(unknown);
-    if (!state.chatQueue.some(item => item.id === message.id)) state.chatQueue.push(message);
+    acceptQueuedChatMessage(message);
     renderChatAttachments(); syncActiveChatTurn(); renderChatQueue(); updateComposerControls(); startChatPolling(); toast('提交已确认，已恢复任务状态');
   } catch (error) { toast(`无法确认提交：${error.message}`, true); }
 }
@@ -2601,7 +2623,7 @@ async function retryUnknownChatSubmission() {
     if (!result.message?.id || result.message.submission_id !== unknown.submission_id) throw new Error('服务端未返回可确认的原提交状态');
     clearConfirmedChatDraft(unknown);
     state.chatLastMutationAt = Date.now();
-    if (!state.chatQueue.some(item => item.id === result.message.id)) state.chatQueue.push(result.message);
+    acceptQueuedChatMessage(result.message);
     syncActiveChatTurn(); renderChatQueue(); startChatPolling(); toast('原提交已确认');
   } catch (error) { toast(`原提交仍未确认：${error.message}`, true); }
   finally { state.chatSubmitPending = false; updateComposerControls(); }
@@ -2626,10 +2648,14 @@ async function cancelQueuedChatMessage(button) {
   catch (error) { button.disabled = false; toast(`取消失败：${error.message}`, true); }
 }
 
-function retryQueuedChatMessage(button) {
+async function retryQueuedChatMessage(button) {
+  if (button.disabled || state.chatSubmitPending) return;
   const item = state.chatQueue.find(message => message.id === button.dataset.messageId);
   if (!item || !['failed','cancelled'].includes(item.run_status || item.status)) return;
-  return sendMessage({ content: item.content, agent: item.agent_id || $('#chatAgent')?.value, attachments: (item.attachment_ids || []).map(id => ({ id, status: 'ready' })) });
+  button.disabled = true;
+  try {
+    return await sendMessage({ content: item.content, agent: item.agent_id || $('#chatAgent')?.value, attachments: (item.attachment_ids || []).map(id => ({ id, status: 'ready' })), retry_of: item.id });
+  } finally { button.disabled = false; }
 }
 
 function answerChatOption(button) { return answerChatInteraction(button, { option_id: button.dataset.optionId }); }

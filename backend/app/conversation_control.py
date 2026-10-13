@@ -33,7 +33,11 @@ def decode(row):
 
 def public_message(row):
     item = decode(row) if not isinstance(row, dict) else row
-    return {key: item.get(key) for key in ('id','thread_id','agent_id','submission_id','content','mode','status','run_status','turn_id','error','created_at','updated_at')} | {'attachment_ids': (item.get('payload') or {}).get('attachment_ids', [])}
+    payload = item.get('payload') or {}
+    return {key: item.get(key) for key in ('id','thread_id','agent_id','submission_id','content','mode','status','run_status','turn_id','error','created_at','updated_at')} | {
+        'attachment_ids': payload.get('attachment_ids', []),
+        'retry_of': payload.get('retry_of'), 'retried_by': payload.get('retried_by'),
+    }
 
 def get_message(thread_id, message_id):
     with connect() as db:
@@ -63,8 +67,24 @@ def enqueue(thread_id, agent_id, content, payload, submission_id, interrupt=Fals
             return decode(previous), False
         if not db.execute('SELECT 1 FROM threads WHERE id=?', (thread_id,)).fetchone():
             raise HTTPException(404, '对话不存在')
+        retry_of = payload.get('retry_of')
+        retry_source = None
+        if retry_of:
+            retry_source = db.execute('SELECT * FROM chat_queue_messages WHERE thread_id=? AND id=?', (thread_id, retry_of)).fetchone()
+            if not retry_source:
+                raise HTTPException(404, '原失败任务不存在于当前对话')
+            retry_payload = json.loads(retry_source['payload'] or '{}')
+            if retry_payload.get('retried_by'):
+                raise HTTPException(409, '该任务已经重试，请刷新状态；再次失败时请重试最新任务')
+            if retry_source['run_status'] not in {'failed', 'cancelled'} and retry_source['status'] != 'failed':
+                raise HTTPException(409, '只有失败或已取消的任务可以重试')
+            if retry_source['content'] != content or retry_source['agent_id'] != agent_id or retry_payload.get('attachment_ids', []) != payload.get('attachment_ids', []):
+                raise HTTPException(400, '重试必须保留原任务内容、智能体和附件')
         item = {'id':new_id('cqm'),'thread_id':thread_id,'agent_id':agent_id,'submission_id':submission_id,'fingerprint':fingerprint,'content':content,'payload':encode(payload),'mode':'interrupt' if interrupt else 'queue','created_at':timestamp,'updated_at':timestamp}
         db.execute('INSERT INTO chat_queue_messages(id,thread_id,agent_id,submission_id,fingerprint,content,payload,mode,created_at,updated_at) VALUES(:id,:thread_id,:agent_id,:submission_id,:fingerprint,:content,:payload,:mode,:created_at,:updated_at)', item)
+        if retry_source:
+            retry_payload['retried_by'] = item['id']
+            db.execute('UPDATE chat_queue_messages SET payload=?,updated_at=? WHERE id=?', (encode(retry_payload), timestamp, retry_of))
         saved=decode(db.execute('SELECT * FROM chat_queue_messages WHERE id=?',(item['id'],)).fetchone())
     return saved, True
 

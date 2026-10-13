@@ -15,11 +15,12 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 - 后台任务：SQLite 持久队列、并发 worker、失败退避重试、取消、事件历史、进程重启后恢复未完成任务；智能体和工作流均可后台执行
 - 多智能体：可配置团队、协调智能体、成员白名单、并发和深度限制；主智能体通过 `delegate_task` 并行委派并用 `task_status` 汇总
 - 长期记忆：用户、项目和线程三级作用域，哈希向量+词法混合检索、可信度、冲突待确认、确认/拒绝、过期淘汰和自动经验沉淀
-- 任务隔离与恢复：Git 工作区为每个任务/会话创建独立 worktree；模型轮次、Responses ID 和工具结果持续检查点化，进程重启自动续跑，副作用工具不会在状态不明时自动重放
+- 任务隔离与恢复：有有效 HEAD 的 Git 工作区可为任务/会话创建独立 worktree；模型轮次、Responses ID 和工具结果检查点化，支持可恢复状态的续接；对话服务重启时正在执行的任务会标记中断，需提交新的继续任务，副作用工具不会在状态不明时自动重放
 - Execution safety: container-backed `read-only` / `workspace-write` Shell and read-only Git; `danger-full-access` Shell is rejected. Thread locks, approval records, atomic file writes, and backups remain unchanged.
-- CLI：`python -m backend.app.cli exec` 支持非交互执行、stdin 和 JSONL 事件输出
+- Windows CLI：Node.js 20+ 的 `codezzn` 客户端，支持浏览器账号授权、交互/单次对话、流式文本/JSON/JSONL、智能体与模型选择、项目选择、审批/追问、会话续接、断线恢复、附件上传和取消；复用服务器项目与 Docker 沙箱，不执行 Windows 主机命令
+- 原有 Python CLI：`python -m backend.app.cli exec` 支持非交互执行、stdin 和 JSONL 事件输出，与新增 Windows 客户端并存
 - 持久化：SQLite WAL 保存业务数据，Milvus 保存知识向量，记录线程消息、知识来源、工具事件、token usage 与工作流运行记录
-- 认证与部署：本地账号、HttpOnly 会话、GitHub OAuth、Dockerfile、Compose healthcheck、持久化数据卷和可选 API 管理密钥
+- 认证与部署：本地账号、邮箱验证码（需 SMTP）、GitHub/Google OAuth、HttpOnly 浏览器会话、可撤销的 CLI 凭证、按账号隔离的业务库与工作区；Dockerfile、Compose healthcheck、持久化数据卷和可选 API 管理密钥
 
 ## 启动
 
@@ -41,7 +42,125 @@ docker compose up -d --build
 
 Windows Docker Desktop 使用 bind mount 时，宿主机文件权限可能与容器内非 root UID 不一致。Compose 默认使用 `CODEZZN_UID=0`、`CODEZZN_GID=0` 保证本地启动可写；Linux 主机可在 `.env` 中改为 `./data` 和 `./workspace` 所属用户的 UID/GID。
 
-### 注册、登录与 GitHub / Google OAuth
+## Windows 命令行客户端（CLI）
+
+Windows Terminal、PowerShell 或 CMD 中可以使用 `codezzn` 对话，无需打开 Workbench。它是现有 Codezzn 服务的客户端：模型调用、项目文件和工具执行仍在服务器完成，Shell/Git 继续使用服务器配置的 Docker 沙箱。
+
+命令接口参考实际观察到的 Claude Code CLI 交互方式，代码为独立实现；不包含 Claude 私有提示词、模型服务或全部专有功能。完整说明见 [Windows CLI 使用指南](docs/windows-cli.md)。
+
+### 1. 安装或更新 CLI
+
+前置条件：Windows 已安装 **Node.js 20 或更高版本**（含 npm），且 Codezzn 服务正在运行并包含 CLI 授权接口。客户端不需要 Python 或本机 Docker；Docker 在执行工具的服务器上运行。
+
+```powershell
+cd D:\code-agent-rag-workflow
+node --version
+powershell.exe -NoProfile -File .\scripts\install-windows-cli.ps1
+codezzn --version
+codezzn --help
+```
+
+安装器只安装仓库中的 `@codezzn/cli`，不下载外部依赖、不执行 npm 安装脚本、不修改机器 PATH；已有 `codezzn` 命令时会询问是否更新。更新源码后重新运行同一个安装器。只检查、不安装可加 `-CheckOnly`。若 npm 全局目录不在 PATH，或暂不安装，直接使用：
+
+```powershell
+node .\cli\bin\codezzn.js --help
+```
+
+### 2. 使用现有账号登录
+
+`--server` 必须与服务端 `.env` 的 `CODEZZN_PUBLIC_URL` 一致，包括协议、主机和端口。以下是局域网 HTTP 示例，**请替换成自己配置的公开地址**：
+
+```powershell
+$CodezznServer = "http://192.168.35.69:8080"
+codezzn auth login --server $CodezznServer --allow-insecure-http
+codezzn auth status --allow-insecure-http
+```
+
+CLI 打开浏览器授权页；通过 Codezzn 已配置的登录方式登录，核对页面与终端的授权码，再允许当前客户端访问。不要把 GitHub/Google 密码、管理密钥或 OAuth Secret 填到终端。无法自动打开浏览器时，加 `--no-browser` 手动打开显示的授权地址。
+
+登录成功后客户端记住该服务器地址。局域网 HTTP 不加密，**每次调用都必须显式加 `--allow-insecure-http`**；生产环境建议使用 HTTPS，HTTPS 不需要该参数。未指定 `--server` 且尚未记住服务器地址时，客户端默认访问 `http://localhost:8080`；若服务器已配置其他公开地址，须显式指定正确的 `--server`，否则会返回 `server_url_mismatch`，而不是自动切换并传递凭据。
+
+### 3. 对话、项目与工具审批
+
+```powershell
+codezzn --allow-insecure-http --agent "coding agent"
+```
+
+`--agent` 可使用服务器智能体 ID 或唯一名称；实际名称以 Workbench 配置为准。进入交互终端后：
+
+```text
+/agent
+/project
+/project 0929-dev
+帮我写一份冒泡排序的 Python 文件，保存到当前项目，并读取验证内容。
+```
+
+`/project` 列出服务器项目，`/project 名称或ID` 切换当前会话项目；项目必须属于当前登录账号。创建项目、保存产物和受保护工具是否需要确认，遵循服务器返回的交互请求及智能体策略。工具审批展示名称与参数，需要明确输入 `y` 或 `yes` 才允许，空输入默认拒绝。
+
+**Windows 当前目录不是服务器工作区**，不会自动同步或上传本地仓库。生成的项目文件仍可在 Workbench 的 Files 面板查看和下载；`/files` 用于查看待发送附件，`/files "D:\work\example.py"` 显式上传本地文件作为下一条消息的上下文。
+
+### 4. 常用命令
+
+以下延续上述局域网 HTTP 登录；HTTPS 使用时可省略 `--allow-insecure-http`：
+
+```powershell
+# 单次对话，完成后退出
+codezzn --allow-insecure-http --agent "coding agent" -p "列出我有哪些项目"
+
+# 继续相同服务器、账号、当前目录下最近的会话
+codezzn --allow-insecure-http -c
+
+# 恢复指定会话；不提供 ID 时交互选择本地记录
+codezzn --allow-insecure-http -r SESSION_ID
+
+# 命名会话；模型必须已在服务器配置
+codezzn --allow-insecure-http --name "代码验收" --agent "coding agent" --model PROVIDER_ID/MODEL
+
+# 输出完整 JSON 结果或逐事件 JSONL
+codezzn --allow-insecure-http -p --output-format json "介绍当前项目"
+codezzn --allow-insecure-http -p --output-format stream-json "介绍当前项目"
+
+# 显式上传附件，不自动读取其他本地文件
+codezzn --allow-insecure-http --attach "D:\work\example.py" "审查这个文件"
+
+# 清除本机该服务器的 CLI 凭据并请求服务端撤销，不退出浏览器账号
+codezzn auth logout --allow-insecure-http
+```
+
+| 交互命令 | 用途 |
+| --- | --- |
+| `/help`、`/status` | 查看帮助、当前会话状态 |
+| `/new`、`/resume [ID]` | 新建或恢复会话 |
+| `/agent [名称或ID]`、`/model [模型]` | 列出或切换服务器智能体/模型；`/model default` 恢复智能体默认模型 |
+| `/project [名称或ID]` | 列出或切换服务器项目 |
+| `/files [本地路径]` | 查看待发送附件，或明确上传文件 |
+| `/skills`、`/mcp` | 查看服务器配置资源，不安装技能或启动 Windows 本地 MCP |
+| `/stop`、`/exit` | 请求取消当前任务，或退出客户端 |
+
+Ctrl+C 请求取消当前服务器任务，再按一次立即退出。附件限制为每文件最多 10 MiB、每回合最多 8 个且合计不超过 20 MiB。
+
+`-p` 是非交互模式，**不会自动允许工具或回答确认问题**。遇到待确认任务，返回 `requires_action` 和会话 ID，使用交互模式 `-r SESSION_ID` 继续处理。退出码：成功 `0`、失败 `1`、待确认 `2`、取消 `130`。机器格式的结果写 stdout，诊断写 stderr。
+
+### 5. 凭据、恢复与部署边界
+
+- Windows 凭据存于 `%USERPROFILE%\.codezzn`，使用 DPAPI CurrentUser 加密；DPAPI 不可用时失败，不降级为明文。服务端保存令牌哈希，CLI 令牌有效期 30 天，可撤销。
+- 本地会话记录按服务器、用户和当前目录区分，包含未完成提示词及交互答案，属于私密数据。可用客户端环境变量 `CODEZZN_CONFIG_DIR` 更换保存目录，不要将它提交到 Git。
+- 提交前保存请求 ID 和原始载荷，断线后查询原请求；恢复时复用原提交/答案身份，避免因丢失响应而重复派发。此机制不代表服务器异常退出后的任何任务都能自动继续，也不是分布式 exactly-once 保证。
+- 未新增 Windows 主机执行、权限绕过、本地 stdio MCP、IDE 集成或 Claude 专有服务。现有服务器工具策略、租户隔离和沙箱限制照常生效。
+- 安装客户端不等于更新服务器。旧服务器没有 `/api/auth/cli/*` 时需要部署新后端；已启用沙箱的部署应保留两份 Compose 文件及现有 `.env`，按下方沙箱部署说明重建，不能只启动主 Compose 而丢掉 broker 配置。
+
+客户端源码在 `cli/`，安装脚本在 `scripts/install-windows-cli.ps1`，服务端授权接口在 `backend/app/cli_auth.py`，浏览器确认页在 `web/cli-authorize.html` 和 `web/cli-authorize.js`。
+
+### 6. CLI 验收
+
+```powershell
+node --test tests/test_windows_cli.cjs
+.\.workflow-venv\Scripts\python.exe -m pytest tests/test_cli_auth.py tests/test_cli_e2e.py tests/test_auth.py tests/test_user_isolation.py tests/test_conversation_sessions.py -q
+```
+
+Python 命令使用已安装项目测试依赖的虚拟环境。端到端测试在临时数据库和实际 HTTP 服务中验证浏览器授权、Windows DPAPI、流式事件、续接和退出；模型使用受控模拟，不调用真实 OAuth 或付费模型。参考接口与验收记录见 [CLI 实测说明](docs/research/claude-code-cli-20261013/README.md) 和 [CLI 验收记录](docs/research/claude-code-cli-20261013/QA.md)。
+
+## 注册、登录与 GitHub / Google OAuth
 
 本地注册使用 scrypt 密码哈希；浏览器只保存 `HttpOnly`、`SameSite=Lax` 会话 Cookie。生产环境放在 HTTPS 反向代理后时，将 `CODEZZN_PUBLIC_URL` 改为外部 HTTPS 地址，并设置 `CODEZZN_COOKIE_SECURE=true`。
 
@@ -98,7 +217,7 @@ CODEZZN_SMTP_FROM=你的发件邮箱地址
 
 若服务商要求 STARTTLS，则改为 `CODEZZN_SMTP_PORT=587`、`CODEZZN_SMTP_SECURITY=starttls`。容器需能连接 SMTP 服务器的对应端口。保存后执行 `docker compose up -d --force-recreate --no-deps codezzn`，在 `/api/auth/me` 确认 `email_code_configured=true`，再从登录页选择 Continue with Email 测试。验证码有效期 10 分钟、最多尝试 5 次、60 秒内不可重复发送，并限制每地址及全站发送频率。启用 SMTP 后，新邮箱注册必须验证邮件；已有本地账号可使用验证码或密码登录。若邮箱只绑定 GitHub/Google 身份且没有本地登录凭据，验证码不会自动合并身份或接管该账号。未配置 SMTP 时沿用原密码登录/注册；但若已有仅通过验证码登录、没有密码的账号，不要在未提供替代登录方式前关闭 SMTP。
 
-### 可选 RAGFlow 检索后端
+## 可选 RAGFlow 检索后端
 
 RAGFlow 必须作为独立服务部署，不要把其源码或 Compose 服务直接合并到 Codezzn 主容器。Codezzn 通过 RAGFlow `/api/v1` REST API 接入。将以下设置添加到现有 `.env`；`CODEZZN_RAGFLOW_URL` 可以是服务根地址或已经带 `/api/v1` 的地址：
 
@@ -230,9 +349,9 @@ docker run --rm --name codezzn-sandbox-verification --user 0:0 --network none --
 | `CODEZZN_WORKSPACE` | `/workspace` | 智能体文件工具的安全根目录 |
 | `CODEZZN_MILVUS_URI` | `/app/data/milvus.db` | Milvus Lite 数据文件；可替换为独立 Milvus 地址 |
 | `MILVUS_COLLECTION_PREFIX` | `codezzn_kb_` | 知识库 Collection 前缀 |
-| `CODEZZN_ADMIN_KEY` | 空 | 非空时，API 要求 `X-Codezzn-Key` |
-| `CODEZZN_AUTH_REQUIRED` | Compose 中为 `true` | 要求工作台使用账号会话或管理密钥认证 |
-| `CODEZZN_PUBLIC_URL` | `http://127.0.0.1:8080` | OAuth 回调所使用的外部地址 |
+| `CODEZZN_ADMIN_KEY` | 空 | 可选的 `X-Codezzn-Key` 管理认证；普通用户可使用账号会话或 CLI Bearer 凭证 |
+| `CODEZZN_AUTH_REQUIRED` | Compose 中为 `true` | 要求工作台使用有效账号会话、CLI 凭证或管理密钥认证 |
+| `CODEZZN_PUBLIC_URL` | `http://127.0.0.1:8080` | 外部公开地址，用于 OAuth 回调和 CLI 浏览器授权；CLI `--server` 应与实际配置一致 |
 | `CODEZZN_GITHUB_CLIENT_ID` | 空 | GitHub OAuth App Client ID |
 | `CODEZZN_GITHUB_CLIENT_SECRET` | 空 | GitHub OAuth App Client Secret |
 | `CODEZZN_GITHUB_PROXY_URL` | 空 | 仅 GitHub OAuth 使用的容器可达 HTTP 代理 |
@@ -277,7 +396,7 @@ Workbench 会将管理密钥保存在浏览器 `localStorage` 中。生产环境
 - 重排序：`qwen3-rerank`
 - 向量后端：Milvus Lite，持久化文件为 `data/milvus.db`
 
-上传文档后，Codezzn 会生成向量并写入独立 Collection。智能体绑定知识库后，每一轮对话都会先执行 Milvus 向量召回与 SQLite 词法召回，再用重排序模型筛选证据，回答中显示文档与片段来源。未绑定知识库时不会跨库搜索。
+上传文档后，Codezzn 会生成向量并写入独立 Collection。智能体绑定知识库后，默认 `retrieval_mode=auto`，由模型在需要相关知识时调用 `knowledge_search`，不会对问候或普通编程任务强行检索。`always` 模式在每轮前自动检索，`off` 禁用知识检索；工具策略仍可禁止该工具。本地检索结合 Milvus 向量召回与 SQLite 词法召回，并按配置重排证据，回答展示实际使用的文档与片段来源。未绑定知识库时不会跨库搜索。
 
 默认使用 Milvus Lite 以简化本地 Docker 部署。生产环境可以将 `CODEZZN_MILVUS_URI` 改为独立 Milvus 的 HTTP 地址，业务代码和已有 API 无需改变。测试资料位于 `samples/bear-knowledge.md`。
 
@@ -355,12 +474,17 @@ HTTP：
 - `POST /api/threads`、`GET /api/threads/{id}`、`POST /api/threads/{id}/turns`、`POST /api/threads/{id}/turns/stream`
 - `POST /api/threads/{id}/fork`、`POST /api/threads/{id}/resume`
 - `GET /api/threads/{id}/approvals`、`POST /api/approvals/{approval_id}`、`GET /api/threads/{id}/events`
+- `POST/GET /api/threads/{id}/queue`、`GET/DELETE /api/threads/{id}/queue/{message_id}`：持久提交、状态查询和取消；网页与 Windows CLI 共用
+- `GET /api/threads/{id}/interactions`、`POST /api/threads/{id}/interactions/{interaction_id}/answer`：项目确认、工具审批和追问回答
+- `POST /api/auth/cli/device`、`GET /api/auth/cli/device-info`、`POST /api/auth/cli/approve`、`POST /api/auth/cli/token`：CLI 一次性浏览器授权；确认页面 `/cli/authorize`
+- `GET /api/auth/cli/status`、`POST /api/auth/cli/logout`：CLI 凭据状态与撤销；凭据不替代审批页面的浏览器会话
+- `codezzn`、`codezzn -p "任务"`、`codezzn -c`、`codezzn -r SESSION_ID`：Windows HTTP 客户端，首次使用前按上文登录
 - `python -m backend.app.cli exec "任务"`、`python -m backend.app.cli exec --json -`
 - FastAPI 文档：`/docs`
 
 ## 当前边界
 
-This is a runnable single-node platform, not a protocol-equivalent replica of OpenAI Codex Desktop. The optional container sandbox covers Shell/Git only and is intended for a trusted single-machine deployment, not hostile multitenancy. AST support is exact for Python and heuristic for other languages unless an external LSP server is configured. Skill dependencies are declared and exposed but deliberately not installed at runtime; bake trusted dependencies into images. GitHub integration currently targets GitHub REST and needs `CODEZZN_GITHUB_TOKEN`. MCP sampling/elicitation and OAuth discovery, tenant identity/RBAC, encrypted secret storage, remote/distributed workers, realtime audio/video, and a signed plugin marketplace remain outside this release. SQLite recovery is local at-least-once execution; the tool ledger prevents automatic replay of ambiguous side effects but is not a distributed exactly-once transaction system.
+This is a runnable single-node platform, not a protocol-equivalent replica of OpenAI Codex Desktop or Claude Code. The optional container sandbox covers Shell/Git only and is intended for a trusted single-machine deployment, not hostile multitenancy. Account-scoped business databases and workspaces are implemented, but advanced RBAC and disk quotas are not. AST support is exact for Python and heuristic for other languages unless an external LSP server is configured. Skill dependencies are declared and exposed but deliberately not installed at runtime; bake trusted dependencies into images. GitHub integration currently targets GitHub REST and needs `CODEZZN_GITHUB_TOKEN`. Windows CLI credentials use DPAPI, but server-side model secrets do not have Vault/KMS-backed encrypted storage. MCP sampling/elicitation and OAuth discovery, remote/distributed workers, realtime audio/video, and a signed plugin marketplace remain outside this release. Recovery behavior depends on the execution path; interrupted running chat tasks require a new continuation task. The tool ledger prevents automatic replay of ambiguous side effects but is not a distributed exactly-once transaction system. The Windows CLI operates server projects and does not execute local Windows tools.
 
 ## 许可证说明
 
