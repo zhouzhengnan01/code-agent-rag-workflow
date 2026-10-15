@@ -25,6 +25,8 @@ Options:
 Interactive commands:
   /help /new /resume [ID] /model [MODEL] /agent [ID_OR_NAME]
   /project [ID_OR_NAME] /status /stop /files [PATH] /skills /mcp /exit
+  /plan [GOAL] /diff [CHECKPOINT_ID] /context /review [SCOPE]
+  /rewind CHECKPOINT_ID       Preview then request server approval; never force
 
 Authentication uses browser approval and a server-scoped credential. Windows
 credentials use DPAPI CurrentUser. No token arguments or permission bypass flags

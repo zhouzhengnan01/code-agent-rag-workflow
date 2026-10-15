@@ -43,7 +43,10 @@ def append_assistant(thread_id,turn_id,content,meta=None):
 
 def finalize_result(item,result):
     thread_id,turn_id=item['thread_id'],item['turn_id']
-    if result.get('status')=='waiting_for_approval':
+    if result.get('status')=='waiting_for_input':
+        control.finish_message(item['id'],'waiting_for_input',result)
+        with connect() as db: db.execute("UPDATE threads SET status='waiting_for_input',updated_at=? WHERE id=?",(now(),thread_id))
+    elif result.get('status')=='waiting_for_approval':
         control.sync_approvals(thread_id)
         with connect() as db:
             approval=db.execute('SELECT tool_name FROM approvals WHERE id=?',(result.get('approval_id'),)).fetchone()
@@ -62,6 +65,7 @@ async def execute_message(item):
         thread=thread_row(thread_id)
         payload=item.get('payload') or {}
         agent=current_agent(thread,item['agent_id'],payload.get('model_override'))
+        if payload.get('_recovering'): agent['_recovering']=True
         attachments=chat_inputs.resolve_ids(payload.get('attachment_ids',[]))
         with connect() as db:
             history=[dict(row) for row in db.execute('SELECT role,content,meta FROM messages WHERE thread_id=? ORDER BY created_at,rowid',(thread_id,))]
@@ -133,6 +137,11 @@ async def execute_message(item):
             result=await handlers['run_agent_isolated'](agent,history,item['content'],on_event=emit,streaming=True,thread_id=thread_id,turn_id=turn_id)
             finalize_result(item,result)
         except asyncio.CancelledError:
+            if control.conversation_runtime.stopping:
+                # Process shutdown is not a user's stop request. Keep the existing
+                # checkpoint, queue ID and turn for safe restart recovery.
+                message_event(thread_id,turn_id,{'id':new_id('evt'),'type':'turn_suspended','turn_id':turn_id,'reason':'service_shutdown'})
+                raise
             message_event(thread_id,turn_id,{'id':new_id('evt'),'type':'turn_cancelled','turn_id':turn_id})
             append_assistant(thread_id,turn_id,'任务已停止。已完成的操作和生成的文件保留，可继续补充要求。',{'cancelled':True})
             with connect() as db: db.execute("UPDATE agent_runs SET status='cancelled',updated_at=? WHERE turn_id=? AND status IN ('running','waiting')",(now(),turn_id))
@@ -146,6 +155,8 @@ async def execute_message(item):
 async def resume_interaction(item):
     thread_id=item['thread_id']
     response=item.get('response') or {}
+    if item.get('payload',{}).get('resume_mode')=='budget':
+        return await resume_budget_interaction(item)
     if item['kind']=='question' and response.get('decision')=='denied':
         control.cancel_waiting(thread_id,'用户已取消此任务')
         control.finish_interaction(item['id'],'cancelled')
@@ -193,6 +204,67 @@ async def resume_interaction(item):
             raise
         control.finish_interaction(item['id'],'answered',str(error.detail)[:1200])
         if item.get('queue_message_id'): control.finish_message(item['queue_message_id'],'failed',error=str(error.detail)[:1200])
+
+
+async def resume_budget_interaction(item):
+    """Continue the same persisted turn, never synthesize a second user message."""
+    from .agent import save_agent_run
+    from .tasks import get_task, cancel_task, finish_waiting_task
+    thread_id,turn_id=item['thread_id'],item['turn_id']
+    response=item.get('response') or {}
+    stop=response.get('decision')=='denied' or response.get('option_id')=='stop' or response.get('answer') in {'停止任务','stop'}
+    if not stop and response.get('option_id')!='continue' and response.get('answer') not in {'继续执行','continue'}:
+        raise HTTPException(400,'请选择继续执行或停止任务；普通文本不自动授予新执行预算')
+    lock=await handlers['thread_lock'](thread_id)
+    async with lock:
+        latest=control.get_interaction(thread_id,item['id'])
+        if latest['status']!='submitting':
+            return  # Answer replay after completion is a no-op.
+        if stop:
+            with connect() as db:
+                saved = db.execute('SELECT state FROM turn_checkpoints WHERE turn_id=?', (turn_id,)).fetchone()
+                task_id = json.loads(saved['state'] or '{}').get('task_id') if saved else None
+                db.execute("UPDATE agent_runs SET status='cancelled',updated_at=? WHERE thread_id=? AND turn_id=? AND status IN ('running','waiting','recovering')",(now(),thread_id,turn_id))
+                db.execute("UPDATE turn_checkpoints SET status='cancelled',updated_at=? WHERE thread_id=? AND turn_id=?",(now(),thread_id,turn_id))
+                db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?",(now(),thread_id))
+            if item.get('queue_message_id'): control.finish_message(item['queue_message_id'],'cancelled',error='用户选择停止预算续跑')
+            if task_id: cancel_task(task_id)
+            control.finish_interaction(item['id'],'cancelled')
+            append_assistant(thread_id,turn_id,'任务已停止。已完成的操作和文件保留。',{'cancelled':True,'budget_paused':True})
+            return
+        with connect() as db:
+            checkpoint=db.execute("SELECT * FROM turn_checkpoints WHERE thread_id=? AND turn_id=? AND status IN ('waiting','resuming')",(thread_id,turn_id)).fetchone()
+        if not checkpoint: raise HTTPException(409,'执行检查点已不存在或任务已结束，不能继续旧预算')
+        state=json.loads(checkpoint['state'] or '{}')
+        task_id = state.get('task_id')
+        if task_id and (get_task(task_id) or {}).get('status') == 'cancelled':
+            raise HTTPException(409, '后台任务已取消，不能继续旧预算')
+        if not state.get('budget_paused'): raise HTTPException(409,'此检查点不是等待执行预算的任务')
+        thread=thread_row(thread_id)
+        scoped=current_agent(thread,checkpoint['agent_id'])
+        state['round']=0
+        state['budget_paused']=False
+        state['budget_resumptions']=int(state.get('budget_resumptions',0))+1
+        # Preserve original provider/model, while re-evaluating current tool rights.
+        if state.get('provider_id') and state.get('model'):
+            scoped=chat_inputs.apply_override(scoped,{'provider_id':state['provider_id'],'model':state['model']})
+        save_agent_run(scoped,state,'running',thread_id,turn_id,task_id,response_id=state.get('previous_response_id'))
+        with connect() as db:
+            db.execute("UPDATE turn_checkpoints SET status='resuming',state=?,updated_at=? WHERE turn_id=?",(control.encode(state),now(),turn_id))
+            db.execute("UPDATE threads SET status='running',updated_at=? WHERE id=?",(now(),thread_id))
+            if item.get('queue_message_id'): db.execute("UPDATE chat_queue_messages SET run_status='running',updated_at=? WHERE id=?",(now(),item['queue_message_id']))
+            history=[dict(row) for row in db.execute('SELECT role,content,meta FROM messages WHERE thread_id=? ORDER BY created_at,rowid',(thread_id,))]
+        control.finish_interaction(item['id'])
+        async def emit(event):
+            message_event(thread_id,turn_id,event)
+            persist_cards(thread_id,turn_id,event,item.get('queue_message_id'))
+            if event.get('type')=='approval_required': control.sync_approvals(thread_id)
+        result=await handlers['run_agent_isolated'](scoped,chat_inputs.history_inputs(history),state.get('user_message',''),on_event=emit,streaming=True,thread_id=thread_id,turn_id=turn_id,resume_state=state,**({'task_id':task_id} if task_id else {}))
+        finish_waiting_task(task_id, result)
+        if item.get('queue_message_id'):
+            finalize_result(control.get_message(thread_id,item['queue_message_id']),result)
+        if result.get('status')=='completed':
+            with connect() as db: db.execute("UPDATE turn_checkpoints SET status='completed',updated_at=? WHERE turn_id=?",(now(),turn_id))
 
 @router.post('/api/threads/{thread_id}/queue')
 async def submit_message(thread_id:str,payload:dict=Body(...)):
@@ -243,6 +315,12 @@ async def cancel_message(thread_id:str,message_id:str):
         await control.conversation_runtime.cancel(thread_id)
     control.conversation_runtime.notify()
     return {'message':control.public_message(control.get_message(thread_id,message_id))}
+
+@router.post('/api/threads/{thread_id}/queue/{message_id}/dismiss')
+def dismiss_message(thread_id:str,message_id:str):
+    thread_row(thread_id)
+    item,changed=control.dismiss_failed_message(thread_id,message_id)
+    return {'message':control.public_message(item),'dismissed':True,'deduplicated':not changed}
 
 @router.get('/api/threads/{thread_id}/interactions')
 def list_interactions(thread_id:str):

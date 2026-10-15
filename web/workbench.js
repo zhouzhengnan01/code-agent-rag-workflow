@@ -1,6 +1,6 @@
 const pages = [
-  { id: 'dashboard', label: '概览', short: 'HOME' },
-  { id: 'chat', label: '对话调试', short: 'CHAT' },
+  { id: 'dashboard', label: 'Agent', short: 'HOME' },
+  { id: 'chat', label: '历史', short: 'CHAT' },
   { id: 'projects', label: '项目', short: 'PROJECT' },
   { id: 'tasks', label: '任务', short: 'TASK' },
   { id: 'agents', label: '智能体', short: 'AGENT' },
@@ -60,6 +60,7 @@ let state = {
   chatQueue: [], chatInteractions: [], chatSubmitPending: false, chatUnknownSubmission: null,
   chatPollTimer: null, chatPollEpoch: 0, chatPollError: '', chatStopPending: false,
   chatEventSequences: {}, chatEvents: {}, chatMessageSignatures: {}, chatInteractionSignatures: {}, chatInteractionSubmissions: {},
+  chatInteractionCollapsed: {}, chatQueueMutations: {},
 };
 
 const $ = selector => document.querySelector(selector);
@@ -233,10 +234,11 @@ function nav() {
         const page = byId[id];
         const active = state.page === id;
         return `
-          ${id === 'chat' ? '<div class="nav-chat-row">' : ''}<button class="nav-item ${active ? 'is-active' : ''}" type="button" onclick="go('${id}')" aria-label="${esc(page.label)}" title="${esc(page.label)}" ${active ? 'aria-current="page"' : ''}>
+          <button class="nav-item ${active ? 'is-active' : ''}" type="button" onclick="${id === 'chat' ? 'openChatHistory()' : `go('${id}')`}" aria-label="${esc(page.label)}" title="${esc(page.label)}" ${active ? 'aria-current="page"' : ''} ${id === 'chat' ? `id="chatHistoryToggle" aria-controls="chatHistorySubmenu" aria-expanded="${state.chatHistoryOpen}"` : ''}>
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${navIcons[id]}</svg>
             <span class="nav-label">${page.label}</span><span class="nav-short">${page.short}</span>
-          </button>${id === 'chat' ? `<button type="button" class="nav-chat-toggle" onclick="toggleChatHistory()" aria-label="${state.chatHistoryOpen ? '收起' : '展开'}对话历史" aria-expanded="${state.chatHistoryOpen}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="${state.chatHistoryOpen ? 'm6 9 6 6 6-6' : 'm9 6 6 6-6 6'}"/></svg></button></div><div id="chatHistorySubmenu" class="chat-history-submenu" ${state.chatHistoryOpen ? '' : 'hidden'}>${chatHistoryHtml()}</div>` : ''}`;
+            ${id === 'chat' ? `<span class="nav-history-chevron" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="${state.chatHistoryOpen ? 'm6 9 6 6 6-6' : 'm9 6 6 6-6 6'}"/></svg></span>` : ''}
+          </button>${id === 'chat' ? `<div id="chatHistorySubmenu" class="chat-history-submenu" ${state.chatHistoryOpen ? '' : 'hidden'}>${chatHistoryHtml()}</div>` : ''}`;
       }).join('')}
     </section>`).join('');
 }
@@ -419,15 +421,16 @@ async function tasksPage() {
         <article class="resource-record">
           <div class="record-identity"><span class="state-badge ${['failed','cancelled'].includes(task.status) ? 'is-off' : ''}">${esc(task.status)}</span><div><h2>${esc(task.name)}</h2><p>${esc(task.kind)} · 尝试 ${task.attempts}/${task.max_attempts} · ${timeText(task.created_at)}</p></div></div>
           <div class="record-facts"><span>${esc(task.id)}</span>${task.error ? `<span>${esc(task.error.slice(0, 100))}</span>` : ''}</div>
-          <div class="record-actions"><button class="button button-quiet button-small" type="button" onclick="showTask('${task.id}')">详情</button>${['queued','running'].includes(task.status) ? `<button class="button button-danger button-small" type="button" onclick="cancelPersistentTask('${task.id}')">取消</button>` : ''}</div>
+          <div class="record-actions"><button class="button button-quiet button-small" type="button" onclick="showTask('${task.id}')">详情</button>${task.status === 'waiting' && task.result?.status === 'budget_exhausted' ? `<button class="button button-quiet button-small" type="button" onclick="continuePersistentTask('${task.id}')">继续执行</button>` : ''}${['queued','running','waiting'].includes(task.status) ? `<button class="button button-danger button-small" type="button" onclick="cancelPersistentTask('${task.id}')">取消</button>` : ''}</div>
         </article>`).join('')}</div>` : '<div class="state-page"><span class="state-code">后台队列</span><h2>还没有任务</h2><p>创建一个智能体任务，或从工作流页面选择后台运行。</p></div>'}
     </div>`;
 }
 
 async function createAgentTask() {
-  const agents = await load('agents');
+  const [agents, projectResult] = await Promise.all([load('agents'), api('/api/projects')]);
   modal('新建后台任务', `<form id="taskForm" class="form-layout">
     ${field('任务名称', 'name', '')}
+    ${selectField('产物项目', 'project_id', '<option value="">不绑定项目</option>' + (projectResult.data || []).map(project => `<option value="${esc(project.id)}">${esc(project.name)}</option>`).join(''), true, '后台任务没有即时对话审批。文件任务请选择项目并提前配置最小工具权限；不绑定时文件保存在独立任务副本，不能声称已保存到项目。')}
     ${selectField('智能体', 'agent_id', agents.map(agent => `<option value="${agent.id}">${esc(agent.name)}</option>`).join(''))}
     ${field('任务内容', 'prompt', '', 'textarea', true)}
     ${field('最大尝试次数', 'max_attempts', 3, 'number')}
@@ -437,6 +440,11 @@ async function createAgentTask() {
     try { await api('/api/agent-tasks', { method: 'POST', body: JSON.stringify(data) }); closeModal(); toast('任务已进入持久队列'); if (state.page === 'tasks') loadPage(); }
     catch (error) { toast(error.message, true); }
   }, false, '创建任务');
+}
+
+async function continuePersistentTask(id) {
+  try { await api(`/api/tasks/${encodeURIComponent(id)}/continue`, {method:'POST', body:'{}'}); toast('已在原任务上增加执行预算'); if (state.page === 'tasks') loadPage(); }
+  catch (error) { toast(error.message, true); }
 }
 
 async function showTask(id) {
@@ -524,7 +532,7 @@ function resourceCard(kind, item) {
   if (kind === 'providers') facts = [item.type === 'bailian' ? '阿里云百炼' : 'OpenAI compatible', `${(item.models || []).length} 个模型`, item.api_key_configured ? '密钥已配置' : '等待密钥'];
   if (kind === 'knowledge') facts = [`${item.document_count || 0} 个文档`, `${item.chunk_count || 0} 个片段`, item.backend === 'ragflow' ? 'RAGFlow' : (item.embedding_model || '本地 Milvus')];
   if (kind === 'mcp_servers') facts = [(item.transport || 'stdio').toUpperCase()];
-  if (kind === 'lsp_servers') facts = [item.command || '未配置命令'];
+  if (kind === 'lsp_servers') facts = [item.transport === 'sandbox' ? `Docker · ${item.sandbox_server_id || item.id}` : item.transport === 'http' ? 'HTTP 代理' : item.command || '未配置命令'];
   if (kind === 'workflows') facts = [`${(item.nodes || []).length} 个节点`];
   if (kind === 'skills') facts = ['SKILL.md'];
   const searchText = `${item.name} ${description} ${facts.join(' ')}`.toLowerCase();
@@ -707,18 +715,40 @@ function choiceGroup(title, name, items, selected = []) {
 }
 
 function lspForm(item) {
+  const transport = item.transport || (item.id ? 'stdio' : 'sandbox');
+  const sandboxId = item.sandbox_server_id || 'python';
+  const sandboxIds = [...new Set(['python', 'typescript', sandboxId])];
   modal(item.id ? '编辑 LSP 服务' : '新建 LSP 服务', `
     <form id="editForm" class="form-layout">
       ${field('名称', 'name', item.name)}${field('语言', 'language', item.language || 'python')}
-      ${field('启动命令', 'command', item.command || 'pyright-langserver')}
-      ${field('参数 JSON 数组', 'args', JSON.stringify(item.args || ['--stdio']), 'textarea', true)}
+      ${selectField('执行方式', 'transport', `<option value="sandbox" ${transport === 'sandbox' ? 'selected' : ''}>Docker 沙箱（多用户推荐）</option><option value="http" ${transport === 'http' ? 'selected' : ''}>管理员 HTTP 代理</option><option value="stdio" ${transport === 'stdio' ? 'selected' : ''}>本机 stdio（仅单用户）</option>`, true, '多用户不会在主容器或 Windows 主机运行语言服务器。')}
+      <div id="lspSandboxFields" class="control-full" ${transport !== 'sandbox' ? 'hidden' : ''}>
+        ${selectField('沙箱服务标识', 'sandbox_server_id', sandboxIds.map(id => `<option value="${esc(id)}" ${id === sandboxId ? 'selected' : ''}>${esc(id)}</option>`).join(''), true, '必须匹配管理员 CODEZZN_LSP_SERVERS_JSON 的键，且沙箱镜像已安装对应服务。用户不能配置沙箱执行命令。')}
+      </div>
+      <div id="lspHttpFields" class="control-full" ${transport !== 'http' ? 'hidden' : ''}>
+        ${field('代理端点', 'endpoint', item.endpoint || '', 'text', true, '仅允许管理员 CODEZZN_LSP_PROXY_URLS 白名单中的端点；Token 只从服务器环境读取。')}
+      </div>
+      <div id="lspStdioFields" class="control-full" ${transport !== 'stdio' ? 'hidden' : ''}>
+        ${field('启动命令', 'command', item.command || 'pyright-langserver')}
+        ${field('参数 JSON 数组', 'args', JSON.stringify(item.args || ['--stdio']), 'textarea', true)}
+      </div>
       ${toggleField('启用服务', 'enabled', item.enabled !== false, true)}
     </form>`, () => {
       try {
-        const data = formData($('#editForm')); data.args = JSON.parse(data.args || '[]'); data.enabled = $('#editForm [name=enabled]').checked;
+        const data = formData($('#editForm')); data.enabled = $('#editForm [name=enabled]').checked;
+        if (data.transport === 'stdio') {
+          data.args = JSON.parse(data.args || '[]');
+          if (!Array.isArray(data.args) || data.args.some(arg => typeof arg !== 'string')) throw new Error('参数必须是字符串数组');
+        } else { delete data.command; delete data.args; }
+        if (data.transport !== 'http') delete data.endpoint;
+        if (data.transport !== 'sandbox') delete data.sandbox_server_id;
         save('lsp_servers', item.id, data);
-      } catch (error) { toast(`JSON 格式错误：${error.message}`, true); }
+      } catch (error) { toast(`LSP 配置错误：${error.message}`, true); }
     });
+  const selector = $('#editForm [name=transport]');
+  selector.addEventListener('change', () => {
+    for (const [mode, id] of [['sandbox', 'lspSandboxFields'], ['http', 'lspHttpFields'], ['stdio', 'lspStdioFields']]) $(`#${id}`).hidden = selector.value !== mode;
+  });
 }
 
 async function agentTeamForm(item) {
@@ -786,6 +816,9 @@ async function agentForm(item) {
       ${field('系统提示词', 'system_prompt', item.system_prompt || '你是一个可靠的智能体。', 'textarea', true)}
       ${field('Temperature', 'temperature', item.temperature ?? 0.2, 'number')}${field('最大工具轮次', 'max_tool_rounds', item.max_tool_rounds || 6, 'number')}
       ${selectField('推理强度', 'reasoning_effort', ['low','medium','high','xhigh'].map(value => `<option value="${value}" ${(item.reasoning_effort || 'medium') === value ? 'selected' : ''}>${value}</option>`).join(''))}${toggleField('并行工具调用', 'parallel_tools', item.parallel_tools !== false)}
+      ${field('上下文估算 Token 预算', 'context_token_budget', item.context_token_budget ?? 40000, 'number')}${toggleField('语义上下文压缩', 'semantic_compaction', item.semantic_compaction !== false)}
+      ${toggleField('按需加载 MCP 工具', 'lazy_tools', item.lazy_tools ?? item.role_template === 'coding')}${toggleField('同时按需加载内置工具', 'defer_builtin_tools', item.defer_builtin_tools === true)}
+      <p class="control-help control-full">预算是保守估算而非供应商精确 tokenizer；语义压缩使用当前模型并可能计费，失败回退结构化摘要。工具轮次耗尽时保存检查点并询问继续，不自动增加无限预算。并行仅用于已知只读工具。</p>
       <section class="form-section control-full"><header><h3>能力装配</h3><p>选择这个智能体可以访问的能力。</p></header></section>
       ${choiceGroup('技能', 'skill_ids', skills, item.skill_ids)}
       ${choiceGroup('知识库', 'knowledge_ids', knowledge, item.knowledge_ids)}
@@ -818,6 +851,9 @@ async function agentForm(item) {
         data.tool_policy = JSON.parse(data.tool_policy || '{}');
         data.temperature = Number(data.temperature);
         data.max_tool_rounds = Number(data.max_tool_rounds);
+        data.context_token_budget = Number(data.context_token_budget);
+        if (!Number.isInteger(data.context_token_budget) || data.context_token_budget < 2000 || data.context_token_budget > 2000000) throw new Error('上下文预算必须为 2000–2000000 的整数');
+        for (const key of ['semantic_compaction', 'lazy_tools', 'defer_builtin_tools']) data[key] = $(`#editForm [name=${key}]`).checked;
         data.max_concurrent_subagents = Number(data.max_concurrent_subagents);
         data.max_subagent_depth = Number(data.max_subagent_depth);
         data.allow_shell = $('#editForm [name=allow_shell]').checked;
@@ -882,6 +918,21 @@ function renderChatHistory() {
 }
 
 function toggleChatHistory() { state.chatHistoryOpen = !state.chatHistoryOpen; nav(); }
+
+function openChatHistory() {
+  if (state.page === 'chat') {
+    toggleChatHistory();
+    $('#chatHistoryToggle')?.focus?.({ preventScroll: true });
+    return;
+  }
+  const result = go('chat');
+  // Preserve navigation guards: a pending operation must not switch pages.
+  if (state.page === 'chat') {
+    state.chatHistoryOpen = true;
+    nav();
+  }
+  return result;
+}
 
 function filterChatThreads(value) {
   state.chatThreadFilter = value;
@@ -1526,6 +1577,7 @@ async function chat() {
           ${current?.messages?.length || approvals.length || state.chatInteractions.length ? `${persistentChatTimelineHtml(current?.messages || [], state.chatInteractions)}${approvals.filter(approval => !state.chatInteractions.some(item => item.turn_id === approval.turn_id && ['question','tool_approval'].includes(item.kind) && item.payload?.tool_name === approval.tool_name)).map(approvalHtml).join('')}` : `
             <div class="conversation-empty"><span class="empty-mark" aria-hidden="true">${codezznLogoHtml}</span><h2>今天想让智能体做什么？</h2><p>分析资料、编写代码，或让工具完成任务。</p><div class="chat-suggestions"><button type="button" onclick="fillChatPrompt('请帮我分析上传的文档，提炼重点和待办事项。')">${chatIcon('file')}<span>分析文档资料<small>提炼重点、比较信息</small></span></button><button type="button" onclick="fillChatPrompt('请帮我审查这段代码，找出错误并给出修复建议。')">${chatIcon('code')}<span>编写与审查代码<small>从想法到可运行的代码</small></span></button></div></div>`}
         </div>
+        <section class="chat-interaction-dock" id="chatInteractionDock" aria-label="等待你确认" hidden></section>
         <footer class="prompt-dock">
           <div class="chat-queue" id="chatQueue" aria-live="polite"></div>
           <div class="composer-attachments" id="chatAttachments" aria-live="polite"></div>
@@ -1545,6 +1597,7 @@ async function chat() {
   renderChatHistory();
   renderChatAttachments();
   renderChatQueue();
+  applyPersistentChatInteractions();
   updateComposerControls();
   startChatPolling();
   window.setTimeout(() => {
@@ -1565,6 +1618,7 @@ async function chat() {
 }
 
 function chatIcon(name) {
+  if (name === 'edit') return '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 3 5 5-12 12-6 1 1-6zM14 5l5 5M4 15l5 5"/></svg>';
   const paths = { attach: '<path d="m21 11-8.5 8.5a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.5 5.5l-9 9a2 2 0 0 1-2.8-2.8l8.3-8.3"/>', send: '<path d="M12 19V5m-7 7 7-7 7 7"/>', menu: '<path d="M4 6h16M4 12h16M4 18h16"/>', model: '<path d="m12 3 3 6 6 3-6 3-3 6-3-6-6-3 6-3z"/>', file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>', code: '<path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-13-2 20"/>' };
   return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`;
 }
@@ -2236,7 +2290,7 @@ function renderProjectDecision(step = 'project') {
   pending.step = step;
   const old = document.getElementById(pending.cardId);
   if (old) old.outerHTML = projectDecisionCardHtml(step);
-  else $('#messages')?.insertAdjacentHTML('beforeend', projectDecisionCardHtml(step));
+  else { const dock = $('#chatInteractionDock'); if (dock) { dock.hidden = false; dock.insertAdjacentHTML('beforeend', projectDecisionCardHtml(step)); } }
   scrollMessages(true);
   if (step === 'create') $('#projectInlineName')?.focus();
 }
@@ -2381,7 +2435,7 @@ function persistedChatMessagesHtml(messages) {
 }
 
 function persistentChatTimelineHtml(messages, interactions) {
-  const records = messages.map((message, index) => ({ kind: 'message', item: message, index })).concat(interactions.map((item, index) => ({ kind: 'interaction', item, index: messages.length + index })));
+  const records = messages.map((message, index) => ({ kind: 'message', item: message, index })).concat(interactions.filter(item => !chatInteractionInDock(item)).map((item, index) => ({ kind: 'interaction', item, index: messages.length + index })));
   const timestamp = item => typeof item.created_at === 'number' ? item.created_at * 1000 : Date.parse(item.created_at || '') || 0;
   records.sort((a, b) => timestamp(a.item) - timestamp(b.item) || a.index - b.index);
   return records.map(record => {
@@ -2392,18 +2446,40 @@ function persistentChatTimelineHtml(messages, interactions) {
   }).join('');
 }
 
+function chatInteractionInDock(interaction) { return interaction.kind !== 'decision_cards' && ['pending', 'submitting'].includes(interaction.status); }
+
+function toggleChatInteraction(button) {
+  const id = button.dataset.interactionId;
+  const body = document.getElementById(`interactionBody_${id}`);
+  if (!body) return;
+  body.hidden = !body.hidden;
+  state.chatInteractionCollapsed[id] = body.hidden;
+  document.getElementById(`interaction_${id}`)?.querySelectorAll('[data-collapse-question]').forEach(control => {
+    control.setAttribute('aria-expanded', String(!body.hidden));
+    if (control.dataset.collapseQuestion === 'icon') {
+      control.setAttribute('aria-label', body.hidden ? '展开确认' : '收起确认');
+      control.textContent = body.hidden ? '+' : '−';
+    }
+  });
+}
+
+function updateChatAnswerControl(input) {
+  const send = document.getElementById(`interactionSubmit_${input.dataset.interactionId}`);
+  if (send) send.hidden = !input.value.trim();
+}
+
 function chatInteractionHtml(interaction) {
   const payload = interaction.payload || {};
   const pending = interaction.status === 'pending';
-  const locked = !pending || !!state.chatInteractionSubmissions[interaction.id]?.unknown;
+  const locked = !pending || !!state.chatInteractionSubmissions[interaction.id]?.unknown || !!state.chatInteractionSubmissions[interaction.id]?.pending || !!state.chatInteractionSubmissions[interaction.id]?.accepted;
   const disabled = locked ? 'disabled' : '';
   const statusLabel = ({ pending: '需要你的回答', submitting: '回答已接收，正在继续', answered: '已回答', cancelled: '已取消', superseded: '已由新指令替代' })[interaction.status] || interaction.status;
   const attrs = `data-interaction-id="${esc(interaction.id)}"`;
   let body = '';
   if (interaction.kind === 'question') {
-    body = `<div class="interaction-options">${(payload.options || []).map(option => `<button type="button" ${attrs} data-option-id="${esc(option.id)}" ${disabled} onclick="answerChatOption(this)"><strong>${esc(option.label)}</strong>${option.description ? `<small>${esc(option.description)}</small>` : ''}</button>`).join('')}</div><label class="interaction-answer"><span>补充回答</span><textarea id="interactionAnswer_${esc(interaction.id)}" rows="2" ${disabled} placeholder="填写你的回答"></textarea></label><div class="interaction-actions"><button type="button" class="button button-primary button-small" ${attrs} ${disabled} onclick="answerChatQuestion(this)">提交回答</button><button type="button" class="button button-quiet button-small" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'denied'})">取消此任务</button></div>`;
+    body = `<div class="interaction-options">${(payload.options || []).map((option, index) => `<button type="button" class="interaction-choice" ${attrs} data-option-id="${esc(option.id)}" ${disabled} onclick="answerChatOption(this)"><span class="interaction-number" aria-hidden="true">${index + 1}</span><span class="interaction-choice-copy"><strong>${esc(option.label)}</strong>${option.description ? `<small>${esc(option.description)}</small>` : ''}</span></button>`).join('')}</div><div class="interaction-custom-answer"><span class="interaction-number" aria-hidden="true">${chatIcon('edit')}</span><input id="interactionAnswer_${esc(interaction.id)}" ${attrs} ${disabled} aria-label="用自己的话回答" placeholder="其他想法？请用自己的话告诉我…" oninput="updateChatAnswerControl(this)" onkeydown="if(event.key==='Enter'&&!event.isComposing){event.preventDefault();answerChatQuestion(this)}"><button id="interactionSubmit_${esc(interaction.id)}" type="button" ${attrs} ${disabled} onclick="answerChatQuestion(this)" aria-label="提交回答" hidden>${chatIcon('send')}</button></div>`;
   } else if (interaction.kind === 'tool_approval') {
-    body = `<p class="interaction-tool-name">${esc(payload.tool_name || payload.name || '工具调用')}</p>${payload.description ? `<p>${esc(payload.description)}</p>` : ''}<details class="interaction-tool-details"><summary>查看调用参数</summary><pre>${esc(JSON.stringify(payload.args || payload.arguments || {}, null, 2))}</pre></details><div class="interaction-actions"><button type="button" class="button button-primary button-small" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'approved'})">允许并继续</button><button type="button" class="button button-quiet button-small" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'denied'})">拒绝调用</button></div>`;
+    body = `<details class="interaction-tool-details"><summary>查看 ${esc(payload.tool_name || payload.name || '工具调用')} 参数</summary><pre>${esc(JSON.stringify(payload.args || payload.arguments || {}, null, 2))}</pre></details>${payload.description ? `<p>${esc(payload.description)}</p>` : ''}<div class="interaction-options"><button type="button" class="interaction-choice" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'approved'})"><span class="interaction-number" aria-hidden="true">1</span><span class="interaction-choice-copy"><strong>允许并继续</strong><small>仅批准此次调用，后续写入和命令仍按策略审批。</small></span></button><button type="button" class="interaction-choice" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'denied'})"><span class="interaction-number" aria-hidden="true">2</span><span class="interaction-choice-copy"><strong>拒绝调用</strong><small>不授权执行此次操作。</small></span></button></div>`;
   } else if (interaction.kind === 'project_confirmation') {
     body = `<label class="interaction-answer"><span>保存到已有项目</span><select id="interactionProject_${esc(interaction.id)}" ${disabled}><option value="">请选择项目</option>${(payload.projects || []).map(project => `<option value="${esc(project.id)}">${esc(project.name)}</option>`).join('')}</select></label><div class="interaction-actions"><button type="button" class="button button-primary button-small" ${attrs} ${disabled} onclick="answerChatProject(this,false)">使用所选项目</button></div>${payload.allow_create !== false ? `<label class="interaction-answer"><span>或创建新项目</span><input id="interactionProjectName_${esc(interaction.id)}" value="${esc(payload.suggested_name || '')}" ${disabled} placeholder="项目名称"></label><div class="interaction-actions"><button type="button" class="button button-quiet button-small" ${attrs} ${disabled} onclick="answerChatProject(this,true)">创建并继续</button></div>` : ''}<div class="interaction-actions"><button type="button" class="button button-quiet button-small" ${attrs} ${disabled} onclick="answerChatInteraction(this,{decision:'denied'})">取消此任务</button></div>`;
   } else if (interaction.kind === 'decision_cards') {
@@ -2419,6 +2495,10 @@ function chatInteractionHtml(interaction) {
   const answered = !pending && interaction.kind !== 'decision_cards';
   const response = interaction.response || {};
   const responseLabel = response.answer || (response.option_id ? (payload.options || []).find(option => option.id === response.option_id)?.label : '') || response.new_project_name || (response.project_id ? (payload.projects || []).find(project => project.id === response.project_id)?.name : '') || (response.decision === 'approved' ? '已允许' : response.decision === 'denied' ? '已拒绝 / 取消' : '');
+  if (chatInteractionInDock(interaction)) {
+    const collapsed = !!state.chatInteractionCollapsed[interaction.id];
+    return `<article class="interaction-dock-item" id="interaction_${esc(interaction.id)}" data-status="${esc(interaction.status)}"><section class="chat-interaction interaction-confirmation" aria-label="${esc(interaction.question || statusLabel)}"><header class="interaction-confirmation-head"><button type="button" class="interaction-heading" ${attrs} data-collapse-question="heading" aria-expanded="${!collapsed}" aria-controls="interactionBody_${esc(interaction.id)}" onclick="toggleChatInteraction(this)"><span class="interaction-question-icon" aria-hidden="true">?</span><strong>${esc(interaction.question || statusLabel)}</strong></button><div class="interaction-confirmation-controls"><button type="button" ${attrs} data-collapse-question="icon" aria-label="${collapsed ? '展开确认' : '收起确认'}" aria-expanded="${!collapsed}" aria-controls="interactionBody_${esc(interaction.id)}" onclick="toggleChatInteraction(this)">${collapsed ? '+' : '−'}</button><button type="button" ${attrs} ${disabled} aria-label="拒绝并关闭确认" title="拒绝本次操作，不会自动授权" onclick="answerChatInteraction(this,{decision:'denied'})">×</button></div></header><div class="interaction-confirmation-body" id="interactionBody_${esc(interaction.id)}" ${collapsed ? 'hidden' : ''}>${pending ? body : '<p class="interaction-submitting" role="status">回答已接收，正在继续…</p>'}</div><p class="interaction-error" id="interactionError_${esc(interaction.id)}" role="alert">${esc(error)}</p>${submission?.unknown ? `<button type="button" class="button button-quiet button-small" ${attrs} onclick="refreshChatInteractionStatus(this)">刷新提交状态</button>` : ''}</section></article>`;
+  }
   return `<article class="message-turn assistant interaction-turn" id="interaction_${esc(interaction.id)}" data-status="${esc(interaction.status)}"><div class="turn-content"><section class="chat-interaction"><header><strong>${esc(statusLabel)}</strong></header>${interaction.question ? `<p class="interaction-question">${esc(interaction.question)}</p>` : ''}${answered ? `<p class="interaction-response">${esc(responseLabel || statusLabel)}</p>` : body}<p class="interaction-error" id="interactionError_${esc(interaction.id)}" role="alert">${esc(error)}</p>${submission?.unknown ? `<button type="button" class="button button-quiet button-small" ${attrs} onclick="refreshChatInteractionStatus(this)">刷新提交状态</button>` : ''}</section></div></article>`;
 }
 
@@ -2445,12 +2525,13 @@ function acceptQueuedChatMessage(message) {
 function renderChatQueue() {
   const container = $('#chatQueue'); if (!container) return;
   const items = state.chatQueue.filter((item, index) => {
+    if (item.dismissed_at) return false;
     if (item.status === 'failed' || item.run_status === 'failed') return !chatMessageRetried(item, index);
     return item.status === 'pending' || item.status === 'dispatching';
   });
   const recent = items.filter(item => item.status !== 'failed' && item.run_status !== 'failed').concat(items.filter(item => item.status === 'failed' || item.run_status === 'failed').slice(-2));
   container.hidden = !recent.length && !state.chatUnknownSubmission && !state.chatPollError;
-  container.innerHTML = `${state.chatUnknownSubmission ? `<div class="queue-uncertain"><span>提交结果尚未确认，发送已锁定，避免重复执行。</span><button type="button" onclick="refreshUnknownChatSubmission()">刷新提交状态</button>${state.chatUnknownSubmission.retryAllowed ? '<button type="button" onclick="retryUnknownChatSubmission()" title="复用原提交标识，不创建第二个任务">重试原提交</button>' : ''}</div>` : ''}${state.chatPollError ? `<div class="queue-connection-error">${esc(state.chatPollError)}</div>` : ''}${recent.map(item => `<div class="chat-queue-item"><span><small>${item.status === 'pending' ? '待执行' : item.status === 'dispatching' ? '准备执行' : '执行失败'}</small><strong>${esc(item.content)}</strong>${item.error ? `<small class="queue-item-error">${esc(item.error)}</small>` : ''}</span>${item.status === 'pending' ? `<button type="button" data-message-id="${esc(item.id)}" onclick="cancelQueuedChatMessage(this)" aria-label="取消排队任务">×</button>` : item.status === 'failed' || item.run_status === 'failed' ? `<button type="button" data-message-id="${esc(item.id)}" onclick="retryQueuedChatMessage(this)">重试</button>` : ''}</div>`).join('')}`;
+  container.innerHTML = `${state.chatUnknownSubmission ? `<div class="queue-uncertain"><span>提交结果尚未确认，发送已锁定，避免重复执行。</span><button type="button" onclick="refreshUnknownChatSubmission()">刷新提交状态</button>${state.chatUnknownSubmission.retryAllowed ? '<button type="button" onclick="retryUnknownChatSubmission()" title="复用原提交标识，不创建第二个任务">重试原提交</button>' : ''}</div>` : ''}${state.chatPollError ? `<div class="queue-connection-error">${esc(state.chatPollError)}</div>` : ''}${recent.map(item => { const busy = state.chatQueueMutations[`${state.thread}:${item.id}`] || state.chatUnknownSubmission?.payload?.retry_of === item.id; return `<div class="chat-queue-item"><span><small>${item.status === 'pending' ? '待执行' : item.status === 'dispatching' ? '准备执行' : '执行失败'}</small><strong>${esc(item.content)}</strong>${item.error ? `<small class="queue-item-error">${esc(item.error)}</small>` : ''}</span>${item.status === 'pending' ? `<button type="button" data-message-id="${esc(item.id)}" onclick="cancelQueuedChatMessage(this)" aria-label="取消排队任务">×</button>` : item.status === 'failed' || item.run_status === 'failed' ? `<div class="queue-item-actions"><button type="button" data-message-id="${esc(item.id)}" ${busy ? 'disabled' : ''} onclick="retryQueuedChatMessage(this)">重试</button><button type="button" data-message-id="${esc(item.id)}" ${busy ? 'disabled' : ''} onclick="dismissQueuedChatMessage(this)" title="删除这条失败提示，保留执行历史和项目文件">删除</button></div>` : ''}</div>`; }).join('')}`;
 }
 
 function stopChatPolling() { state.chatPollEpoch++; if (state.chatPollTimer) clearTimeout(state.chatPollTimer); state.chatPollTimer = null; }
@@ -2517,9 +2598,13 @@ function applyPersistentChatMessages(messages) {
 
 function applyPersistentChatInteractions() {
   const stream = $('#messages'); if (!stream) return;
+  const dock = $('#chatInteractionDock');
   state.chatInteractions.forEach(item => {
     const signature = chatInteractionSignature(item);
     const existing = document.getElementById(`interaction_${item.id}`);
+    const target = chatInteractionInDock(item) ? dock : stream;
+    if (!target) return;
+    if (existing && existing.parentElement && existing.parentElement !== target) target.appendChild(existing);
     if (existing && state.chatInteractionSignatures[item.id] === signature) return;
     const submitting = state.chatInteractionSubmissions[item.id];
     if (existing && item.status === 'pending' && submitting?.pending) return;
@@ -2527,10 +2612,11 @@ function applyPersistentChatInteractions() {
     if (existing && existing.dataset?.status === 'pending' && item.status === 'pending' && item.kind !== 'decision_cards' && state.chatInteractionSignatures[item.id]) {
       const error = document.getElementById(`interactionError_${item.id}`); if (error) error.textContent = item.error || submitting?.error || '';
     } else if (existing) existing.outerHTML = chatInteractionHtml(item);
-    else { const live = document.getElementById('chatLiveTurn'); if (live) live.insertAdjacentHTML?.('beforebegin', chatInteractionHtml(item)); else stream.insertAdjacentHTML?.('beforeend', chatInteractionHtml(item)); }
+    else { const live = target === stream ? document.getElementById('chatLiveTurn') : null; if (live) live.insertAdjacentHTML?.('beforebegin', chatInteractionHtml(item)); else target.insertAdjacentHTML?.('beforeend', chatInteractionHtml(item)); }
     state.chatInteractionSignatures[item.id] = signature;
     if (item.status !== 'pending') delete state.chatInteractionSubmissions[item.id];
   });
+  if (dock) dock.hidden = !state.chatInteractions.some(chatInteractionInDock) && !state.pendingProjectTurn;
   persistChatInteractionSubmissions();
 }
 
@@ -2651,11 +2737,30 @@ async function cancelQueuedChatMessage(button) {
 async function retryQueuedChatMessage(button) {
   if (button.disabled || state.chatSubmitPending) return;
   const item = state.chatQueue.find(message => message.id === button.dataset.messageId);
-  if (!item || !['failed','cancelled'].includes(item.run_status || item.status)) return;
+  const key = `${state.thread}:${item?.id}`;
+  if (!item || item.dismissed_at || state.chatQueueMutations[key] || !['failed','cancelled'].includes(item.run_status || item.status)) return;
+  state.chatQueueMutations[key] = 'retry';
   button.disabled = true;
   try {
     return await sendMessage({ content: item.content, agent: item.agent_id || $('#chatAgent')?.value, attachments: (item.attachment_ids || []).map(id => ({ id, status: 'ready' })), retry_of: item.id });
-  } finally { button.disabled = false; }
+  } finally { delete state.chatQueueMutations[key]; button.disabled = false; renderChatQueue(); }
+}
+
+async function dismissQueuedChatMessage(button) {
+  const threadId = state.thread;
+  const item = state.chatQueue.find(message => message.id === button.dataset.messageId);
+  const key = `${threadId}:${item?.id}`;
+  if (!threadId || !item || button.disabled || state.chatQueueMutations[key] || item.dismissed_at || (item.status !== 'failed' && item.run_status !== 'failed')) return;
+  if (state.chatUnknownSubmission?.payload?.retry_of === item.id) return toast('请先确认重试提交状态', true);
+  state.chatQueueMutations[key] = 'dismiss'; button.disabled = true; renderChatQueue();
+  try {
+    const result = await conversationApi(`/api/threads/${encodeURIComponent(threadId)}/queue/${encodeURIComponent(item.id)}/dismiss`, { method: 'POST' });
+    if (!result.message?.dismissed_at) throw new Error('服务端尚未确认删除，请刷新后重试');
+    if (state.thread !== threadId) return;
+    state.chatLastMutationAt = Date.now(); acceptQueuedChatMessage(result.message); renderChatQueue();
+    toast('已删除失败提示，执行历史和项目文件已保留');
+  } catch (error) { if (state.thread === threadId) toast(`删除失败：${error.message}`, true); }
+  finally { delete state.chatQueueMutations[key]; button.disabled = false; if (state.thread === threadId) renderChatQueue(); }
 }
 
 function answerChatOption(button) { return answerChatInteraction(button, { option_id: button.dataset.optionId }); }
@@ -2696,7 +2801,7 @@ async function answerChatInteraction(button, answer) {
       else card?.querySelector('.chat-interaction')?.insertAdjacentHTML('beforeend', `<button class="button button-quiet button-small" type="button" data-interaction-id="${esc(id)}" data-card-id="${esc(answer.card_id || '')}" onclick="refreshChatInteractionStatus(this)">刷新提交状态</button>`);
       toast(state.chatInteractionSubmissions[key].error, true);
     }
-  } finally { state.chatAnswersPendingCount--; state.approvalPending = state.chatAnswersPendingCount > 0; persistChatInteractionSubmissions(); }
+  } finally { state.chatAnswersPendingCount--; state.approvalPending = state.chatAnswersPendingCount > 0; applyPersistentChatInteractions(); persistChatInteractionSubmissions(); }
 }
 
 async function refreshChatInteractionStatus(button) {
@@ -2719,6 +2824,7 @@ async function refreshChatInteractionStatus(button) {
     }
     state.chatInteractions = state.chatInteractions.map(old => old.id === id ? item : old); delete state.chatInteractionSubmissions[key];
     const card = document.getElementById(`interaction_${id}`); if (card) card.outerHTML = chatInteractionHtml(item);
+    applyPersistentChatInteractions();
     persistChatInteractionSubmissions(); syncActiveChatTurn(); updateComposerControls(); startChatPolling(); toast('已确认回答状态');
   } catch (error) { toast(`状态刷新失败：${error.message}`, true); }
 }

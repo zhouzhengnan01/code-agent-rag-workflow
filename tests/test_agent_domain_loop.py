@@ -127,12 +127,12 @@ def test_workflow_draft_rejects_cycle():
 def test_project_artifact_keeps_file_versions(tmp_path, monkeypatch):
     _setup_db(tmp_path, monkeypatch)
     monkeypatch.setattr(workspace, "BASE_WORKSPACE", tmp_path / "workspace")
-    monkeypatch.setattr(projects.os, "chown", lambda *args: None)
+    monkeypatch.setattr(projects.os, "chown", lambda *args: None, raising=False)
     project = projects.create_project("Code")
     path = projects.project_root(project["id"]) / "sort.py"
-    path.write_text("print(1)\n", encoding="utf-8")
+    path.write_text("print(1)\n", encoding="utf-8", newline='')
     artifact = projects.record_artifact(project["id"], "thr_test", "turn_1", path, "file")
-    path.write_text("print(2)\n", encoding="utf-8")
+    path.write_text("print(2)\n", encoding="utf-8", newline='')
     projects.record_artifact(project["id"], "thr_test", "turn_2", path, "file")
     versions = projects.list_artifact_versions(project["id"], artifact["id"])
     assert [item["version"] for item in versions] == [2, 1]

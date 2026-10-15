@@ -15,7 +15,9 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 - 后台任务：SQLite 持久队列、并发 worker、失败退避重试、取消、事件历史、进程重启后恢复未完成任务；智能体和工作流均可后台执行
 - 多智能体：可配置团队、协调智能体、成员白名单、并发和深度限制；主智能体通过 `delegate_task` 并行委派并用 `task_status` 汇总
 - 长期记忆：用户、项目和线程三级作用域，哈希向量+词法混合检索、可信度、冲突待确认、确认/拒绝、过期淘汰和自动经验沉淀
-- 任务隔离与恢复：有有效 HEAD 的 Git 工作区可为任务/会话创建独立 worktree；模型轮次、Responses ID 和工具结果检查点化，支持可恢复状态的续接；对话服务重启时正在执行的任务会标记中断，需提交新的继续任务，副作用工具不会在状态不明时自动重放
+- 任务隔离与恢复：项目写任务使用独立 Git worktree 或有界文件快照；发布回项目前校验哈希，冲突保留任务副本而不覆盖他人修改。模型轮次、Responses ID 和工具结果持久化；有有效检查点的安全对话可在重启后恢复，副作用结果不明时停止自动重放；轮次预算耗尽后显示继续/停止问题卡
+- 编码工程闭环：计划与版本化审批、显式测试/lint/类型检查质量门、修改前基线对照、双视角模型审查与证据验证、PreToolUse/PostToolUse/Stop Hooks、文件快照/Diff/哈希保护回退；网页“工程”面板、CLI `/plan /diff /context /review /rewind` 和可选 VS Code 客户端桥
+- 按需上下文与开发环境：MCP 工具动态发现、Skill 指令渐进加载与只读依赖预检、结构化/语义上下文压缩、增量代码索引、隔离 LSP 与跨轮后台命令日志；后台命令不是交互式 PTY，语言服务器和 Node 环境需管理员按文档构建
 - Execution safety: container-backed `read-only` / `workspace-write` Shell and read-only Git; `danger-full-access` Shell is rejected. Thread locks, approval records, atomic file writes, and backups remain unchanged.
 - Windows CLI：Node.js 20+ 的 `codezzn` 客户端，支持浏览器账号授权、交互/单次对话、流式文本/JSON/JSONL、智能体与模型选择、项目选择、审批/追问、会话续接、断线恢复、附件上传和取消；复用服务器项目与 Docker 沙箱，不执行 Windows 主机命令
 - 原有 Python CLI：`python -m backend.app.cli exec` 支持非交互执行、stdin 和 JSONL 事件输出，与新增 Windows 客户端并存
@@ -23,6 +25,8 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 - 认证与部署：本地账号、邮箱验证码（需 SMTP）、GitHub/Google OAuth、HttpOnly 浏览器会话、可撤销的 CLI 凭证、按账号隔离的业务库与工作区；Dockerfile、Compose healthcheck、持久化数据卷和可选 API 管理密钥
 
 ## 启动
+
+本次编码能力对齐的配置、网页对话测试、CLI/VS Code 入口、部署与明确边界见 [编码能力验收指南](docs/coding-parity.md)。实现参考本机 Claude Code 2.1.140 的可观测接口，不包含其私有模型、私有 Prompt 或专有云服务，不声明编码效果完全等价。
 
 工作流画布的重新部署、入门 / 条件分支 / 知识库问答测试步骤见 [工作流画布使用说明](docs/workflow-canvas.md)。Docker 默认同时构建前端与后端；不能拉取 Node 镜像时可先用本机 Node 编译并选择 `CODEZZN_BUILD_TARGET=prebuilt`。
 

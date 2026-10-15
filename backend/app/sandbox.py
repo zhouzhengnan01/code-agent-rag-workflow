@@ -23,6 +23,30 @@ async def sandbox_status():
         return response.json()
 
 
+async def start_command(command, mode="read-only", cwd=".", timeout_seconds=None, task_id=None):
+    """Start a durable broker task; intentionally does not cancel on caller disconnect."""
+    if mode not in ("read-only", "workspace-write"): raise PermissionError("Unsupported sandbox mode")
+    import uuid
+    task_id = task_id or uuid.uuid4().hex
+    url, headers = settings()
+    payload = {"id": task_id, "command": command, "mode": mode, "cwd": cwd, "network": False, "tenant": current_tenant()}
+    if timeout_seconds is not None: payload["timeout_seconds"] = timeout_seconds
+    async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
+        response = await client.post(url + "/tasks", headers=headers, json=payload)
+        response.raise_for_status()
+        return response.json()
+
+
+async def command_task(task_id, cancel=False):
+    import re
+    if not re.fullmatch(r"[0-9a-f]{32}", str(task_id)): raise ValueError("Invalid sandbox task id")
+    url, headers = settings()
+    async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
+        response = await client.request("DELETE" if cancel else "GET", url + "/tasks/" + task_id, headers=headers)
+        response.raise_for_status()
+        return response.json()
+
+
 async def run_command(command, mode="read-only", cwd=".", network=False):
     if mode not in ("read-only", "workspace-write"):
         raise PermissionError("Container execution supports read-only or workspace-write only")

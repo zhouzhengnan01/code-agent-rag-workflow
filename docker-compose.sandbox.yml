@@ -13,8 +13,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: ${CODEZZN_BUILD_TARGET:-runtime}
       args:
         BASE_IMAGE: ${CODEZZN_BASE_IMAGE:-python:3.12-slim}
+        NODE_IMAGE: ${CODEZZN_NODE_IMAGE:-node:22-bookworm-slim}
     command: ["python", "-m", "backend.app.sandbox_broker"]
     user: "0:0"
     restart: unless-stopped
@@ -39,6 +41,9 @@ services:
       CODEZZN_SANDBOX_MEMORY_MB: ${CODEZZN_SANDBOX_MEMORY_MB:-512}
       CODEZZN_SANDBOX_PIDS: ${CODEZZN_SANDBOX_PIDS:-64}
       CODEZZN_SANDBOX_TIMEOUT: ${CODEZZN_SANDBOX_TIMEOUT:-60}
+      CODEZZN_SANDBOX_MAX_TIMEOUT: ${CODEZZN_SANDBOX_MAX_TIMEOUT:-3600}
+      # Keys match the LSP resource's sandbox_server_id, not an arbitrary user command.
+      CODEZZN_LSP_SERVERS_JSON: ${CODEZZN_LSP_SERVERS_JSON:-}
       CODEZZN_SANDBOX_GIT_NETWORK: ${CODEZZN_SANDBOX_GIT_NETWORK:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

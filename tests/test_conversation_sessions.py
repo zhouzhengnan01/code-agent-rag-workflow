@@ -34,6 +34,133 @@ def session_store(tmp_path,monkeypatch):
 
 def token(): return str(uuid.uuid4())
 
+
+def test_failure_dismissal_persists_without_erasing_history_or_submission_identity(session_store):
+    thread,settings,runtime,calls=session_store
+    submission_id=token()
+    payload={'attachment_ids':[], 'project_id':'prj_audit_preserved'}
+    original,_=control.enqueue(thread['id'],settings['id'],'保留失败任务',payload,submission_id)
+    result={'status':'failed','content':'真实失败输出','exit_code':1}
+    control.finish_message(original['id'],'failed',result,error='真实执行错误')
+    chat_sessions.append_assistant(thread['id'],'turn_dismiss_audit','原始失败消息',{'error':True})
+    before=control.get_message(thread['id'],original['id'])
+    dismissed,changed=control.dismiss_failed_message(thread['id'],original['id'])
+    assert changed and isinstance(dismissed['payload']['dismissed_at'],int)
+    for key in ('id','thread_id','agent_id','submission_id','fingerprint','content','status','run_status','result','error','turn_id','created_at'):
+        assert dismissed[key]==before[key]
+    assert dismissed['payload']=={**before['payload'],'dismissed_at':dismissed['payload']['dismissed_at']}
+    # A fresh connection and list/read responses all retain the presentation marker.
+    restored=control.get_message(thread['id'],original['id'])
+    assert control.public_message(restored)['dismissed_at']==dismissed['payload']['dismissed_at']
+    assert control.messages(thread['id'])[0]['dismissed_at']==dismissed['payload']['dismissed_at']
+    again,changed_again=control.dismiss_failed_message(thread['id'],original['id'])
+    assert not changed_again and again==dismissed
+    replay,created=control.enqueue(thread['id'],settings['id'],'保留失败任务',payload,submission_id)
+    assert not created and replay==dismissed
+    with db.connect() as c:
+        assert c.execute('SELECT COUNT(*) FROM chat_queue_messages').fetchone()[0]==1
+        assert c.execute('SELECT content FROM messages WHERE turn_id=?',('turn_dismiss_audit',)).fetchone()[0]=='原始失败消息'
+    assert calls==[]
+
+
+@pytest.mark.parametrize('status,run_status',[
+    ('pending','pending'),('dispatching','running'),('consumed','running'),
+    ('consumed','waiting_for_input'),('consumed','waiting_for_approval'),
+    ('consumed','waiting_for_project'),('consumed','completed'),
+    ('cancelled','cancelled'),('pending','failed'),('dispatching','failed'),
+])
+def test_failure_dismissal_rejects_every_non_failed_terminal_state(session_store,status,run_status):
+    thread,settings,runtime,calls=session_store
+    item,_=control.enqueue(thread['id'],settings['id'],'不可隐藏',{},token())
+    with db.connect() as c:
+        c.execute('UPDATE chat_queue_messages SET status=?,run_status=? WHERE id=?',(status,run_status,item['id']))
+    before=control.get_message(thread['id'],item['id'])
+    with pytest.raises(main.HTTPException) as exc:
+        control.dismiss_failed_message(thread['id'],item['id'])
+    assert exc.value.status_code==409
+    assert control.get_message(thread['id'],item['id'])==before
+
+
+def test_failure_dismissal_preserves_retry_links_and_does_not_cancel_an_active_task(session_store,monkeypatch):
+    thread,settings,runtime,calls=session_store
+    original,_=control.enqueue(thread['id'],settings['id'],'重试任务',{'attachment_ids':[]},token())
+    control.finish_message(original['id'],'failed',error='原错误')
+    retry_payload={'attachment_ids':[],'retry_of':original['id']}
+    retry_submission=token()
+    retry,_=control.enqueue(thread['id'],settings['id'],'重试任务',retry_payload,retry_submission)
+    with db.connect() as c:
+        c.execute("UPDATE chat_queue_messages SET status='consumed',run_status='running' WHERE id=?",(retry['id'],))
+        c.execute("UPDATE threads SET status='running' WHERE id=?",(thread['id'],))
+    def forbidden(*args,**kwargs): raise AssertionError('banner dismissal must not cancel or wake the runtime')
+    monkeypatch.setattr(runtime,'cancel',forbidden)
+    monkeypatch.setattr(runtime,'notify',forbidden)
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),base_url='http://test') as client:
+            path=f"/api/threads/{thread['id']}/queue/{original['id']}/dismiss"
+            first=await client.post(path)
+            assert first.status_code==200
+            body=first.json()
+            assert body['dismissed'] is True and body['deduplicated'] is False
+            assert body['message']['retried_by']==retry['id'] and body['message']['error']=='原错误'
+            assert body['message']['dismissed_at'] is not None
+            second=await client.post(path)
+            assert second.status_code==200 and second.json()['deduplicated'] is True
+            assert second.json()['message']==body['message']
+            listing=(await client.get(f"/api/threads/{thread['id']}/queue")).json()['data']
+            assert listing[0]['dismissed_at']==body['message']['dismissed_at']
+            assert (await client.post(f"/api/threads/{thread['id']}/queue/{retry['id']}/dismiss")).status_code==409
+    asyncio.run(scenario())
+    assert control.get_message(thread['id'],retry['id'])['run_status']=='running'
+    assert control.public_message(control.get_message(thread['id'],retry['id']))['retry_of']==original['id']
+    assert chat_sessions.thread_row(thread['id'])['status']=='running'
+    replay,created=control.enqueue(thread['id'],settings['id'],'重试任务',retry_payload,retry_submission)
+    assert not created and replay['id']==retry['id']
+
+
+def test_failure_dismissal_http_requires_authentication_and_the_owning_thread(session_store,monkeypatch):
+    thread,settings,runtime,calls=session_store
+    original,_=control.enqueue(thread['id'],settings['id'],'失败记录',{},token())
+    control.finish_message(original['id'],'failed',error='失败')
+    other=main.create_thread({'agent_id':settings['id']})
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),base_url='http://test') as client:
+            wrong=f"/api/threads/{other['id']}/queue/{original['id']}/dismiss"
+            assert (await client.post(wrong)).status_code==404
+            missing=f"/api/threads/{thread['id']}/queue/cqm_missing/dismiss"
+            assert (await client.post(missing)).status_code==404
+            monkeypatch.setenv('CODEZZN_AUTH_REQUIRED','true')
+            path=f"/api/threads/{thread['id']}/queue/{original['id']}/dismiss"
+            assert (await client.post(path)).status_code==401
+    asyncio.run(scenario())
+    assert control.public_message(control.get_message(thread['id'],original['id']))['dismissed_at'] is None
+
+
+def test_failure_dismissal_http_is_scoped_to_the_authenticated_tenant(session_store,monkeypatch):
+    thread,settings,runtime,calls=session_store
+    owner=db.new_id('usr'); other=db.new_id('usr')
+    # Preserve the same thread ID in both private stores to test record scoping,
+    # rather than relying only on globally different thread IDs.
+    for user_id in (owner,other):
+        db.ensure_tenant(user_id)
+        tenant_token=db.use_tenant(user_id)
+        try:
+            with db.connect() as c:
+                c.execute('INSERT INTO threads(id,agent_id,name,created_at,updated_at) VALUES(?,?,?,?,?)',(thread['id'],settings['id'],'Private',db.now(),db.now()))
+            if user_id==owner:
+                item,_=control.enqueue(thread['id'],settings['id'],'私有失败',{},token())
+                control.finish_message(item['id'],'failed',error='私有错误')
+        finally: db.reset_tenant(tenant_token)
+    monkeypatch.setenv('CODEZZN_AUTH_REQUIRED','true')
+    monkeypatch.setattr(main,'request_user',lambda request:{'id':request.headers['x-test-user']} if request.headers.get('x-test-user') else None)
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),base_url='http://test') as client:
+            path=f"/api/threads/{thread['id']}/queue/{item['id']}/dismiss"
+            assert (await client.post(path,headers={'x-test-user':other})).status_code==404
+            response=await client.post(path,headers={'x-test-user':owner})
+            assert response.status_code==200 and response.json()['message']['dismissed_at'] is not None
+            assert (await client.post(path,headers={'x-test-user':owner})).json()['deduplicated'] is True
+    asyncio.run(scenario())
+
 def test_retry_is_linked_atomically_and_keeps_the_original_failure(session_store):
     thread,settings,runtime,calls=session_store
     original,_=control.enqueue(thread['id'],settings['id'],'原任务',{'attachment_ids':[]},token())

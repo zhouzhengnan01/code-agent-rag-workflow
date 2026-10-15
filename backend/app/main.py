@@ -31,11 +31,12 @@ from .mcp import mcp_manager
 from .memory import backfill_memory_embeddings, confirm_memory, delete_memory, expire_memories, get_memory, list_memories, save_memory, search_memories
 from .model import BAILIAN_PRESETS, normalize_provider, public_provider, test_provider
 from .sandbox import sandbox_status
-from .tasks import cancel_task, enqueue_task, get_task, list_tasks, task_events, task_queue
+from .tasks import cancel_task, enqueue_task, get_task, list_tasks, task_events, task_queue, finish_waiting_task
 from .workflows import create_run, mark_run_cancelled, validate_workflow
 from .workflow_store import WorkflowConflict, prepare_workflow, save_canvas_workflow
 from .worktrees import ensure_worktree, list_worktrees, remove_worktree, worktree_path
 from .workspace import reset_workspace, use_workspace, tenant_workspace
+from .coding_workspace import prepare_coding_workspace, workspace_path as coding_workspace_path, use_coding_workspace, reset_coding_workspace
 from .projects import artifact_path, create_project, get_artifact as get_project_artifact, get_artifact_version_content, get_project, list_artifact_versions, list_artifacts, list_projects, update_project
 from .domain_tools import discard_workflow_draft, get_workflow_draft, get_workflow_run, get_workflow_version, list_workflow_versions, save_workflow_draft, update_workflow_draft
 from .intent import classify_intent, parse_project_directive
@@ -116,13 +117,24 @@ mimetypes.add_type("font/woff2", ".woff2")
 
 
 async def run_agent_isolated(agent, history, prompt, *, task_id=None, thread_id=None, **kwargs):
-    worktree = await ensure_worktree(task_id=task_id, thread_id=thread_id)
-    token = use_workspace(worktree_path(worktree)) if worktree else None
+    choice = None
+    if kwargs.get('turn_id'):
+        from .projects import get_turn_project
+        choice = get_turn_project(kwargs['turn_id'])
+    project_id = (choice or {}).get('project_id') or agent.get('_project_id')
+    # Plain conversation/RAG must not scan or clone every project before its first token.
+    # A project created/selected later is isolated lazily by execute_tool.
+    agent = {**agent, '_managed_coding_workspace': True}
+    isolate = agent.get('sandbox_mode') == 'workspace-write' and (choice or {}).get('save_to_project', agent.get('_project_save')) is not False
+    worktree = await prepare_coding_workspace(task_id=task_id, thread_id=thread_id, turn_id=kwargs.get('turn_id'), project_id=project_id) if isolate and (project_id or (task_id and agent.get('role_template') == 'coding')) else None
+    token = use_workspace(coding_workspace_path(worktree)) if worktree else use_workspace(tenant_workspace())
+    coding_token = use_coding_workspace(worktree)
     try:
         checkpoint = load_agent_run(task_id=task_id, turn_id=kwargs.get("turn_id"))
         if checkpoint and not kwargs.get("resume_state"): kwargs["resume_state"] = checkpoint["state"]
         return await run_agent(agent, history, prompt, thread_id=thread_id, current_task_id=task_id, **kwargs)
     finally:
+        reset_coding_workspace(coding_token)
         if token is not None: reset_workspace(token)
 
 
@@ -139,11 +151,16 @@ async def execute_persistent_task(task):
         agent = resource_get("agents", payload.get("agent_id"))
         if not agent:
             raise ValueError("后台任务引用的智能体不存在")
+        if payload.get('project_id'):
+            if not get_project(payload['project_id']): raise ValueError('后台任务项目不存在')
+            agent = {**agent, '_project_id':payload['project_id'], '_project_save':True}
         subagent_run_id = payload.get("subagent_run_id")
         if subagent_run_id:
             with connect() as db:
                 db.execute("UPDATE subagent_runs SET status='running',updated_at=? WHERE id=?", (now(), subagent_run_id))
         try:
+            resume = load_agent_run(turn_id=payload.get('turn_id')) if task['kind'] == 'agent_resume' else None
+            if task['kind'] == 'agent_resume': agent = {**agent, '_recovering': True}
             result = await run_agent_isolated(
                 agent,
                 payload.get("history") or [],
@@ -151,10 +168,12 @@ async def execute_persistent_task(task):
                 task_id=task["id"], thread_id=payload.get("thread_id"),
                 turn_id=payload.get("turn_id"),
                 depth=int(payload.get("depth", 0)),
+                resume_state=resume['state'] if resume else None,
             )
             if subagent_run_id:
                 with connect() as db:
-                    db.execute("UPDATE subagent_runs SET status='completed',result=?,error=NULL,updated_at=? WHERE id=?", (json.dumps(result, ensure_ascii=False, default=str), now(), subagent_run_id))
+                    substatus = 'completed' if result.get('status') == 'completed' else 'waiting'
+                    db.execute("UPDATE subagent_runs SET status=?,result=?,error=NULL,updated_at=? WHERE id=?", (substatus, json.dumps(result, ensure_ascii=False, default=str), now(), subagent_run_id))
             if task["kind"] == "agent_resume" and payload.get("thread_id") and payload.get("turn_id") and result.get("status") == "completed":
                 with connect() as db:
                     exists = db.execute("SELECT 1 FROM messages WHERE thread_id=? AND turn_id=? AND role='assistant'", (payload["thread_id"], payload["turn_id"])).fetchone()
@@ -221,6 +240,8 @@ app = FastAPI(title="Codezzn", version="0.3.0", description="可部署的智能�
 chat_sessions.install(app, globals())
 from . import cli_auth
 app.include_router(cli_auth.router)
+from .coding_api import router as coding_router
+app.include_router(coding_router)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.mount("/assets", StaticFiles(directory=WEB), name="assets")
 LANDING_ASSETS = ROOT / "public" / "sites" / "browser-use-com-ef244017" / "web-agents-4de235c6"
@@ -1019,7 +1040,12 @@ def enqueue_agent_task(payload: dict = Body(...)):
     prompt = str(payload.get("prompt") or "").strip()
     if not prompt:
         raise HTTPException(400, "任务内容不能为空")
-    return enqueue_task("agent", payload.get("name") or prompt[:80], {"agent_id": agent["id"], "prompt": prompt}, payload.get("max_attempts", 3))
+    project_id = payload.get('project_id') or None
+    try:
+        if project_id and not get_project(project_id): raise ValueError('Project not found')
+    except ValueError as exc:
+        raise HTTPException(400, '请选择当前用户的有效项目') from exc
+    return enqueue_task("agent", payload.get("name") or prompt[:80], {"agent_id": agent["id"], "prompt": prompt, 'project_id': project_id, 'turn_id':new_id('turn')}, payload.get("max_attempts", 3))
 
 
 @app.get("/api/tasks")
@@ -1040,6 +1066,26 @@ async def stop_task(task_id: str):
     if not get_task(task_id):
         raise HTTPException(404, "任务不存在")
     return {"cancelled": await task_queue.cancel(task_id)}
+
+
+@app.post('/api/tasks/{task_id}/continue')
+def continue_task_budget(task_id: str):
+    task = get_task(task_id)
+    if not task: raise HTTPException(404, '任务不存在')
+    if task['status'] != 'waiting' or (task.get('result') or {}).get('status') != 'budget_exhausted':
+        raise HTTPException(409, '该任务不是等待后台执行预算；对话任务请在原问题/审批卡回答')
+    run = load_agent_run(task_id=task_id)
+    if not run: raise HTTPException(409, '可恢复运行状态不存在')
+    settings = resource_get('agents', run['agent_id'])
+    if not settings or settings.get('enabled') is False: raise HTTPException(409, '智能体已停用或删除')
+    state = {**run['state'], 'round':0, 'budget_paused':False, 'budget_resumptions': int(run['state'].get('budget_resumptions', 0))+1}
+    with connect() as connection:
+        changed = connection.execute("UPDATE tasks SET status='queued',attempts=0,result=NULL,available_at=?,updated_at=? WHERE id=? AND status='waiting'", (now(), now(), task_id)).rowcount
+        if not changed: raise HTTPException(409, '任务已由另一个请求继续')
+        connection.execute("UPDATE agent_runs SET state=?,status='waiting',updated_at=? WHERE id=?", (json.dumps(state, ensure_ascii=False), now(), run['id']))
+    # This endpoint runs in FastAPI's sync pool; the durable worker polls the
+    # committed queue. Do not call asyncio.Event.set from another thread.
+    return {'accepted':True, 'task_id':task_id, 'same_task':True}
 
 
 @app.get("/api/subagents")
@@ -1661,6 +1707,8 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
             db.execute("UPDATE threads SET status='running',updated_at=? WHERE id=?", (timestamp, thread_id))
         consumed = True
         state = json.loads(checkpoint["state"])
+        if state.get('task_id') and (get_task(state['task_id']) or {}).get('status') == 'cancelled':
+            raise HTTPException(409, '后台任务已取消，不能继续旧审批')
         # run_agent restores the paused model from this checkpoint while
         # retaining inherited Agent fallback policies.
         with connect() as db:
@@ -1676,11 +1724,13 @@ async def continue_approval(approval_id: str, decision: str, reason: str):
         result = await run_agent_isolated(
             agent, [], "", on_event=emit, streaming=False, thread_id=thread_id, turn_id=turn_id,
             resume_state=state,
+            **({'task_id': state['task_id']} if state.get('task_id') else {}),
             approval_decision={"tool_call_id": approval["tool_call_id"], "decision": decision, "reason": reason},
         )
-        if result["status"] == "waiting_for_approval":
+        finish_waiting_task(state.get('task_id'), result)
+        if result["status"] in {"waiting_for_approval", "waiting_for_input"}:
             with connect() as db:
-                db.execute("UPDATE threads SET status='waiting_for_approval',updated_at=? WHERE id=?", (now(), thread_id))
+                db.execute("UPDATE threads SET status=?,updated_at=? WHERE id=?", (result['status'], now(), thread_id))
             return {"approval": {**dict(approval), "status": decision, "resolution": reason, "arguments": json.loads(approval["arguments"])}, "turn_id": turn_id, **result}
         with connect() as db:
             db.execute(
@@ -1804,7 +1854,7 @@ async def stream_turn(request: Request, thread_id: str, payload: dict = Body(...
     async def produce():
         try:
             result = await run_agent_isolated(agent, [dict(item) for item in history], content, on_event=emit, streaming=True, thread_id=thread_id, turn_id=turn_id)
-            if result["status"] == "waiting_for_approval":
+            if result["status"] in {"waiting_for_approval", "waiting_for_input"}:
                 # run_agent has already persisted a resumable checkpoint and set
                 # the thread to waiting_for_approval. Do not turn the empty
                 # interim assistant content into a completed message, and do not
@@ -1914,7 +1964,7 @@ async def start_turn(thread_id: str, payload: dict = Body(...)):
         raise
     try:
         result = await run_agent_isolated(agent, [dict(item) for item in history], content, thread_id=thread_id, turn_id=turn_id)
-        if result["status"] == "waiting_for_approval":
+        if result["status"] in {"waiting_for_approval", "waiting_for_input"}:
             return {"turn_id": turn_id, **result}
         with connect() as db:
             db.execute("INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)", (new_id("msg"), thread_id, turn_id, "assistant", result["content"], json.dumps({"events": result["events"], "usage": result["usage"], "runtime": result["runtime"], "sources": result["sources"]}, ensure_ascii=False), now()))

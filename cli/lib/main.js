@@ -12,6 +12,33 @@ async function readStdin(input) {
   for await (const chunk of input) { content += chunk; if (content.length > 32000) throw new Error('Stdin prompt exceeds the 32000 character limit'); }
   return content;
 }
+async function engineeringCommand(command, value, client, api, output) {
+  if (!['plan', 'diff', 'context', 'review', 'rewind'].includes(command)) return false;
+  if (command === 'review') {
+    await client.send(`请调用 engineering_review 独立审查当前项目的真实变更，输出有路径、行号、证据和严重程度的问题，并明确未覆盖和模型失败。不要修改文件或声称测试已运行。${value ? `审查范围：${value}` : ''}`);
+  } else if (command === 'plan' && value) {
+    await client.send(`请使用 plan_manage 为以下目标创建工程计划并提出必要的质量检查，等待我批准计划后再执行：${value}`);
+  } else if (command === 'diff' || command === 'rewind') {
+    if (!value && command === 'rewind') throw new Error('Usage: /rewind CHECKPOINT_ID. Use /diff to list checkpoints.');
+    if (!value) {
+      const current = await api.request(client.route('/coding/state'));
+      output.diagnostic(JSON.stringify(current.checkpoints || [], null, 2));
+    } else {
+      if (!/^chk_[a-f0-9]{16}$/.test(value)) throw new Error('Invalid checkpoint ID; use /diff to list server checkpoints');
+      const preview = await api.request(client.route('/coding/inspect'), { method: 'POST', body: { name: 'task_diff', args: { checkpoint_id: value } } });
+      output.diagnostic(JSON.stringify(preview, null, 2));
+      if (command === 'rewind') {
+        const data = preview.result || preview;
+        if (!data.expected_hashes || typeof data.expected_hashes !== 'object') throw new Error('Server did not return preview hashes; no rewind was requested');
+        await client.send(`请回退任务快照。以下是服务器刚预览的完整参数，请调用 task_rewind，并等待我的明确工具审批；如果文件已变化则拒绝覆盖，不能强制回退。参数：${JSON.stringify({ checkpoint_id: value, expected_hashes: data.expected_hashes })}`);
+      }
+    }
+  } else {
+    const current = await api.request(client.route('/coding/state'));
+    output.diagnostic(JSON.stringify(command === 'context' ? current.context || {} : current.engineering?.plan || { status: 'none' }, null, 2));
+  }
+  return true;
+}
 async function main(argv = process.argv.slice(2), injected = {}) {
   const options = parse(argv), stdout = injected.stdout || process.stdout, stderr = injected.stderr || process.stderr, stdin = injected.stdin || process.stdin;
   if (options.help) { stdout.write(HELP); return 0; }
@@ -114,11 +141,12 @@ async function main(argv = process.argv.slice(2), injected = {}) {
         } else if (command === 'skills' || command === 'mcp') {
           const data = (await api.request(`/api/resources/${command === 'mcp' ? 'mcp_servers' : 'skills'}`)).data || [];
           output.diagnostic(data.map(item => `${item.id} · ${item.name || item.title || ''} · enabled=${item.enabled !== false}`).join('\n') || '(none configured)');
-        } else throw new Error(`Unknown command /${command}; use /help`);
+        } else if (await engineeringCommand(command, value, client, api, output)) { /* Existing server approvals apply. */ }
+        else throw new Error(`Unknown command /${command}; use /help`);
       } catch (error) { output.diagnostic(error.message); }
     }
     return questionInterrupted ? 130 : 0;
   } finally { rl?.close(); if (!injected.noSignals) process.off('SIGINT', onSignal); }
 }
 if (require.main === module) main().then(code => { process.exitCode = code; }).catch(error => { process.stderr.write(`${redact(error.message)}\n`); process.exitCode = 1; });
-module.exports = { main, readStdin };
+module.exports = { main, readStdin, engineeringCommand };

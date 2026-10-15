@@ -324,6 +324,10 @@ def test_workbench_files_panel_tree_preview_and_download():
                               ("workbench.js", "application/javascript"), ("workbench.css", "text/css"),
                               ("roboflow-theme.css", "text/css"), ("help-widget.js", "application/javascript"),
                               ("help-widget.css", "text/css"), ("codezzn-mark.svg", "image/svg+xml"))}}
+                if path.startswith('/assets/') and '..' not in path:
+                    candidate = web / path[len('/assets/'):]
+                    if candidate.is_file() and candidate.suffix in {'.js', '.css'}:
+                        static[path] = (candidate, 'application/javascript' if candidate.suffix == '.js' else 'text/css')
                 if path in static:
                     file, content_type = static[path]
                     await route.fulfill(path=str(file), content_type=content_type)
@@ -342,6 +346,8 @@ def test_workbench_files_panel_tree_preview_and_download():
                     payload = {"data": []}
                 elif path == "/api/threads":
                     payload = {"data": [{"id": "thr_demo", "name": "排序任务", "status": "idle"}]}
+                elif path in {'/api/threads/thr_demo/queue', '/api/threads/thr_demo/interactions', '/api/threads/thr_demo/events'} and route.request.method == 'GET':
+                    payload = {'data': []}
                 elif path == "/api/threads/thr_demo" and route.request.method == "PATCH":
                     thread["active_project_id"] = json.loads(route.request.post_data)["active_project_id"]
                     payload = thread
@@ -391,6 +397,7 @@ def test_workbench_files_panel_tree_preview_and_download():
 
             await page.route("**/*", mock)
             await page.goto("http://codezzn.test/workbench.html#chat")
+            await page.locator('#filesPanelToggle').click()
             await page.locator(".chat-file-row").first.wait_for()
             assert await page.locator(".chat-file-row").count() == 2
             assert await page.locator(".chat-files-panel").is_visible()
@@ -422,42 +429,29 @@ def test_workbench_files_panel_tree_preview_and_download():
             assert await page.locator(".chat-files-panel").is_hidden()
             thread["active_project_id"] = other_project["id"]
             await page.reload()
-            assert await page.locator(".chat-files-panel").is_hidden()
-            assert await page.locator("#filesPanelToggle").is_hidden()
+            await page.locator('.chat-files-panel').wait_for(state='hidden')
+            await page.locator('#filesPanelToggle').wait_for(state='visible')
+            await page.wait_for_function("document.querySelector('#filesPanelToggle small')?.textContent === '0'")
             await page.get_by_role("button", name="在 Files 中查看项目 Sorting Project").click()
             await page.locator(".chat-file-row").first.wait_for()
             assert await page.locator(".chat-file-row").count() == 2
             legacy_approvals.append({"id": "approval_old", "tool_name": "write_file", "arguments": {"path": "bubble_sort.py"}, "resumable": False})
             await page.reload()
+            await page.get_by_role('button', name='重新填写任务').wait_for()
             assert await page.get_by_role("button", name="允许并继续").count() == 0
             await page.get_by_role("button", name="重新填写任务").click()
             await page.wait_for_function("document.querySelector('#chatInput')?.value === '帮我写冒泡排序文件'")
             thread["messages"] = []
             thread["active_project_id"] = None
             await page.reload()
-            assert await page.locator("#filesPanelToggle").is_hidden()
-            assert await page.locator(".chat-files-panel").is_hidden()
-            await page.locator("#chatInput").fill("切换到Sorting Project项目")
-            await page.locator("#sendBtn").click()
-            assert await page.get_by_text("切换到Sorting Project项目").is_visible()
-            assert await page.locator(".thinking-line").is_visible()
-            await page.get_by_text("已切换到项目「Sorting Project」。").wait_for()
-            assert "Sorting Project" in await page.locator("#projectChip").inner_text()
-            assert await page.locator("#filesPanelToggle").is_hidden()
-            assert len(switch_requests) == 1
-            await page.locator("#chatInput").fill("帮我切换到Other Project项目，并写一份冒泡排序的python文件")
-            await page.locator("#sendBtn").click()
-            await page.get_by_role("region", name="项目与保存确认").wait_for()
-            assert "Other Project" in await page.get_by_role("region", name="项目与保存确认").inner_text()
-            assert len(switch_requests) == 1
-            await page.get_by_role("button", name="取消这次任务").click()
-            await page.wait_for_function("document.querySelector('#projectChip')?.textContent.includes('Sorting Project')")
-            await page.locator("#chatInput").fill("帮我切换到Missing Project项目，并写一份冒泡排序的python文件")
-            await page.locator("#sendBtn").click()
-            await page.get_by_role("region", name="项目与保存确认").wait_for()
-            assert "找不到“Missing Project”" in await page.get_by_role("region", name="项目与保存确认").inner_text()
-            assert "Sorting Project" in await page.locator("#projectChip").inner_text()
-            assert len(switch_requests) == 1
+            await page.locator('#chatInput').wait_for()
+            await page.locator('#filesPanelToggle').wait_for(state='visible')
+            await page.wait_for_function("document.querySelector('#filesPanelToggle small')?.textContent === '0'")
+            await page.locator('.chat-files-panel').wait_for(state='hidden')
+            # Project intent now belongs to the durable server queue, not the
+            # removed synchronous browser intent/project-switch endpoints.
+            # Compound switch/save behavior is exercised in conversation API tests.
+            assert switch_requests == []
         finally:
             await manager.close()
 

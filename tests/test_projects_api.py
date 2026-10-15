@@ -52,7 +52,7 @@ def test_project_turn_artifact_and_user_isolation(tmp_path, monkeypatch):
         root = project_root(project_id)
         root.mkdir(parents=True, exist_ok=True)
         file = root / "quicksort.py"
-        file.write_text("print('sort')\n", encoding="utf-8")
+        file.write_text("print('sort')\n", encoding="utf-8", newline='')
         record_artifact(project_id, kwargs["thread_id"], kwargs["turn_id"], file, "code")
         return {"status": "completed", "content": "已保存", "events": [], "usage": {}, "runtime": {}, "sources": []}
 
@@ -208,7 +208,12 @@ def test_project_choice_requires_existing_project_and_safe_paths(tmp_path, monke
         with pytest.raises(ValueError):
             project_root("../../escape")
         linked = root / "linked.py"
-        linked.symlink_to(outside)
+        try:
+            linked.symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, 'winerror', None) == 1314:
+                pytest.skip('Windows symlink privilege unavailable; non-symlink boundaries verified above')
+            raise
         with pytest.raises(ValueError):
             record_artifact(project_id, thread_id, "turn_fake", linked, "code")
         linked.unlink()

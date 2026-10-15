@@ -70,12 +70,14 @@ class BrowserManager:
     async def start(self):
         if self.browser:
             return
+        channel = os.getenv("CODEZZN_BROWSER_CHANNEL", "").strip() or None
+        if channel and channel not in {"chromium", "chrome", "chrome-beta", "chrome-dev", "chrome-canary", "msedge", "msedge-beta", "msedge-dev", "msedge-canary"}:
+            raise ValueError("Unsupported administrator-configured browser channel")
         from playwright.async_api import async_playwright
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+        options = {"headless": True, "args": ["--no-sandbox", "--disable-dev-shm-usage"]}
+        if channel: options["channel"] = channel
+        self.browser = await self.playwright.chromium.launch(**options)
 
     async def close(self):
         if self.browser:
@@ -113,6 +115,18 @@ class BrowserManager:
         self.contexts[session] = (context, page)
         return tab_id
 
+    def _prune_browser_ui(self, session):
+        # Installed Edge/Chrome may open an internal downloads page even in a
+        # fresh isolated context. Browser chrome is not a user website/tool tab.
+        tabs = self.tabs.get(session, {})
+        for tab_id, page in list(tabs.items()):
+            if page.is_closed() or page.url.startswith(('edge://', 'chrome://', 'chrome-extension://', 'devtools://')):
+                tabs.pop(tab_id, None)
+        if tabs and session in self.contexts:
+            context, active = self.contexts[session]
+            if active not in tabs.values():
+                self.contexts[session] = (context, next(reversed(tabs.values())))
+
     async def page(self, session="default"):
         await self.start()
         session = self._tenant_session(session)
@@ -132,6 +146,11 @@ class BrowserManager:
                         return
                     self._register_page(session, opened_page)
                 context.on("page", track_popup)
+            self._prune_browser_ui(session)
+            if not self.tabs.get(session):
+                context = self.contexts[session][0]
+                page = await context.new_page()
+                self._register_page(session, page)
             self.last_activity[session] = time.monotonic()
         return self.contexts[session][1]
 

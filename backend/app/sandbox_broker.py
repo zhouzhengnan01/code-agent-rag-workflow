@@ -4,6 +4,7 @@ Only this process sees the Docker socket. Requests cannot select mounts, images,
 users, network or resource limits. One command = one disposable Linux container.
 """
 import contextlib
+import base64
 import hmac
 import http.client
 import json
@@ -12,12 +13,14 @@ import os
 from pathlib import Path
 import re
 import signal
+import shlex
 import socket
 import sqlite3
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, urlencode
+import uuid
 
 ACTIVE = {"queued", "creating", "running"}
 LABEL = "io.codezzn.sandbox.instance"
@@ -71,6 +74,7 @@ class Config:
         self.memory = int(os.getenv("CODEZZN_SANDBOX_MEMORY_MB", "512")) * 1024 * 1024
         self.pids = int(os.getenv("CODEZZN_SANDBOX_PIDS", "64"))
         self.timeout = int(os.getenv("CODEZZN_SANDBOX_TIMEOUT", "60"))
+        self.max_timeout = int(os.getenv("CODEZZN_SANDBOX_MAX_TIMEOUT", "3600"))
         self.output_limit = 20000
         self.max_active = 4
         self.allow_git_network = os.getenv("CODEZZN_SANDBOX_GIT_NETWORK", "false").lower() == "true"
@@ -78,6 +82,7 @@ class Config:
             raise ValueError("CPUs must be between 0.1 and 8")
         if not 64 * 1024 * 1024 <= self.memory <= 8 * 1024**3 or not 8 <= self.pids <= 512 or not 1 <= self.timeout <= 600:
             raise ValueError("Invalid sandbox resource bounds")
+        if not self.timeout <= self.max_timeout <= 86400: raise ValueError("Invalid sandbox maximum timeout")
         self.state = os.getenv("CODEZZN_SANDBOX_STATE", "/state/tasks.db")
 
 
@@ -123,6 +128,7 @@ class Broker:
         self.stop = threading.Event()
         self.running = {}
         self.recovery_error = None
+        self.lsp_documents = {}
         Path(config.state).parent.mkdir(parents=True, exist_ok=True)
         with self.db() as db:
             db.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, name TEXT NOT NULL, container_id TEXT, status TEXT NOT NULL, mode TEXT NOT NULL, created REAL NOT NULL, deadline REAL NOT NULL, exit_code INTEGER, output TEXT DEFAULT '', error TEXT DEFAULT '', cleanup_pending INTEGER DEFAULT 1)")
@@ -155,6 +161,78 @@ class Broker:
     def tasks(self):
         with self.db() as db:
             return [dict(row) for row in db.execute("SELECT * FROM tasks ORDER BY created DESC LIMIT 100")]
+
+    def lsp(self, payload):
+        """Administrator-mapped language servers run inside the same hardened Docker policy."""
+        from .lsp_sandbox_bridge import BRIDGE
+        if set(payload) - {"tenant", "server_id", "workspace_uri", "workspace_cwd", "method", "params"}: raise ValueError("Unknown LSP fields")
+        servers = json.loads(os.getenv("CODEZZN_LSP_SERVERS_JSON") or "{}")
+        argv = servers.get(str(payload.get("server_id", "")))
+        if not isinstance(argv, list) or not argv or any(not isinstance(arg, str) or not arg or "\0" in arg for arg in argv): raise ValueError("LSP server is not administrator-configured")
+        tenant, cwd = payload.get("tenant"), str(payload.get("workspace_cwd") or ".").replace("\\", "/")
+        if tenant is not None and not re.fullmatch(r"usr_[0-9a-f]{16}", str(tenant)): raise ValueError("Invalid LSP tenant")
+        if cwd != "." and (cwd.startswith("/") or ":" in cwd or any(part in ("", ".", "..") for part in cwd.split("/"))): raise ValueError("Invalid LSP cwd")
+        origin = str(payload.get("workspace_uri", "")).rstrip("/")
+        if not origin.startswith("file:///") or "?" in origin or "#" in origin: raise ValueError("Invalid workspace URI")
+        target = "file:///workspace" + ("/" + quote(cwd, safe="/") if cwd != "." else "")
+        def remap(value, source, destination):
+            if isinstance(value, dict):
+                result = {}
+                for key, item in value.items():
+                    if key == "uri" or key.endswith("Uri"): result[key] = uri(item, source, destination)
+                    elif key == "changes" and isinstance(item, dict): result[key] = {uri(k, source, destination): remap(v, source, destination) for k, v in item.items()}
+                    else: result[key] = remap(item, source, destination)
+                return result
+            if isinstance(value, list): return [remap(item, source, destination) for item in value]
+            return value
+        def uri(value, source, destination):
+            from urllib.parse import unquote
+            if not isinstance(value, str) or not (value == source or value.startswith(source + "/")): raise ValueError("LSP URI escapes requested workspace")
+            suffix = value[len(source):]
+            if any(part == ".." for part in unquote(suffix).replace("\\", "/").split("/")): raise ValueError("LSP URI traversal")
+            return destination + suffix
+        method = str(payload.get("method", ""))
+        supported = {"textDocument/didOpen", "textDocument/didChange", "textDocument/didClose", "textDocument/diagnostic", "textDocument/hover", "textDocument/definition", "textDocument/references", "textDocument/documentSymbol", "textDocument/rename", "textDocument/prepareRename", "workspace/symbol"}
+        if method not in supported: raise ValueError("Unsupported LSP method")
+        params = remap(payload.get("params") or {}, origin, target)
+        key = (tenant, origin, str(payload["server_id"]))
+        with self.lock:
+            if key not in self.lsp_documents and len(self.lsp_documents) >= 100: raise ValueError("LSP workspace cache limit reached")
+            documents = self.lsp_documents.setdefault(key, {})
+            document = params.get("textDocument") or {}
+            if method in ("textDocument/didOpen", "textDocument/didChange", "textDocument/didClose"):
+                doc_uri = document.get("uri")
+                if not doc_uri: raise ValueError("Document URI required")
+                if method == "textDocument/didClose": documents.pop(doc_uri, None)
+                else:
+                    if not isinstance(document.get("version"), int): raise ValueError("Document version required")
+                    if method == "textDocument/didChange":
+                        previous = documents.get(doc_uri)
+                        if not previous or document["version"] <= previous["version"]: raise ValueError("Document must be opened and version must increase")
+                        changes = params.get("contentChanges") or []
+                        if not changes or any("range" in item for item in changes): raise ValueError("Sandbox LSP requires full-text contentChanges")
+                        document = {**previous, "version": document["version"], "text": changes[-1]["text"]}
+                    if not isinstance(document.get("text"), str): raise ValueError("Document text required")
+                    candidate = {**documents, doc_uri: document}
+                    if len(candidate) > 32 or len(json.dumps(candidate).encode()) > 12000: raise ValueError("LSP document cache exceeds 12KB; close unused documents or use server filesystem")
+                    documents[doc_uri] = document
+                return {"notified": True, "transport": "sandbox", "cache_replayed_on_request": True}
+            snapshot = list(documents.values())
+        packet = {"argv": argv, "root_uri": target, "documents": snapshot, "method": method, "params": params}
+        raw = json.dumps(packet).encode()
+        if len(raw) > 16000: raise ValueError("LSP request exceeds isolated command size budget")
+        command = shlex.join(["python", "-c", BRIDGE, base64.b64encode(raw).decode()])
+        task_id = uuid.uuid4().hex
+        self.submit({"id": task_id, "command": command, "mode": "read-only", "cwd": cwd, "tenant": tenant, "timeout_seconds": min(25, getattr(self.config, "max_timeout", 3600))})
+        until = time.monotonic() + 28
+        while time.monotonic() < until:
+            row = self.get(task_id)
+            if row["status"] not in ACTIVE:
+                if row["status"] != "completed" or row["exit_code"] != 0 or row["cleanup_pending"]: raise RuntimeError("Isolated LSP request failed: " + row.get("error", row["status"]))
+                return remap(json.loads(row["output"]), target, origin)
+            time.sleep(0.05)
+        self.cancel(task_id)
+        raise RuntimeError("Isolated LSP request timed out")
 
     def workspace(self, tenant=None):
         source = self.docker.request("GET", "/containers/" + quote(self.config.workspace_container, safe="") + "/json")
@@ -193,11 +271,16 @@ class Broker:
     def submit(self, payload):
         if self.stop.is_set():
             raise RuntimeError("Broker is stopping")
-        if set(payload) - {"id", "command", "mode", "cwd", "network", "tenant"}:
+        if set(payload) - {"id", "command", "mode", "cwd", "network", "tenant", "timeout_seconds"}:
             raise ValueError("Unknown fields; container policy is administrator-controlled")
         task_id, command, mode = payload.get("id"), payload.get("command"), payload.get("mode", "read-only")
         cwd = str(payload.get("cwd") or ".").replace("\\", "/")
         tenant = payload.get("tenant")
+        timeout = payload.get("timeout_seconds", self.config.timeout)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 1 <= timeout <= getattr(self.config, "max_timeout", 3600):
+            # Compatibility for tests/admin internal fractional deadlines; callers cannot send fractions under one second.
+            if "timeout_seconds" in payload: raise ValueError("Task timeout exceeds administrator policy")
+            timeout = self.config.timeout
         if tenant is not None and (not isinstance(tenant, str) or not re.fullmatch(r"usr_[0-9a-f]{16}", tenant)):
             raise ValueError("Invalid sandbox tenant")
         network = bool(payload.get("network", False))
@@ -225,7 +308,7 @@ class Broker:
             name = "codezzn-" + self.config.instance + "-" + task_id
             with self.db() as db:
                 db.execute("INSERT INTO tasks(id,name,status,mode,created,deadline) VALUES(?,?,?,?,?,?)",
-                           (task_id, name, "queued", mode, now, now + self.config.timeout))
+                           (task_id, name, "queued", mode, now, now + timeout))
             cancel = threading.Event()
             thread = threading.Thread(target=self.execute, args=(task_id, command, cancel, cwd, network, tenant), daemon=True)
             self.running[task_id] = (thread, cancel)
@@ -261,6 +344,7 @@ class Broker:
                 return
             self.docker.request("POST", "/containers/" + row["name"] + "/start")
             self.update(task_id, status="running")
+            last_logs = 0
             while True:
                 if cancel.is_set() or self.stop.is_set():
                     status = "cancelled"
@@ -269,11 +353,16 @@ class Broker:
                     status = "timed_out"
                     break
                 info = self.docker.request("GET", "/containers/" + row["name"] + "/json")
+                if time.monotonic() - last_logs >= 1:
+                    raw = self.docker.request("GET", "/containers/" + row["name"] + "/logs?stdout=true&stderr=true&tail=all", raw=True, limit=131072)
+                    output = decode_logs(raw, self.config.output_limit)
+                    self.update(task_id, output=output)
+                    last_logs = time.monotonic()
                 if not info["State"]["Running"]:
                     exit_code = info["State"]["ExitCode"]
                     status = "failed" if info["State"].get("OOMKilled") else ("timed_out" if exit_code == 124 else "completed")
                     error = "Memory limit exceeded" if info["State"].get("OOMKilled") else ""
-                    raw = self.docker.request("GET", "/containers/" + row["name"] + "/logs?stdout=true&stderr=true&tail=1000", raw=True, limit=131072)
+                    raw = self.docker.request("GET", "/containers/" + row["name"] + "/logs?stdout=true&stderr=true&tail=all", raw=True, limit=131072)
                     output = decode_logs(raw, self.config.output_limit)
                     break
                 cancel.wait(0.2)
@@ -373,6 +462,12 @@ def handler_for(broker):
                     if not isinstance(payload, dict):
                         raise ValueError("Object required")
                     return self.respond(202, broker.submit(payload))
+                if self.command == "POST" and self.path == "/lsp":
+                    size = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < size <= 65536: return self.respond(413, {"error": "Invalid request size"})
+                    payload = json.loads(self.rfile.read(size))
+                    if not isinstance(payload, dict): raise ValueError("Object required")
+                    return self.respond(200, broker.lsp(payload))
                 match = re.fullmatch(r"/tasks/([0-9a-f]{32})", self.path)
                 if match and self.command in ("GET", "DELETE"):
                     return self.respond(200, broker.get(match[1]) if self.command == "GET" else broker.cancel(match[1]))

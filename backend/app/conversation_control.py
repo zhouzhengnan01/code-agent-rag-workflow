@@ -37,6 +37,7 @@ def public_message(row):
     return {key: item.get(key) for key in ('id','thread_id','agent_id','submission_id','content','mode','status','run_status','turn_id','error','created_at','updated_at')} | {
         'attachment_ids': payload.get('attachment_ids', []),
         'retry_of': payload.get('retry_of'), 'retried_by': payload.get('retried_by'),
+        'dismissed_at': payload.get('dismissed_at'),
     }
 
 def get_message(thread_id, message_id):
@@ -53,6 +54,25 @@ def messages(thread_id, submission_id=None):
         else:
             rows = db.execute('SELECT * FROM chat_queue_messages WHERE thread_id=? ORDER BY created_at DESC,rowid DESC LIMIT 100', (thread_id,)).fetchall()
     return [public_message(row) for row in reversed(rows)]
+
+def dismiss_failed_message(thread_id, message_id):
+    """Hide a failed banner without deleting its audit record or stopping a turn."""
+    with connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT * FROM chat_queue_messages WHERE thread_id=? AND id=?', (thread_id, message_id)).fetchone()
+        if not row:
+            raise HTTPException(404, '会话消息不存在')
+        if row['run_status'] != 'failed' or row['status'] not in {'consumed', 'failed'}:
+            raise HTTPException(409, '只能删除已执行失败的提示；运行中、等待处理或成功的任务不能隐藏')
+        item = decode(row)
+        payload = item.get('payload') or {}
+        if payload.get('dismissed_at') is not None:
+            return item, False
+        timestamp = now()
+        payload['dismissed_at'] = timestamp
+        db.execute('UPDATE chat_queue_messages SET payload=?,updated_at=? WHERE thread_id=? AND id=?', (encode(payload), timestamp, thread_id, message_id))
+        saved = decode(db.execute('SELECT * FROM chat_queue_messages WHERE thread_id=? AND id=?', (thread_id, message_id)).fetchone())
+    return saved, True
 
 def enqueue(thread_id, agent_id, content, payload, submission_id, interrupt=False, connection=None):
     submission(submission_id)
@@ -190,9 +210,30 @@ class ConversationRuntime:
             try:
                 if tenant: ensure_tenant(tenant)
                 with connect() as db:
-                    stranded=db.execute("SELECT id,thread_id,turn_id FROM chat_queue_messages WHERE run_status='running'").fetchall()
+                    stranded=db.execute("SELECT id,thread_id,turn_id,payload FROM chat_queue_messages WHERE run_status='running'").fetchall()
                     for row in stranded:
+                        from .agent import SIDE_EFFECT_TOOLS
+                        saved=db.execute("SELECT state FROM agent_runs WHERE thread_id=? AND turn_id=? AND status IN ('running','waiting','recovering') ORDER BY updated_at DESC LIMIT 1",(row['thread_id'],row['turn_id'])).fetchone()
+                        try: saved_state=json.loads(saved['state']) if saved else {}
+                        except (ValueError,TypeError): saved_state={}
+                        valid=isinstance(saved_state,dict) and (isinstance(saved_state.get('messages'),list) or (saved_state.get('mode')=='responses' and ('next_input' in saved_state or 'previous_response_id' in saved_state)))
+                        uncertain=db.execute("SELECT tool_name FROM tool_executions WHERE turn_id=? AND status IN ('running','failed')",(row['turn_id'],)).fetchall()
+                        ambiguous=any(tool['tool_name'] in SIDE_EFFECT_TOOLS for tool in uncertain)
+                        if valid and not ambiguous:
+                            waiting=db.execute("SELECT kind FROM chat_interactions WHERE thread_id=? AND turn_id=? AND status='pending' AND kind IN ('question','tool_approval','project_confirmation') ORDER BY created_at DESC LIMIT 1",(row['thread_id'],row['turn_id'])).fetchone()
+                            if waiting:
+                                run_status={'question':'waiting_for_input','tool_approval':'waiting_for_approval','project_confirmation':'waiting_for_project'}[waiting['kind']]
+                                db.execute("UPDATE chat_queue_messages SET status='consumed',run_status=?,runner_id=NULL,error=NULL,updated_at=? WHERE id=?",(run_status,now(),row['id']))
+                                db.execute("UPDATE threads SET status=?,updated_at=? WHERE id=?",(run_status,now(),row['thread_id']))
+                            else:
+                                recovered_payload=json.loads(row['payload'] or '{}')
+                                recovered_payload['_recovering']=True
+                                db.execute("UPDATE chat_queue_messages SET status='pending',run_status='pending',payload=?,runner_id=NULL,error=NULL,updated_at=? WHERE id=?",(encode(recovered_payload),now(),row['id']))
+                                db.execute("UPDATE agent_runs SET status='recovering',updated_at=? WHERE thread_id=? AND turn_id=? AND status IN ('running','waiting')",(now(),row['thread_id'],row['turn_id']))
+                                db.execute("UPDATE threads SET status='idle',updated_at=? WHERE id=?",(now(),row['thread_id']))
+                            continue
                         error='服务重启中断了执行；已生成产物仍可查看，请提交新的继续任务'
+                        if ambiguous: error='执行中断时存在结果不确定的副作用工具；为避免重复写入/提交，不自动重放，请先检查外部状态后再继续'
                         db.execute("UPDATE chat_queue_messages SET status='consumed',run_status='failed',runner_id=NULL,error=?,updated_at=? WHERE id=?",(error,now(),row['id']))
                         db.execute("UPDATE agent_runs SET status='failed',error=?,updated_at=? WHERE turn_id=? AND status IN ('running','recovering')",(error,now(),row['turn_id']))
                         db.execute("UPDATE threads SET status='error',updated_at=? WHERE id=? AND status='running'",(now(),row['thread_id']))
@@ -227,6 +268,10 @@ class ConversationRuntime:
         try:
             await (self.resume(item) if answer else self.execute(item))
         except asyncio.CancelledError:
+            if self.stopping:
+                # Keep running records for restart recovery. User cancellation
+                # below remains terminal and explicitly revokes pending actions.
+                raise
             if answer:
                 finish_interaction(item['id'],'cancelled','用户已停止后续执行')
                 if item.get('queue_message_id'): finish_message(item['queue_message_id'],'cancelled')
@@ -242,7 +287,6 @@ class ConversationRuntime:
                     db.execute("UPDATE turn_checkpoints SET status='cancelled',updated_at=? WHERE turn_id=? AND status IN ('waiting','resuming')",(now(),turn_id))
                     db.execute("UPDATE approvals SET status='cancelled',resolution='执行已停止',resolved_at=? WHERE turn_id=? AND status='pending'",(now(),turn_id))
                     db.execute("UPDATE chat_interactions SET status='cancelled',updated_at=? WHERE turn_id=? AND status IN ('pending','submitting')",(now(),turn_id))
-            if self.stopping: raise
         except Exception as error:
             if answer:
                 latest=get_interaction(thread_id,item['id'])

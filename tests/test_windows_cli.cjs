@@ -12,6 +12,7 @@ const { Client } = require('../cli/lib/client');
 const { Output, redact, safeInteraction } = require('../cli/lib/output');
 const { parse } = require('../cli/lib/args');
 const { login, openBrowser } = require('../cli/lib/auth');
+const { engineeringCommand } = require('../cli/lib/main');
 const capture = () => ({ text: '', write(value) { this.text += value; } });
 async function fixture(t, options = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codezzn-cli-test-'));
@@ -222,4 +223,31 @@ test('real bin keeps JSON stdout parseable on an early authentication failure', 
   const f = await fixture(t);
   const result = await childCLI(['--server', f.origin, '-p', '--output-format', 'json', 'hello'], { CODEZZN_CONFIG_DIR: f.directory });
   assert.equal(result.code, 1); assert.equal(JSON.parse(result.stdout).status, 'failed');
+});
+
+test('engineering slash commands use read-only inspection and never silently approve', async () => {
+  const requests = [], sent = [], output = capture();
+  const client = { route: suffix => '/api/threads/t' + suffix, send: async prompt => sent.push(prompt) };
+  const checkpoint = 'chk_' + 'a'.repeat(16);
+  const api = { request: async (route, options) => {
+    requests.push({ route, options });
+    return options ? { checkpoint_id: checkpoint, changes: [], expected_hashes: { 'x.py': null } } : { engineering: { plan: { status: 'proposed' } }, context: { budget: 123 }, checkpoints: [{ id: checkpoint }] };
+  } };
+  const diagnostics = { diagnostic: text => output.write(text) };
+  assert.equal(await engineeringCommand('context', '', client, api, diagnostics), true);
+  assert.ok(output.text.includes('123'));
+  await engineeringCommand('plan', '', client, api, diagnostics);
+  assert.ok(output.text.includes('proposed'));
+  assert.equal(sent.length, 0);
+  await engineeringCommand('diff', checkpoint, client, api, diagnostics);
+  assert.equal(requests.at(-1).options.body.name, 'task_diff');
+  await engineeringCommand('rewind', checkpoint, client, api, diagnostics);
+  assert.ok(sent.at(-1).includes('task_rewind'));
+  assert.ok(sent.at(-1).includes('明确工具审批'));
+  assert.ok(sent.at(-1).includes('expected_hashes'));
+  await engineeringCommand('review', '', client, api, diagnostics);
+  assert.ok(sent.at(-1).includes('engineering_review'));
+  await assert.rejects(engineeringCommand('rewind', '', client, api, diagnostics), /Usage/);
+  await assert.rejects(engineeringCommand('diff', '../../secret', client, api, diagnostics), /Invalid/);
+  assert.equal(await engineeringCommand('unknown', '', client, api, diagnostics), false);
 });

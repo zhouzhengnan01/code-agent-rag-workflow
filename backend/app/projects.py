@@ -56,8 +56,9 @@ def create_project(name: str, description: str = ""):
     root.mkdir(parents=True, exist_ok=False)
     # The isolated executor is an unprivileged 10001:10001 process. Grant only
     # that group access to this tenant's project directory.
-    os.chown(root, -1, 10001)
-    os.chmod(root, 0o770)
+    if os.name != "nt":
+        os.chown(root, -1, 10001)
+        os.chmod(root, 0o770)
     with connect() as db:
         db.execute(
             "INSERT INTO projects(id,name,description,created_at,updated_at) VALUES(?,?,?,?,?)",
@@ -100,7 +101,15 @@ def list_artifacts(project_id: str):
             "FROM project_artifacts pa WHERE pa.project_id=? ORDER BY pa.created_at DESC,pa.id DESC",
             (project_id,),
         ).fetchall()
-    return [dict(row) for row in rows]
+    live = []
+    for row in rows:
+        try:
+            if artifact_path(project_id, row['path']).is_file(): live.append(dict(row))
+        except (ValueError, OSError):
+            continue
+    # Keep DB/version history for recovery, but do not expose deleted files as
+    # current Files after an approved rewind or command removed them.
+    return live
 
 
 def get_artifact(project_id: str, artifact_id: str):

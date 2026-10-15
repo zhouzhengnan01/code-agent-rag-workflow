@@ -50,7 +50,7 @@ test('an unconfirmed retry leaves the original failure visible', () => {
 function workbench(responder = () => ({})) {
   const calls = [];
   const nodes = new Map();
-  for (const selector of ['#chatInput', '#chatAgent', '#chatModel', '#sendBtn', '#attachBtn', '#chatAttachments', '#chatComposerError', '#toastRoot', '#chatHistorySubmenu', '#chatQueue', '#chatQueueHint', '#stopBtn', '#interruptBtn']) {
+  for (const selector of ['#nav', '#chatInput', '#chatAgent', '#chatModel', '#sendBtn', '#attachBtn', '#chatAttachments', '#chatComposerError', '#toastRoot', '#chatHistorySubmenu', '#chatQueue', '#chatQueueHint', '#stopBtn', '#interruptBtn', '#chatInteractionDock']) {
     nodes.set(selector, { value: '', innerHTML: '', textContent: '', disabled: false, hidden: false, style: {}, setAttribute(name,value) { this[name] = value; } });
   }
   const context = vm.createContext({
@@ -70,6 +70,43 @@ function workbench(responder = () => ({})) {
   nodes.get('#chatAgent').value = 'a';
   return { context, nodes, calls, run: code => vm.runInContext(code, context) };
 }
+
+test('sidebar names and history chevron share a single accessible button', () => {
+  const app = workbench();
+  app.run('nav();');
+  const html = app.nodes.get('#nav').innerHTML;
+  assert.match(html, /aria-label="Agent"/);
+  assert.doesNotMatch(html, /概览|对话调试|nav-chat-toggle|nav-chat-row/);
+  const button = html.match(/<button\b[^>]*id="chatHistoryToggle"[\s\S]*?<\/button>/)?.[0];
+  assert.ok(button);
+  assert.match(button, /onclick="openChatHistory\(\)"/);
+  assert.match(button, /aria-controls="chatHistorySubmenu" aria-expanded="true"/);
+  assert.match(button, /<span class="nav-label">历史<\/span>/);
+  assert.match(button, /nav-history-chevron/);
+  assert.equal((button.match(/<button\b/g) || []).length, 1);
+});
+
+test('unified history button collapses and reopens without navigating away from chat', () => {
+  const app = workbench();
+  app.context.openChatHistory();
+  assert.equal(app.run('state.chatHistoryOpen'), false);
+  assert.match(app.nodes.get('#nav').innerHTML, /aria-expanded="false"/);
+  assert.match(app.nodes.get('#nav').innerHTML, /id="chatHistorySubmenu" class="chat-history-submenu" hidden/);
+  app.context.openChatHistory();
+  assert.equal(app.run('state.chatHistoryOpen'), true);
+  assert.equal(app.run('state.page'), 'chat');
+});
+
+test('history button opens chat from another page while honoring navigation guards', () => {
+  const app = workbench();
+  app.run("state.page='dashboard';state.chatHistoryOpen=false;go=()=>{state.page='chat';return 'navigated';};");
+  assert.equal(app.context.openChatHistory(), 'navigated');
+  assert.equal(app.run('state.chatHistoryOpen'), true);
+  app.run("state.page='dashboard';state.chatHistoryOpen=false;go=()=> 'blocked';");
+  assert.equal(app.context.openChatHistory(), 'blocked');
+  assert.equal(app.run('state.page'), 'dashboard');
+  assert.equal(app.run('state.chatHistoryOpen'), false);
+});
 
 test('model choice updates this thread while leaving the Agent default untouched', async () => {
   const choice = { provider_id: 'p', model: 'chosen' };
@@ -394,4 +431,57 @@ test('restored conversation places persistent questions between the correspondin
   ], [{ id: 'question', kind: 'question', status: 'answered', question: '确认方案', created_at: '2026-10-12T01:00:01Z', response: { answer: '同意' } }]);
   assert.ok(html.indexOf('chatMessage_before') < html.indexOf('interaction_question'));
   assert.ok(html.indexOf('interaction_question') < html.indexOf('chatMessage_after'));
+});
+
+test('pending questions are docked above the composer, never duplicated in message history', () => {
+  const app = workbench();
+  const pending = { id: 'pending', kind: 'question', status: 'pending', question: '审批计划？', payload: { options: [{ id: 'yes', label: '批准', description: '仍需审批写入' }] } };
+  assert.doesNotMatch(app.context.persistentChatTimelineHtml([], [pending]), /interaction_pending/);
+  const html = app.context.chatInteractionHtml(pending);
+  assert.match(html, /interaction-dock-item/);
+  assert.match(html, /interaction-number[^>]*[^<]*>1</);
+  assert.match(html, /用自己的话回答/);
+  assert.match(html, /拒绝并关闭确认/);
+  assert.doesNotMatch(html, /<textarea/);
+  const template = fs.readFileSync(path.join(__dirname, '../web/workbench.js'), 'utf8');
+  assert.ok(template.indexOf('id="chatInteractionDock"') < template.indexOf('<footer class="prompt-dock">'));
+});
+
+test('collapse is presentation only and never answers or cancels the interaction', () => {
+  const app = workbench();
+  const body = { hidden: false };
+  const icon = { dataset: { collapseQuestion: 'icon' }, setAttribute(name, value) { this[name] = value; } };
+  app.nodes.set('#interactionBody_question', body);
+  app.nodes.set('#interaction_question', { querySelectorAll: () => [icon] });
+  app.context.toggleChatInteraction({ dataset: { interactionId: 'question' } });
+  assert.equal(body.hidden, true);
+  assert.equal(icon['aria-expanded'], 'false');
+  assert.equal(app.calls.length, 0);
+  app.context.toggleChatInteraction({ dataset: { interactionId: 'question' } });
+  assert.equal(body.hidden, false);
+  assert.equal(icon.textContent, '−');
+});
+
+test('failure delete is confirmed by server, persisted in presentation metadata, and keeps the error', async () => {
+  const app = workbench(() => ({ message: { id: 'failure', status: 'consumed', run_status: 'failed', error: 'original error', dismissed_at: 123 } }));
+  app.run("state.chatQueue=[{id:'failure',status:'consumed',run_status:'failed',error:'original error'}];renderChatQueue();");
+  assert.match(app.nodes.get('#chatQueue').innerHTML, /删除/);
+  await app.context.dismissQueuedChatMessage({ disabled: false, dataset: { messageId: 'failure' } });
+  assert.equal(app.calls[0].url, '/api/threads/thr_test/queue/failure/dismiss');
+  assert.equal(app.calls[0].options.method, 'POST');
+  assert.equal(app.nodes.get('#chatQueue').hidden, true);
+  assert.equal(app.run('state.chatQueue[0].error'), 'original error');
+  app.run('renderChatQueue()');
+  assert.equal(app.nodes.get('#chatQueue').hidden, true);
+});
+
+test('failure delete does not hide unconfirmed failures or race an uncertain retry', async () => {
+  const app = workbench(() => { throw new Error('network failure'); });
+  app.run("state.chatQueue=[{id:'failure',status:'consumed',run_status:'failed',error:'keep me'}];renderChatQueue();");
+  await app.context.dismissQueuedChatMessage({ disabled: false, dataset: { messageId: 'failure' } });
+  assert.match(app.nodes.get('#chatQueue').innerHTML, /keep me/);
+  assert.equal(app.run('state.chatQueue[0].dismissed_at'), undefined);
+  app.run("state.chatUnknownSubmission={payload:{retry_of:'failure'}};");
+  await app.context.dismissQueuedChatMessage({ disabled: false, dataset: { messageId: 'failure' } });
+  assert.equal(app.calls.length, 1);
 });

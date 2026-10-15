@@ -1,4 +1,5 @@
 import asyncio
+import os
 import stat
 
 import pytest
@@ -24,8 +25,11 @@ def test_approved_project_write_creates_real_file_and_records_artifact(tmp_path,
     ))
 
     assert (project / "quicksort.py").read_text(encoding="utf-8") == "print('sorted')\n"
-    assert stat.S_IMODE((project / "quicksort.py").stat().st_mode) == 0o660
-    assert (project / "quicksort.py").stat().st_gid == 10001
+    if os.name != "nt":
+        assert stat.S_IMODE((project / "quicksort.py").stat().st_mode) == 0o660
+        assert (project / "quicksort.py").stat().st_gid == 10001
+    else:
+        assert os.access(project / "quicksort.py", os.R_OK | os.W_OK)
     assert not (workspace / "quicksort.py").exists()
     assert result["project_id"] == "prj_example"
     assert result["written"] == "quicksort.py"

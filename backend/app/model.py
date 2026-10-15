@@ -83,6 +83,21 @@ def public_provider(provider):
     return value
 
 
+def normalize_chat_messages(messages):
+    """Omit absent tool calls without changing persisted history or real exchanges.
+
+    Streaming stop events and older checkpoints can contain []/None here.
+    Some OpenAI-compatible providers reject those values instead of treating
+    them as an ordinary assistant message. Normalize at the HTTP boundary too
+    so approval resumes, compaction and non-agent callers share this guarantee.
+    """
+    result = copy.deepcopy(messages)
+    for message in result:
+        if message.get("role") == "assistant" and message.get("tool_calls") in (None, []):
+            message.pop("tool_calls", None)
+    return result
+
+
 async def chat_completion(provider, model, messages, tools=None, temperature=0.2):
     provider = normalize_provider(provider)
     model = normalize_qwen_model(model) if is_bailian(provider) else model
@@ -91,7 +106,7 @@ async def chat_completion(provider, model, messages, tools=None, temperature=0.2
         raise ModelError("模型提供方尚未配置 API Key")
     headers = {"Content-Type": "application/json", **provider.get("headers", {})}
     headers["Authorization"] = f"Bearer {api_key}"
-    payload = {"model": model, "messages": messages, "temperature": temperature}
+    payload = {"model": model, "messages": normalize_chat_messages(messages), "temperature": temperature}
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
@@ -123,7 +138,7 @@ async def stream_chat_completion(provider, model, messages, tools=None, temperat
         raise ModelError("模型提供方尚未配置 API Key")
     headers = {"Content-Type": "application/json", **provider.get("headers", {})}
     headers["Authorization"] = f"Bearer {api_key}"
-    payload = {"model": model, "messages": messages, "temperature": temperature, "stream": True, "stream_options": {"include_usage": True}}
+    payload = {"model": model, "messages": normalize_chat_messages(messages), "temperature": temperature, "stream": True, "stream_options": {"include_usage": True}}
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"

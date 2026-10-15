@@ -88,7 +88,12 @@ def test_thread_capabilities_can_override_and_reset_with_agent_change():
         assert response.json()["capability_overrides"] == {}
 
 
-def test_cancel_active_turn_cancels_registered_task():
+def test_cancel_active_turn_cancels_registered_task(tmp_path, monkeypatch):
+    from backend.app import db
+    monkeypatch.setattr(db, 'DB_PATH', str(tmp_path/'cancel.sqlite'))
+    db.init_db()
+    with db.connect() as connection:
+        connection.execute("INSERT INTO threads(id,name,created_at,updated_at) VALUES('thread-cancel-test','test',1,1)")
     async def scenario():
         task = asyncio.create_task(asyncio.sleep(60))
         main.ACTIVE_TURNS["thread-cancel-test"] = {"task": task, "turn_id": "turn-cancel-test"}

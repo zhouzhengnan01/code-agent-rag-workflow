@@ -1,0 +1,30 @@
+{
+  "name": "codezzn-server-bridge",
+  "displayName": "Codezzn Server Bridge",
+  "description": "Open the Codezzn Windows CLI or explicitly send an editor selection to your server sandbox. No local agent execution.",
+  "version": "0.1.0",
+  "publisher": "codezzn-local",
+  "license": "UNLICENSED",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onCommand:codezzn.openCLI", "onCommand:codezzn.reviewSelection"],
+  "capabilities": { "untrustedWorkspaces": { "supported": false }, "virtualWorkspaces": { "supported": false } },
+  "contributes": {
+    "commands": [
+      { "command": "codezzn.openCLI", "title": "Codezzn: Open Server CLI" },
+      { "command": "codezzn.reviewSelection", "title": "Codezzn: Review Selected Code on Server" }
+    ],
+    "menus": { "editor/context": [{ "command": "codezzn.reviewSelection", "when": "editorHasSelection && isWorkspaceTrusted", "group": "navigation@100" }] },
+    "configuration": {
+      "title": "Codezzn Server Bridge",
+      "properties": {
+        "codezzn.server": { "type": "string", "default": "http://localhost:8080", "scope": "machine", "description": "Server origin. Only user/machine settings are read, never repository settings." },
+        "codezzn.allowInsecureHttp": { "type": "boolean", "default": false, "scope": "machine", "description": "Explicitly allow non-loopback HTTP (LAN development only)." },
+        "codezzn.nodeExecutable": { "type": "string", "default": "", "scope": "machine", "description": "Absolute node.exe path; defaults to Program Files/nodejs/node.exe." },
+        "codezzn.cliScript": { "type": "string", "default": "", "scope": "machine", "description": "Absolute Codezzn bin/codezzn.js path; defaults to the user-global npm installation." }
+      }
+    }
+  },
+  "scripts": { "test": "node --test ../../tests/test_vscode_bridge.cjs" }
+}

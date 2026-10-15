@@ -68,10 +68,24 @@ def task_events(task_id):
 
 def cancel_task(task_id):
     with connect() as db:
-        changed = db.execute("UPDATE tasks SET status='cancelled',lease_until=NULL,worker_id=NULL,updated_at=? WHERE id=? AND status IN ('queued','running')", (now(), task_id)).rowcount
+        changed = db.execute("UPDATE tasks SET status='cancelled',lease_until=NULL,worker_id=NULL,updated_at=? WHERE id=? AND status IN ('queued','running','waiting')", (now(), task_id)).rowcount
     if changed:
         append_task_event(task_id, "cancelled")
     return bool(changed)
+
+
+def finish_waiting_task(task_id, result):
+    """An explicit conversation approval/budget answer may finish a paused worker."""
+    if not task_id: return
+    with connect() as db:
+        row = db.execute('SELECT payload FROM tasks WHERE id=? AND status=\'waiting\'', (task_id,)).fetchone()
+        if not row: return
+        status = 'completed' if result.get('status') == 'completed' else 'waiting'
+        db.execute('UPDATE tasks SET status=?,result=?,updated_at=? WHERE id=? AND status=\'waiting\'', (status, json.dumps(result, ensure_ascii=False, default=str), now(), task_id))
+        run_id = json.loads(row['payload'] or '{}').get('subagent_run_id')
+        if run_id:
+            db.execute('UPDATE subagent_runs SET status=?,result=?,updated_at=? WHERE id=?', (status, json.dumps(result, ensure_ascii=False, default=str), now(), run_id))
+    append_task_event(task_id, status)
 
 
 class PersistentTaskQueue:
@@ -202,6 +216,11 @@ class PersistentTaskQueue:
                 return
             append_task_event(task["id"], "started", {"attempt": task["attempts"]})
             result = await self.handler(task)
+            if isinstance(result, dict) and result.get('status') in {'waiting_for_approval', 'waiting_for_input', 'budget_exhausted'}:
+                with connect() as db:
+                    db.execute("UPDATE tasks SET status='waiting',result=?,lease_until=NULL,worker_id=NULL,updated_at=? WHERE id=? AND status='running'", (json.dumps(result, ensure_ascii=False, default=str), now(), task['id']))
+                append_task_event(task['id'], 'waiting', {'reason': result['status']})
+                return
             with connect() as db:
                 changed = db.execute("UPDATE tasks SET status='completed',result=?,error=NULL,lease_until=NULL,worker_id=NULL,updated_at=? WHERE id=? AND status='running'", (json.dumps(result, ensure_ascii=False, default=str), now(), task["id"])).rowcount
             if changed:

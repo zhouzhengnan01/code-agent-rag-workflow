@@ -109,22 +109,18 @@ body.cloud-studio .nav-label {
   pointer-events: auto;
   font-weight: inherit;
 }
-body.cloud-studio .nav-chat-row { display: flex; align-items: center; gap: 2px; }
-body.cloud-studio .nav-chat-row .nav-item { flex: 1; min-width: 0; }
-body.cloud-studio .nav-chat-toggle {
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
+body.cloud-studio .nav-history-chevron {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  margin-left: auto;
   display: grid;
   place-items: center;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
   color: var(--chat-muted);
+  pointer-events: none;
 }
-body.cloud-studio .nav-chat-toggle:hover { background: #f5f5f4; color: #1c1917; }
-body.cloud-studio .nav-chat-toggle svg { width: 14px; height: 14px; transition: transform 150ms ease; }
-body.cloud-studio .nav-chat-toggle[aria-expanded="false"] svg { transform: none; }
+body.cloud-studio .nav-item:hover .nav-history-chevron { color: inherit; }
+body.cloud-studio .nav-history-chevron svg { width: 14px; height: 14px; }
 body.cloud-studio .chat-history-submenu { min-width: 0; padding: 7px 0 3px 12px; }
 body.cloud-studio .sidebar-new-thread { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 30px; margin-bottom: 7px; border: 1px solid var(--chat-border); border-radius: 6px; padding: 5px 9px; background: #fff; color: #57534e; font-size: 11px; text-align: left; }
 body.cloud-studio .sidebar-new-thread:hover { background: #fafaf9; color: #6d28d9; }
@@ -382,6 +378,141 @@ body.cloud-studio .cloud-chat .chat-queue-item small.queue-item-error { flex-bas
 body.cloud-studio .cloud-chat .chat-interaction { border: 1px solid #e7e5e4; border-radius: 12px; padding: 16px; background: #fff; }
 body.cloud-studio .cloud-chat .chat-interaction > header { margin-bottom: 11px; color: #78716c; font-size: 12px; }
 body.cloud-studio .cloud-chat .chat-interaction > header strong { font-weight: 500; }
+
+/* Roboflow-style pending confirmations live beside the composer, not in history. */
+body.cloud-studio #chatInteractionDock[hidden],
+body.cloud-studio .interaction-confirmation [hidden] { display: none !important; }
+body.cloud-studio .cloud-chat .chat-interaction-dock {
+  width: min(var(--chat-width), calc(100% - 48px));
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 50vh;
+  align-self: center;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 12px;
+  margin: 8px auto 0;
+}
+body.cloud-studio .cloud-chat .chat-interaction-dock:not([hidden]) + .prompt-dock { margin-top: 0; }
+body.cloud-studio .cloud-chat .interaction-dock-item { margin: 4px 0; min-width: 0; }
+body.cloud-studio .cloud-chat .chat-interaction.interaction-confirmation {
+  border: 1px solid #ddd6fe;
+  border-radius: 8px;
+  padding: 0;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 5%);
+  font-size: 14px;
+  line-height: 20px;
+}
+body.cloud-studio .cloud-chat .interaction-confirmation > .interaction-confirmation-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 8px 8px 12px;
+  border-bottom: 1px solid #ede9fe;
+  background: linear-gradient(to bottom, rgb(245 243 255 / 50%), #fff);
+  color: #4c1d95;
+}
+body.cloud-studio .interaction-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #4c1d95;
+  text-align: left;
+  cursor: pointer;
+}
+body.cloud-studio .interaction-heading strong { font-size: 12px; font-weight: 500; line-height: 20px; overflow-wrap: anywhere; }
+body.cloud-studio .interaction-question-icon,
+body.cloud-studio .interaction-number {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border-radius: 6px;
+  background: #f3f4f6;
+  color: #374151;
+  font-size: 10px;
+  line-height: 20px;
+}
+body.cloud-studio .interaction-question-icon { background: #ede9fe; color: #6d28d9; }
+body.cloud-studio .interaction-number svg { width: 11px; height: 11px; }
+body.cloud-studio .interaction-confirmation-controls { display: flex; gap: 4px; flex: 0 0 auto; }
+body.cloud-studio .interaction-confirmation-controls button {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #6d28d9;
+  padding: 0;
+  font-size: 14px;
+  line-height: 16px;
+  cursor: pointer;
+}
+body.cloud-studio .interaction-confirmation-controls button:hover { background: #ede9fe; }
+body.cloud-studio .interaction-confirmation-body { padding: 4px; }
+body.cloud-studio .cloud-chat .interaction-confirmation .interaction-options { display: flex; flex-direction: column; gap: 0; margin: 0; }
+body.cloud-studio .cloud-chat .interaction-confirmation .interaction-choice {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  align-items: flex-start;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px;
+  background: #fff;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+body.cloud-studio .cloud-chat .interaction-confirmation .interaction-choice:hover:not(:disabled) { background: #f9fafb; }
+body.cloud-studio .interaction-choice:hover .interaction-number { background: #e5e7eb; }
+body.cloud-studio .interaction-choice-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+body.cloud-studio .cloud-chat .interaction-confirmation .interaction-choice-copy strong { color: #374151; font-size: 13px; font-weight: 500; line-height: 20px; }
+body.cloud-studio .cloud-chat .interaction-confirmation .interaction-choice-copy small { color: #6b7280; font-size: 12px; line-height: 16px; }
+body.cloud-studio .interaction-custom-answer { display: flex; align-items: center; gap: 8px; padding: 8px; }
+body.cloud-studio .interaction-custom-answer input {
+  min-width: 0;
+  width: auto;
+  flex: 1;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  box-shadow: none;
+  background: transparent;
+  color: #374151;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+}
+body.cloud-studio .interaction-custom-answer input::placeholder { color: #6b7280; font-size: 12px; font-weight: 400; }
+body.cloud-studio .interaction-custom-answer button { display: grid; place-items: center; flex: 0 0 20px; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 6px; color: #fff; background: #6d28d9; cursor: pointer; }
+body.cloud-studio .interaction-custom-answer button svg { width: 12px; height: 12px; }
+body.cloud-studio .interaction-confirmation .interaction-tool-details { margin: 4px 8px; }
+body.cloud-studio .interaction-confirmation .interaction-tool-details pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+body.cloud-studio .interaction-confirmation .interaction-error:not(:empty),
+body.cloud-studio .interaction-submitting { margin: 6px 12px; color: #6b7280; font-size: 12px; }
+body.cloud-studio .interaction-confirmation .interaction-error:empty { display: none; }
+body.cloud-studio .interaction-confirmation button:focus-visible { outline: 2px solid #a78bfa; outline-offset: -2px; }
+body.cloud-studio .interaction-confirmation button:disabled { opacity: .5; cursor: default; }
+body.cloud-studio .queue-item-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+body.cloud-studio .queue-item-actions button:disabled { opacity: .45; cursor: default; }
 body.cloud-studio .cloud-chat .interaction-question { color: #292524; font-size: 14px; line-height: 23px; margin: 0 0 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 body.cloud-studio .cloud-chat .interaction-options { display: grid; gap: 7px; margin-bottom: 13px; }
 body.cloud-studio .cloud-chat .interaction-options button { display: grid; gap: 3px; width: 100%; min-height: 39px; border: 1px solid #e7e5e4; border-radius: 7px; padding: 9px 11px; background: #fafaf9; color: #44403c; text-align: left; font-size: 12px; }
@@ -516,6 +647,6 @@ body.cloud-studio .conversation-file-list h3 { font-size: 12px; color: var(--cha
 @media (prefers-reduced-motion: reduce) {
   body.cloud-studio .workspace-rail,
   body.cloud-studio .nav-item,
-  body.cloud-studio .nav-chat-toggle svg,
+  body.cloud-studio .nav-history-chevron svg,
   body.cloud-studio .cloud-chat .prompt-dock { transition: none; }
 }
