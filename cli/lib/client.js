@@ -46,8 +46,8 @@ class Client {
     if (options.continue && !chosen) throw new Error('No previous session for this server, user, and working directory');
     if (chosen) this.thread = await this.api.request(`/api/threads/${segment(chosen.id)}`);
     else {
-      const agent = await this.resolveAgent(options.agent);
-      this.thread = await this.api.request('/api/threads', { method: 'POST', body: { agent_id: agent.id, name: options.name || 'CLI session' } });
+      const agent = options.agent ? await this.resolveAgent(options.agent) : null;
+      this.thread = await this.api.request('/api/threads', { method: 'POST', body: { ...(agent ? { agent_id: agent.id } : {}), name: options.name || 'CLI session' } });
     }
     if (chosen && options.agent) {
       const agent = await this.resolveAgent(options.agent);

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .chat_inputs import model_content, response_content, supports_images
 from . import conversation_artifacts
-from . import coding_context, engineering, coding_collaboration, coding_skill_runtime
+from . import coding_context, engineering, coding_collaboration, coding_skill_runtime, runtime_config
 from .terminal_tools import TERMINAL_SCHEMAS, execute_terminal
 from .coding_workspace import (current_coding_workspace, execution_project_root, prepare_coding_workspace,
     publish_coding_workspace, use_coding_workspace, workspace_path, inspect_execution_root, reset_coding_workspace)
@@ -433,11 +433,13 @@ async def build_context(agent, provider=None, model=None, user_message="", threa
             "Call done with success=true only after the full requested work is complete and verified; otherwise state what is missing and use success=false. Report what was actually changed and tested.\n"
             "</browser_use_coding_prompt>"
         )
-    if agent.get('role_template') == 'coding':
+    if agent.get('role_template') == 'coding' and agent.get('id') != runtime_config.DEFAULT_AGENT_ID:
         sections.append('Use quality_discover to inspect the real test stack. For nontrivial changes, propose a plan with plan_manage and wait for its explicit approval before editing; keep steps current. '
                         'Use task_checkpoint before editing files, engineering_review for evidence-based review, and quality_run for the agreed checks. '
                         'Use tool_search to discover deferred MCP tools. Use terminal_start/logs/status for long commands. A partial review or missing toolchain is a limitation, never a passing check. '
                         'On a recovered run inspect uncertain tool outcomes and wait for fresh permission before any new side effect. Do not repeat an uncertain command blindly.')
+    elif agent.get('id') == runtime_config.DEFAULT_AGENT_ID:
+        sections.append('For a simple task proceed directly using the available tools; do not require Agent setup or a separate plan approval. For substantial work maintain a short plan. If the user explicitly requests an approved engineering plan or quality gates, use plan_manage and honor those gates. Permission modes are runtime-enforced; never infer tool permission from a Skill or project choice. Execute scripts and commands only through the sandbox tools. After a restart inspect uncertain outcomes before any new side effect.')
     if agent.get("_project_save") is True and agent.get("_project_id"):
         sections.append(
             "\n<active_project>\n"
@@ -485,9 +487,15 @@ async def build_context(agent, provider=None, model=None, user_message="", threa
               "Do not claim that the model is unknown and never reveal credentials.\n"
               "</runtime_configuration>"
         )
-    for skill_id in agent.get("skill_ids", []):
-        skill = resource_get("skills", skill_id)
+    invocation = agent.get('_skill_invocation') or runtime_config.resolve_invocation(agent, user_message)
+    for skill in runtime_config.available_skills(agent):
+        skill_id = skill['id']
+        explicitly_invoked = (invocation or {}).get('skill_id') == skill_id
+        if skill['manual_only'] and not explicitly_invoked:
+            continue
         if skill and skill.get("enabled"):
+            if explicitly_invoked and skill.get('package_id'):
+                verify_package(skill)
             package = {
                 "id": skill_id,
                 "name": skill.get("name"),
@@ -495,12 +503,14 @@ async def build_context(agent, provider=None, model=None, user_message="", threa
                 "scripts": skill.get("scripts") or [],
                 "references": skill.get("references") or [],
                 "assets": skill.get("assets") or [],
+                "command": '/' + skill['command'] if skill['user_invocable'] else None,
             }
             sections.append(
                 "\n<skill_package>\n"
                 + json.dumps(package, ensure_ascii=False, indent=2)
                 + "\nUse this exact id when calling skill_read_file or skill_run_script.\n"
-                + (('Description: ' + str(skill.get('description', '')) + '\nLoad SKILL.md using skill_read_file before applying this skill; supporting files are loaded only when needed.')
+                + (('Explicit user invocation; apply this skill to the following arguments: ' + json.dumps(invocation['arguments'], ensure_ascii=False) + '\n' + (read_package_file(skill, 'SKILL.md')['content'] if skill.get('package_id') else str(skill.get('content', '')))[:20000]) if explicitly_invoked else
+                   ('Description: ' + str(skill.get('description', '')) + '\nLoad SKILL.md using skill_read_file before applying this skill; supporting files are loaded only when needed.')
                    if agent.get('lazy_skills', agent.get('role_template') == 'coding') else str(skill.get("content", ""))[:20000])
                 + "\n</skill_package>"
             )
@@ -564,7 +574,8 @@ async def tool_specs(agent):
         builtin_names.extend(name for name in ("delegate_task", "task_status", *coding_collaboration.SCHEMAS) if name not in builtin_names)
     if agent.get('role_template') == 'coding':
         builtin_names.extend(name for name in ('github_read_pr', 'github_ci_logs', 'github_ci_rerun') if name not in builtin_names)
-    if agent.get('skill_ids'):
+    if runtime_config.available_skills(agent):
+        builtin_names.extend(name for name in ('skill_read_file', 'skill_run_script') if name not in builtin_names)
         builtin_names.extend(coding_skill_runtime.SCHEMAS)
     for name in builtin_names:
         if name == "knowledge_search" and not knowledge_available(agent, tool_policy_decision):
@@ -706,15 +717,23 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
     mode = sandbox_mode(agent)
     if agent.get("_project_save") is False:
         mode = "read-only"
-    auto_approve = agent.get("auto_approve") is True or approved
+    # Selecting an explicit conversational permission mode supersedes the legacy
+    # blanket auto_approve switch. Existing profiles without a mode are unchanged.
+    auto_approve = (agent.get("auto_approve") is True and 'permission_mode' not in agent) or approved
     policy = tool_policy_decision(agent, requested_name)
+    permission_mode = agent.get('permission_mode', 'default')
+    plan_state_only = (name == 'plan_manage' and arguments.get('action') != 'approve') or (name == 'hook_manage' and arguments.get('action') == 'get') or name in {'todo_write', 'project_select'}
+    if permission_mode == 'plan' and not plan_state_only and (name in SIDE_EFFECT_TOOLS or route[0].startswith('mcp')):
+        raise PermissionError('当前为 plan 只读模式；请由用户切换权限模式后再执行写入或命令')
+    if permission_mode == 'acceptEdits' and name in runtime_config.EDIT_TOOLS and mode == 'workspace-write' and policy == 'inherit':
+        auto_approve = True
     if route[0] == "browser_use" and requested_name in _BROWSER_CHANGING_TOOLS and policy == "inherit":
         policy = "ask"
     if policy == "deny":
         raise PermissionError(f"工具策略禁止调用 {name}")
     if policy == "allow":
         auto_approve = True
-    elif policy == "ask" and not auto_approve:
+    elif policy == "ask" and not approved:
         return approval_required(name)
     if agent.get('_recovering') and name in SIDE_EFFECT_TOOLS and not approved:
         return approval_required(name)
@@ -899,6 +918,8 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
             return project
         agent["_project_id"], agent["_project_save"] = project["id"], True
         agent["memory_project_id"] = project["id"]
+        agent.update(runtime_config.resolve_settings(agent))
+        project['available_skills'] = runtime_config.skill_catalog(agent)
         return project
     if name == "project_select":
         if agent.get("_project_save") and agent.get("_project_id") and arguments.get("project_id") != agent["_project_id"]:
@@ -912,6 +933,8 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
         agent["_project_id"] = project["id"]
         agent['_project_save'] = save_to_project
         agent["memory_project_id"] = project["id"]
+        agent.update(runtime_config.resolve_settings(agent))
+        project['available_skills'] = runtime_config.skill_catalog(agent)
         return project
     if name == "workflow_list":
         return {"workflows": list_workflow_tools()}
@@ -1187,14 +1210,17 @@ async def execute_tool(name, arguments, agent, routes, approved=False, thread_id
         return await review_comment(remote, arguments["pull_number"], arguments["body"], arguments["commit_id"], arguments["path"], arguments["line"], arguments.get("side", "RIGHT"))
     if name == "skill_read_file":
         skill = resource_get("skills", arguments["skill_id"])
-        if not skill or arguments["skill_id"] not in (agent.get("skill_ids") or []): raise PermissionError("未授权的 Skill 包")
+        if not skill or not runtime_config.skill_authorized(agent, arguments['skill_id']): raise PermissionError("未授权的 Skill 包")
         if arguments.get('path') == 'SKILL.md' and not skill.get('package_id'):
             return {'path': 'SKILL.md', 'content': str(skill.get('content', ''))}
+        verify_package(skill)
         return read_package_file(skill, arguments["path"])
     if name == "skill_run_script":
+        if not agent.get('allow_shell', False): raise PermissionError('当前运行配置禁止执行脚本')
+        if agent.get('_project_save') is False: raise PermissionError('当前回合不允许执行技能脚本')
         if not auto_approve: return approval_required(name)
         skill = resource_get("skills", arguments["skill_id"])
-        if not skill or arguments["skill_id"] not in (agent.get("skill_ids") or []): raise PermissionError("未授权的 Skill 包")
+        if not skill or not runtime_config.skill_authorized(agent, arguments['skill_id']): raise PermissionError("未授权的 Skill 包")
         verify_package(skill)
         relative = str(arguments["path"])
         if not relative.startswith("scripts/") or relative not in (skill.get("scripts") or []): raise PermissionError("只能执行 manifest 中的 scripts 文件")
@@ -1356,6 +1382,8 @@ def _save_checkpoint(thread_id, turn_id, agent_id, state):
 
 
 def save_agent_run(agent, state, status="running", thread_id=None, turn_id=None, task_id=None, response_id=None, error=None):
+    if agent.get('_skill_invocation'):
+        state['skill_invocation'] = agent['_skill_invocation']
     if not turn_id and not task_id:
         return None
     timestamp = now(); run_id = state.get("agent_run_id")
@@ -1543,6 +1571,18 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
         agent["_project_id"] = project_choice.get("project_id")
         if agent["_project_id"]:
             agent["memory_project_id"] = agent["_project_id"]
+        if agent.get('_runtime_base'):
+            # Permissions and skills are scoped to the persisted turn destination.
+            resolved = runtime_config.resolve_settings(agent)
+            for key in ('provider_id', 'model'): resolved[key] = agent.get(key)
+            agent = resolved
+    # Parse commands in trusted application code, not through a model guessing a name.
+    invoked_message = user_message or (resume_state or {}).get('user_message', '')
+    invocation = agent.get('_skill_invocation') or (resume_state or {}).get('skill_invocation') or runtime_config.resolve_invocation(agent, invoked_message)
+    if invocation:
+        agent = {**agent, '_skill_invocation': invocation}
+        if not runtime_config.skill_authorized(agent, invocation['skill_id']):
+            raise PermissionError('所调用的 Skill 已停用或不再属于当前项目')
     if agent.get("role_template") == "coding" or project_choice:
         agent = dict(agent)
         resumed_user_message = (resume_state or {}).get("user_message") or next((item.get("content", "") for item in reversed((resume_state or {}).get("messages", [])) if item.get("role") == "user"), "")
@@ -1739,8 +1779,8 @@ async def run_agent(agent, history, user_message, on_event=None, streaming=False
                                 "INSERT INTO approvals(id,thread_id,turn_id,tool_name,arguments,status,created_at,tool_call_id,resumable) VALUES(?,?,?,?,?,'pending',?,?,1)",
                                 (approval_id, thread_id, turn_id, name, json.dumps(arguments, ensure_ascii=False), now(), call["id"]),
                             )
-                        _save_checkpoint(thread_id, turn_id, agent["id"], state)
                         save_agent_run(agent, state, "waiting", thread_id, turn_id, current_task_id)
+                        _save_checkpoint(thread_id, turn_id, agent["id"], state)
                         await _emit(events, on_event, "approval_required", name=name, status="pending", approval_id=approval_id, turn_id=turn_id)
                         return {
                             "status": "waiting_for_approval", "content": response.get("content", "") if 'response' in locals() else "",

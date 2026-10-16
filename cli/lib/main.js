@@ -138,11 +138,23 @@ async function main(argv = process.argv.slice(2), injected = {}) {
             if (attached.length >= 8) throw new Error('At most 8 attachments are allowed');
             attached.push(...await client.attachments([filename])); output.diagnostic('File uploaded; attached to the next prompt.');
           }
-        } else if (command === 'skills' || command === 'mcp') {
-          const data = (await api.request(`/api/resources/${command === 'mcp' ? 'mcp_servers' : 'skills'}`)).data || [];
-          output.diagnostic(data.map(item => `${item.id} · ${item.name || item.title || ''} · enabled=${item.enabled !== false}`).join('\n') || '(none configured)');
+        } else if (command === 'skills') {
+          const runtime = await api.request(`/api/chat/runtime?thread_id=${encodeURIComponent(client.thread.id)}`);
+          output.diagnostic((runtime.skills || []).filter(s => s.user_invocable).map(s => `/${s.command} · ${s.id} · ${s.description || s.name}`).join('\n') || '(no available skills)');
+        } else if (command === 'permissions') {
+          if (value && !['default', 'acceptEdits', 'plan', 'inherit'].includes(value)) throw new Error('Use /permissions default|acceptEdits|plan|inherit');
+          if (value) {
+            const overrides = { ...(client.thread.capability_overrides || {}) };
+            if (value === 'inherit') delete overrides.permission_mode; else overrides.permission_mode = value;
+            client.thread = await api.request(client.route(), { method: 'PATCH', body: { capability_overrides: overrides } });
+          }
+          const runtime = await api.request(`/api/chat/runtime?thread_id=${encodeURIComponent(client.thread.id)}`);
+          output.diagnostic(`Permission mode: ${runtime.permission_mode}. Sandbox and deny policies still apply.`);
+        } else if (command === 'mcp') {
+          const data = (await api.request('/api/resources/mcp_servers')).data || [];
+          output.diagnostic(data.map(item => `${item.id} · ${item.name || ''}`).join('\n') || '(none configured)');
         } else if (await engineeringCommand(command, value, client, api, output)) { /* Existing server approvals apply. */ }
-        else throw new Error(`Unknown command /${command}; use /help`);
+        else { await client.send(line, attached); attached = []; } // Server validates /skill-name and /skill name.
       } catch (error) { output.diagnostic(error.message); }
     }
     return questionInterrupted ? 130 : 0;

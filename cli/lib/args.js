@@ -25,6 +25,8 @@ Options:
 Interactive commands:
   /help /new /resume [ID] /model [MODEL] /agent [ID_OR_NAME]
   /project [ID_OR_NAME] /status /stop /files [PATH] /skills /mcp /exit
+  /SKILL_NAME [TASK] or /skill NAME [TASK]   Load a Skill on demand
+  /permissions [default|acceptEdits|plan|inherit]
   /plan [GOAL] /diff [CHECKPOINT_ID] /context /review [SCOPE]
   /rewind CHECKPOINT_ID       Preview then request server approval; never force
 

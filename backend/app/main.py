@@ -17,6 +17,7 @@ from pypdf import PdfReader
 
 from .agent import load_agent_run, persist_event, run_agent
 from .capabilities import ROLE_TEMPLATES, tool_policy_decision
+from . import runtime_config
 from .db import connect, current_tenant, ensure_tenant, init_db, migrate_bailian_providers, new_id, now, reset_tenant, resource_delete, resource_get, resource_list, resource_save, seed_defaults, tenant_ids, use_tenant
 from .knowledge import KnowledgeConflictError, KnowledgeError, KnowledgeValidationError, drop_knowledge_index, rag_status
 from .knowledge_eval import evaluate as evaluate_knowledge_backends
@@ -90,7 +91,7 @@ def _capability_ids(value, kind):
 
 
 def _agent_for_thread(agent, thread):
-    scoped = chat_inputs.apply_override(agent, thread["model_override"] if "model_override" in thread.keys() else {})
+    scoped = dict(agent)
     # User-approved default: selected project is the destination for new artifacts.
     # Tool policies, sandbox restrictions and explicit per-turn declines still apply.
     active_project_id = thread["active_project_id"] if "active_project_id" in thread.keys() else None
@@ -106,7 +107,8 @@ def _agent_for_thread(agent, thread):
     for key in ("skill_ids", "mcp_server_ids"):
         if isinstance(overrides.get(key), list):
             scoped[key] = list(dict.fromkeys(overrides[key]))
-    return scoped
+    scoped = runtime_config.resolve_settings(scoped, overrides)
+    return chat_inputs.apply_override(scoped, thread["model_override"] if "model_override" in thread.keys() else {})
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -516,6 +518,8 @@ def valid_kind(kind):
 @app.get("/api/resources/{kind}")
 def list_resources(kind: str):
     valid_kind(kind)
+    if kind == "agents":
+        runtime_config.ensure_default_agent()
     data = resource_list(kind)
     if kind == "providers":
         data = [public_provider(item) for item in data]
@@ -1432,10 +1436,45 @@ def download_chat_attachment(attachment_id: str):
 
 @app.post("/api/threads")
 def create_thread(payload: dict = Body(default={})):
+    agent_id = payload.get("agent_id") or runtime_config.ensure_default_agent()["id"]
+    if not isinstance(agent_id, str):
+        raise HTTPException(400, "运行配置 ID 无效")
+    agent = resource_get("agents", agent_id)
+    if not agent or not agent.get("enabled", True):
+        raise HTTPException(400, "运行配置不存在或已停用")
     thread_id, timestamp = new_id("thr"), now()
     with connect() as db:
-        db.execute("INSERT INTO threads(id,name,agent_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (thread_id, payload.get("name", "新对话"), payload.get("agent_id"), "idle", timestamp, timestamp))
-    return {"id": thread_id, "name": payload.get("name", "新对话"), "agent_id": payload.get("agent_id"), "status": "idle", "capability_overrides": {}, "model_override": {}, "active_project_id": None, "created_at": timestamp, "updated_at": timestamp}
+        db.execute("INSERT INTO threads(id,name,agent_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?)", (thread_id, payload.get("name", "新对话"), agent_id, "idle", timestamp, timestamp))
+    return {"id": thread_id, "name": payload.get("name", "新对话"), "agent_id": agent_id, "status": "idle", "capability_overrides": {}, "model_override": {}, "active_project_id": None, "created_at": timestamp, "updated_at": timestamp}
+
+
+@app.get("/api/chat/runtime")
+def chat_runtime(thread_id: str = None):
+    agent = runtime_config.ensure_default_agent()
+    if thread_id:
+        with connect() as db:
+            thread = db.execute("SELECT * FROM threads WHERE id=?", (thread_id,)).fetchone()
+        if not thread:
+            raise HTTPException(404, "对话不存在")
+        agent = resource_get("agents", thread["agent_id"]) or agent
+        agent = _agent_for_thread(agent, thread)
+    else:
+        agent = runtime_config.resolve_settings(agent)
+    return {"default_agent_id": runtime_config.DEFAULT_AGENT_ID,
+            "agent_id": agent["id"], "permission_mode": agent.get("permission_mode", "default"),
+            "provider_id": agent.get("provider_id"), "model": agent.get("model"),
+            "skill_discovery": agent.get("skill_discovery", "off"),
+            "skills": runtime_config.skill_catalog(agent), "settings": runtime_config.settings()}
+
+
+@app.patch("/api/chat/runtime/settings")
+def update_runtime_settings(payload: dict = Body(...)):
+    return {"settings": runtime_config.save_settings(payload)}
+
+
+@app.patch("/api/projects/{project_id}/runtime-settings")
+def update_project_runtime_settings(project_id: str, payload: dict = Body(...)):
+    return {"settings": runtime_config.save_settings(payload, project_id)}
 
 
 @app.get("/api/threads")
@@ -1599,9 +1638,10 @@ def update_thread(thread_id: str, payload: dict = Body(...)):
             values.append("{}")
     if "capability_overrides" in payload:
         overrides = payload.get("capability_overrides")
-        if not isinstance(overrides, dict) or any(key not in ("skill_ids", "mcp_server_ids") for key in overrides):
+        if not isinstance(overrides, dict) or any(key not in ("skill_ids", "mcp_server_ids", "permission_mode", "skill_discovery") for key in overrides):
             raise HTTPException(400, "capability_overrides 格式无效")
         cleaned = {}
+        cleaned.update(runtime_config.validate_settings({k: v for k, v in overrides.items() if k in ("permission_mode", "skill_discovery")}))
         if "skill_ids" in overrides:
             cleaned["skill_ids"] = _capability_ids(overrides["skill_ids"], "skills")
         if "mcp_server_ids" in overrides:

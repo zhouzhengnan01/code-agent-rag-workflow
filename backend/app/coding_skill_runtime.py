@@ -9,6 +9,7 @@ from .db import resource_get
 from .sandbox import run_command
 from .skill_packages import package_path, verify_package
 from .workspace import tenant_workspace
+from .runtime_config import skill_authorized
 
 
 SCHEMAS = {"skill_check_environment": {"description": "检查已授权完整 Skill 包的工具和依赖版本，只读、离线、不安装依赖、不执行技能脚本。", "parameters": {"type": "object", "properties": {"skill_id": {"type": "string"}}, "required": ["skill_id"]}}}
@@ -102,7 +103,7 @@ def _dependency(value):
 async def execute(name, args, agent, root):
     if name != "skill_check_environment": raise ValueError("Unknown Skill runtime tool")
     skill_id = str(args.get("skill_id") or "")
-    if skill_id not in (agent.get("skill_ids") or []): raise PermissionError("未授权的 Skill 包")
+    if not skill_authorized(agent, skill_id): raise PermissionError("未授权的 Skill 包")
     skill = resource_get("skills", skill_id)
     if not skill or not skill.get("enabled", True): raise PermissionError("Skill 包未启用或不存在")
     verified = verify_package(skill)

@@ -485,3 +485,94 @@ test('failure delete does not hide unconfirmed failures or race an uncertain ret
   await app.context.dismissQueuedChatMessage({ disabled: false, dataset: { messageId: 'failure' } });
   assert.equal(app.calls.length, 1);
 });
+
+test('user-message actions show recorded send time, copy raw content and ignore assistant messages', async () => {
+  const app = workbench();
+  const text = '原始 **文字**\n第二行 <tag>';
+  app.run(`state.currentThread.messages=[{id:'user',role:'user',content:${JSON.stringify(text)},meta:{sent_at:1735689600},created_at:1735693200}];`);
+  let copied;
+  app.context.copyTextToClipboard = async value => { copied = value; };
+  await app.context.copyUserMessage({ dataset: { messageId: 'user' }, disabled: false });
+  assert.equal(copied, text);
+  const html = app.run('messageHtml(state.currentThread.messages[0])');
+  assert.match(html, /datetime="2025-01-01T00:00:00.000Z"/);
+  assert.match(html, /aria-label="复制消息"/);
+  assert.match(html, /aria-label="编辑消息"/);
+  assert.doesNotMatch(app.context.messageHtml({ role: 'assistant', content: 'reply' }), /user-message-actions/);
+  assert.equal(app.context.userMessageTime({}).label, '时间未知');
+});
+
+test('inline message editing cancels without writes and escapes textarea contents', () => {
+  const app = workbench();
+  app.run("state.currentThread.messages=[{id:'user',role:'user',content:'</textarea><script>alert(1)</script>'}];");
+  app.nodes.set('#chatMessage_user', { innerHTML: '' });
+  app.context.startEditUserMessage({ dataset: { messageId: 'user' } });
+  assert.match(app.nodes.get('#chatMessage_user').innerHTML, /&lt;\/textarea&gt;&lt;script&gt;/);
+  assert.match(app.nodes.get('#chatMessage_user').innerHTML, /重新发送/);
+  app.context.cancelUserMessageEdit();
+  assert.equal(app.run('state.userMessageEdit'), null);
+  assert.equal(app.calls.length, 0);
+});
+
+test('resending an edit preserves the original message and unrelated composer draft', async () => {
+  const app = workbench((url, options) => ({ message: { id: 'edited_submission', content: JSON.parse(options.body).content, status: 'pending', run_status: 'pending' } }));
+  app.run("state.currentThread.messages=[{id:'user',role:'user',content:'原消息'}];state.userMessageEdit={threadId:'thr_test',messageId:'user',content:'修改后的消息'};state.chatAttachments=[{id:'draft_file',status:'ready'}];");
+  app.nodes.get('#chatInput').value = '另一个尚未发送的草稿';
+  app.nodes.set('#userMessageEdit_user', { value: '修改后的消息' });
+  await app.context.submitUserMessageEdit({ disabled: false });
+  assert.equal(app.calls.length, 1);
+  assert.equal(JSON.parse(app.calls[0].options.body).content, '修改后的消息');
+  assert.equal(app.run('state.currentThread.messages[0].content'), '原消息');
+  assert.equal(app.nodes.get('#chatInput').value, '另一个尚未发送的草稿');
+  assert.equal(app.run('state.chatAttachments[0].id'), 'draft_file');
+  assert.equal(app.run('state.userMessageEdit'), null);
+});
+
+test('confirming an uncertain edit submission still preserves the composer draft and attachments', () => {
+  const app = workbench();
+  app.nodes.get('#chatInput').value = '消息内容';
+  app.run("state.chatAttachments=[{id:'draft_file',status:'ready'}];clearConfirmedChatDraft({preserveDraft:true,payload:{content:'消息内容',attachment_ids:['draft_file']}});");
+  assert.equal(app.nodes.get('#chatInput').value, '消息内容');
+  assert.equal(app.run('state.chatAttachments[0].id'), 'draft_file');
+});
+
+test('new chat uses the server default rather than inheriting a previously selected custom agent', async () => {
+  const app = workbench(() => ({ id: 'new_default_thread', agent_id: 'agt_codezzn_default' }));
+  app.run("loadPage=async()=>{};state.chatThreads=[];state.chatDrafts={};");
+  await app.context.newThread();
+  assert.equal(app.calls[0].url, '/api/threads');
+  assert.equal(JSON.parse(app.calls[0].options.body).agent_id, undefined);
+  assert.equal(app.run('state.thread'), 'new_default_thread');
+});
+
+test('permission selection preserves bound extensions and can restore inherited settings', async () => {
+  const app = workbench((url, options) => url.startsWith('/api/chat/runtime')
+    ? { permission_mode: 'plan', skill_discovery: 'auto', skills: [] }
+    : { id: 'thr_test', capability_overrides: JSON.parse(options.body).capability_overrides });
+  app.run("state.currentThread.capability_overrides={skill_ids:['s'],mcp_server_ids:['m']};");
+  await app.context.changeChatPermissionMode('plan');
+  let body = JSON.parse(app.calls[0].options.body);
+  assert.deepEqual(body.capability_overrides, { skill_ids: ['s'], mcp_server_ids: ['m'], permission_mode: 'plan' });
+  assert.equal(app.run('state.currentThread.capability_overrides.permission_mode'), 'plan');
+  await app.context.changeChatPermissionMode('');
+  body = JSON.parse(app.calls[2].options.body);
+  assert.equal(body.capability_overrides.permission_mode, undefined);
+  assert.deepEqual(body.capability_overrides.skill_ids, ['s']);
+});
+
+test('Skill command menu is optional, escapes content, excludes hidden skills and sends no task', () => {
+  const app = workbench();
+  app.nodes.set('#skillCommands', { innerHTML: '', hidden: true });
+  app.run("state.chatRuntime={skills:[{id:'skill1',name:'example',command:'example',description:'<img onerror=bad>',user_invocable:true},{id:'hidden',name:'hidden',command:'hidden',user_invocable:false}]};");
+  app.nodes.get('#chatInput').value = '/';
+  app.context.renderSkillCommands();
+  const menu = app.nodes.get('#skillCommands');
+  assert.equal(menu.hidden, false);
+  assert.match(menu.innerHTML, /\/example/);
+  assert.doesNotMatch(menu.innerHTML, /<img|hidden/);
+  assert.match(menu.innerHTML, /&lt;img/);
+  app.nodes.get('#chatInput').value = 'ordinary question';
+  app.context.renderSkillCommands();
+  assert.equal(menu.hidden, true);
+  assert.equal(app.calls.length, 0);
+});

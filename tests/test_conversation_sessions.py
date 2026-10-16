@@ -35,6 +35,20 @@ def session_store(tmp_path,monkeypatch):
 def token(): return str(uuid.uuid4())
 
 
+def test_user_message_records_queue_submission_time_not_execution_time(session_store):
+    thread, settings, runtime, calls = session_store
+    item, _ = control.enqueue(thread['id'], settings['id'], '延迟执行的消息', {}, token())
+    sent_at = db.now() - 120
+    with db.connect() as connection:
+        connection.execute('UPDATE chat_queue_messages SET created_at=? WHERE id=?', (sent_at, item['id']))
+    item = control.get_message(thread['id'], item['id'])
+    asyncio.run(chat_sessions.execute_message(item))
+    with db.connect() as connection:
+        message = connection.execute("SELECT meta,created_at FROM messages WHERE thread_id=? AND role='user'", (thread['id'],)).fetchone()
+    assert json.loads(message['meta'])['sent_at'] == sent_at
+    assert message['created_at'] > sent_at
+
+
 def test_failure_dismissal_persists_without_erasing_history_or_submission_identity(session_store):
     thread,settings,runtime,calls=session_store
     submission_id=token()

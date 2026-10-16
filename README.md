@@ -26,6 +26,15 @@ Codezzn 是一个本地优先、可 Docker 部署的智能体开发平台。它�
 
 ## 启动
 
+默认使用方式已改为“直接对话”，无需先创建智能体或勾选 Skill/权限。Web 点击“新对话”或运行 Windows `codezzn`，即使用内置 Codezzn 运行配置；仍需账号具有可用的模型提供方/API 凭据。旧会话与自定义智能体保持原配置，不会自动放宽权限。
+
+- 基础读取、搜索与编码工具默认提供；写文件和运行命令时才弹出审批。项目选择仍是文件归属确认，不等于批准工具执行。
+- Skill 自动发现当前账号已启用、且属于用户或当前项目的技能，只先加载描述；模型按需读取 `SKILL.md`。也可输入 `/技能名 任务` 或 `/skill 技能名 任务` 手动调用，`/skills` 查看列表。
+- 配置优先级为内置默认 → 用户默认 → 项目默认 → 当前会话覆盖。Web 输入框旁的权限下拉和“默认配置”入口可调整；CLI 使用 `/permissions default|acceptEdits|plan|inherit`。
+- `default` 对写入/命令逐次审批；`acceptEdits` 仅自动接受工作区文件编辑，Shell、脚本和外部写操作仍按原策略审批；`plan` 禁止文件写入和命令。拒绝规则、只读沙箱、禁用 Shell/浏览器和账号隔离不能被 Skill 提升。
+
+完整配置、兼容边界和网页验收步骤见 [直接对话与按需 Skill](docs/direct-chat-runtime.md)。
+
 本次编码能力对齐的配置、网页对话测试、CLI/VS Code 入口、部署与明确边界见 [编码能力验收指南](docs/coding-parity.md)。实现参考本机 Claude Code 2.1.140 的可观测接口，不包含其私有模型、私有 Prompt 或专有云服务，不声明编码效果完全等价。
 
 工作流画布的重新部署、入门 / 条件分支 / 知识库问答测试步骤见 [工作流画布使用说明](docs/workflow-canvas.md)。Docker 默认同时构建前端与后端；不能拉取 Node 镜像时可先用本机 Node 编译并选择 `CODEZZN_BUILD_TARGET=prebuilt`。
@@ -87,10 +96,10 @@ CLI 打开浏览器授权页；通过 Codezzn 已配置的登录方式登录，�
 ### 3. 对话、项目与工具审批
 
 ```powershell
-codezzn --allow-insecure-http --agent "coding agent"
+codezzn --allow-insecure-http
 ```
 
-`--agent` 可使用服务器智能体 ID 或唯一名称；实际名称以 Workbench 配置为准。进入交互终端后：
+默认无需 `--agent`。如需使用已有高级配置，`--agent` 可使用服务器智能体 ID 或唯一名称；实际名称以 Workbench 配置为准。进入交互终端后：
 
 ```text
 /agent
@@ -138,7 +147,9 @@ codezzn auth logout --allow-insecure-http
 | `/agent [名称或ID]`、`/model [模型]` | 列出或切换服务器智能体/模型；`/model default` 恢复智能体默认模型 |
 | `/project [名称或ID]` | 列出或切换服务器项目 |
 | `/files [本地路径]` | 查看待发送附件，或明确上传文件 |
-| `/skills`、`/mcp` | 查看服务器配置资源，不安装技能或启动 Windows 本地 MCP |
+| `/skills`、`/技能名 任务`、`/skill 名称 任务` | 查看当前范围技能；按需调用，不改变执行权限 |
+| `/permissions default\|acceptEdits\|plan\|inherit` | 查看/切换当前会话权限，继承用户及项目配置 |
+| `/mcp` | 查看已配置服务，不自动启动 Windows 本地 MCP |
 | `/stop`、`/exit` | 请求取消当前任务，或退出客户端 |
 
 Ctrl+C 请求取消当前服务器任务，再按一次立即退出。附件限制为每文件最多 10 MiB、每回合最多 8 个且合计不超过 20 MiB。

@@ -71,6 +71,26 @@ function richText(value, artifacts = []) {
   return container.innerHTML;
 }
 
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    try { await navigator.clipboard.writeText(text); return; } catch (_) { /* LAN HTTP/permissions fallback below. */ }
+  }
+  const focused = document.activeElement;
+  const selection = window.getSelection();
+  const ranges = selection ? Array.from({ length: selection.rangeCount }, (_, i) => selection.getRangeAt(i).cloneRange()) : [];
+  const buffer = document.createElement('textarea');
+  buffer.value = text;
+  buffer.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+  document.body.append(buffer);
+  let copied = false;
+  try { buffer.select(); copied = document.execCommand('copy'); }
+  finally {
+    buffer.remove(); focused?.focus({ preventScroll: true });
+    if (selection) { selection.removeAllRanges(); ranges.forEach(range => selection.addRange(range)); }
+  }
+  if (!copied) throw new Error('浏览器不允许复制，请手动选中文字复制');
+}
+
 async function copyMessageCode(button) {
   if (button.disabled) return;
   const code = button.closest('.markdown-code-block')?.querySelector('pre code');

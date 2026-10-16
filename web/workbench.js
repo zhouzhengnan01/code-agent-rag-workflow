@@ -53,6 +53,7 @@ const resourceKinds = Object.keys(labels);
 let state = {
   page: 'dashboard', cache: {}, thread: null, threadScope: 'active', chatThreads: [],
   chatCapabilities: { skill_ids: [], mcp_server_ids: [] }, activeTurn: null,
+  chatRuntime: null,
   projects: [], activeProjectId: null, pendingProjectTurn: null, projectDetailId: null, intentPending: false,
   filesPanelOpen: false, chatFiles: [], chatHistoryOpen: true, chatThreadFilter: '',
   chatModels: [], chatModelError: '', chatAttachments: [], chatDrafts: {}, modelSaving: false,
@@ -61,6 +62,8 @@ let state = {
   chatPollTimer: null, chatPollEpoch: 0, chatPollError: '', chatStopPending: false,
   chatEventSequences: {}, chatEvents: {}, chatMessageSignatures: {}, chatInteractionSignatures: {}, chatInteractionSubmissions: {},
   chatInteractionCollapsed: {}, chatQueueMutations: {},
+  userMessageEdit: null,
+  fileWorkspace: null,
 };
 
 const $ = selector => document.querySelector(selector);
@@ -286,6 +289,8 @@ async function loadPage() {
   if (state.page === 'chat' && state.pendingProjectTurn) return toast('请先处理当前任务的项目确认', true);
   const content = $('#content');
   stopChatPolling();
+  if (state.page !== 'chat' || (state.fileWorkspace && state.fileWorkspace.threadId !== state.thread)) disposeFileWorkspace();
+  else state.fileWorkspace?.dragCleanup?.();
   document.body.classList.toggle('page-dashboard', state.page === 'dashboard');
   content.classList.toggle('viewport-chat', state.page === 'chat');
   content.innerHTML = loading();
@@ -1242,11 +1247,17 @@ async function setActiveProject(projectId) {
   });
   state.activeProjectId = projectId;
   if (state.currentThread) state.currentThread.active_project_id = projectId;
+  await refreshChatRuntime();
   renderProjectChip();
   if (state.page === 'chat') await refreshChatFiles();
 }
 
 function fileTreeHtml(artifacts, projectId) {
+  const workspace = ensureFileWorkspace();
+  const folder = (name, path, children, root = false) => {
+    const key = `${projectId}:${path}`;
+    return `<details class="chat-file-folder ${root ? 'chat-file-project-root' : ''}" data-folder-key="${esc(key)}" ${workspace.closedFolders.has(key) ? '' : 'open'} ontoggle="rememberFileFolder(this)"><summary><span class="chat-file-chevron">${fileWorkspaceIcon('chevron')}</span><span class="chat-file-folder-icon" aria-hidden="true"><span class="folder-icon-open">${fileWorkspaceIcon('folder-open')}</span><span class="folder-icon-closed">${fileWorkspaceIcon('folder')}</span></span><span class="chat-file-folder-name">${esc(name)}</span><button type="button" class="chat-file-download" data-project-id="${esc(projectId)}" data-folder-path="${esc(path)}" onclick="event.preventDefault();event.stopPropagation();downloadProjectArchive(this.dataset.projectId,this.dataset.folderPath)" aria-label="下载文件夹 ${esc(name)}">${fileWorkspaceIcon('download')}</button></summary><div class="chat-file-children">${children}</div></details>`;
+  };
   const root = { directories: new Map(), files: [] };
   for (const artifact of artifacts) {
     const parts = String(artifact.path || '').split('/').filter(Boolean);
@@ -1260,11 +1271,134 @@ function fileTreeHtml(artifacts, projectId) {
   }
   const render = (node, parentPath = '') => `${[...node.directories].sort(([a], [b]) => a.localeCompare(b)).map(([name, child]) => {
     const folderPath = parentPath ? `${parentPath}/${name}` : name;
-    return `<details class="chat-file-folder" open><summary><span class="chat-file-folder-icon" aria-hidden="true">▱</span><span class="chat-file-folder-name">${esc(name)}</span><button type="button" class="chat-file-download" data-folder-path="${esc(folderPath)}" onclick="event.preventDefault();event.stopPropagation();downloadProjectArchive('${esc(projectId)}',this.dataset.folderPath)" aria-label="下载文件夹 ${esc(folderPath)}">↓</button></summary><div class="chat-file-children">${render(child, folderPath)}</div></details>`;
+    return folder(name, folderPath, render(child, folderPath));
   }).join('')}
     ${node.files.sort((a, b) => a.name.localeCompare(b.name)).map(item => `
-    <div class="chat-file-row"><button type="button" class="chat-file-open" onclick="viewProjectArtifact('${esc(projectId)}','${esc(item.id)}')" title="查看 ${esc(item.path)}" aria-label="查看 ${esc(item.path)}"><span aria-hidden="true">${/\.py$/i.test(item.name) ? '🐍' : '▤'}</span><span>${esc(item.name)}</span></button><small>${item.size_bytes != null ? formatFileSize(item.size_bytes) : ''}</small><button type="button" class="chat-file-download" data-file-name="${esc(item.name)}" onclick="downloadProjectArtifact('${esc(projectId)}','${esc(item.id)}',this.dataset.fileName)" aria-label="下载 ${esc(item.path)}">↓</button></div>`).join('')}`;
-  return `<details class="chat-file-folder chat-file-project-root" open><summary><span class="chat-file-folder-icon" aria-hidden="true">▱</span><span class="chat-file-folder-name">${esc(projectName(projectId))}</span><button type="button" class="chat-file-download" onclick="event.preventDefault();event.stopPropagation();downloadProjectArchive('${esc(projectId)}')" aria-label="下载项目 ${esc(projectName(projectId))}">↓</button></summary><div class="chat-file-children">${render(root)}</div></details>`;
+    <div class="chat-file-row"><button type="button" class="chat-file-open" data-project-id="${esc(projectId)}" data-artifact-id="${esc(item.id)}" onclick="viewProjectArtifact(this.dataset.projectId,this.dataset.artifactId)" title="查看 ${esc(item.path)}" aria-label="查看 ${esc(item.path)}"><span aria-hidden="true">${fileWorkspaceIcon(item.name)}</span><span>${esc(item.name)}</span></button><small>${item.size_bytes != null ? formatFileSize(item.size_bytes) : ''}</small><button type="button" class="chat-file-download" data-project-id="${esc(projectId)}" data-artifact-id="${esc(item.id)}" data-file-name="${esc(item.name)}" onclick="downloadProjectArtifact(this.dataset.projectId,this.dataset.artifactId,this.dataset.fileName)" aria-label="下载 ${esc(item.path)}">${fileWorkspaceIcon('download')}</button></div>`).join('')}`;
+  return folder(projectName(projectId), '', render(root), true);
+}
+
+function fileWorkspaceIcon(name) {
+  return typeof CodezznFileCode !== 'undefined' ? CodezznFileCode.icon(name) : '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M6 3h9l4 4v14H6z"/></svg>';
+}
+
+function disposeFileWorkspace() {
+  const workspace = state.fileWorkspace;
+  workspace?.dragCleanup?.();
+  for (const tab of workspace?.tabs || []) { tab.controller?.abort(); if (tab.url) URL.revokeObjectURL(tab.url); }
+  if (workspace) { state.filesPanelOpen = false; state.chatFiles = []; }
+  state.fileWorkspace = null;
+}
+
+function ensureFileWorkspace() {
+  if (state.fileWorkspace?.threadId !== state.thread) disposeFileWorkspace();
+  if (!state.fileWorkspace) {
+    let ratio = 55;
+    try { ratio = Number(localStorage.getItem?.('codezzn.files.chatRatio')) || 55; } catch (_) { /* storage may be disabled */ }
+    state.fileWorkspace = { threadId: state.thread, tabs: [], active: 'files', closedFolders: new Set(), treeScroll: 0, ratio: Math.max(28, Math.min(96, ratio)) };
+  }
+  return state.fileWorkspace;
+}
+
+function rememberFileFolder(details) {
+  if (!details.isConnected) return;
+  const workspace = ensureFileWorkspace(), key = details.dataset.folderKey;
+  if (details.open) workspace.closedFolders.delete(key); else workspace.closedFolders.add(key);
+}
+
+function activateFileTab(key) {
+  const workspace = ensureFileWorkspace();
+  if (key !== 'files' && !workspace.tabs.some(tab => tab.key === key)) return;
+  const body = $('#fileWorkspaceBody');
+  if (workspace.active === 'files') workspace.treeScroll = body?.scrollTop || 0;
+  else { const prior = workspace.tabs.find(tab => tab.key === workspace.active); if (prior) prior.scroll = body?.scrollTop || 0; }
+  workspace.active = key; state.filesPanelOpen = true; renderChatFilesPanel();
+}
+
+function closeFileTab(key) {
+  const workspace = ensureFileWorkspace(); const index = workspace.tabs.findIndex(tab => tab.key === key);
+  if (index < 0) return;
+  const tab = workspace.tabs[index]; tab.controller?.abort(); if (tab.url) URL.revokeObjectURL(tab.url);
+  workspace.tabs.splice(index, 1);
+  if (workspace.active === key) workspace.active = workspace.tabs[Math.min(index, workspace.tabs.length - 1)]?.key || 'files';
+  renderChatFilesPanel();
+}
+
+function filePreviewHtml(tab) {
+  if (tab.status === 'loading') return '<div class="file-preview-status" role="status">正在读取文件…</div>';
+  if (tab.status === 'error') return `<div class="file-preview-status" role="alert"><p>${esc(tab.error)}</p><button type="button" data-file-key="${esc(tab.key)}" onclick="retryFileTab(this.dataset.fileKey)">重试读取</button><button type="button" data-file-key="${esc(tab.key)}" onclick="downloadFileTab(this.dataset.fileKey)">下载文件</button></div>`;
+  if (tab.url) return `<div class="file-preview-media"><img src="${tab.url}" alt="${esc(tab.path)}"></div>`;
+  if (tab.kind === 'binary') return `<div class="file-preview-status"><p>此文件不支持文本预览，请下载查看。</p><button type="button" data-file-key="${esc(tab.key)}" onclick="downloadFileTab(this.dataset.fileKey)">下载文件</button></div>`;
+  if (tab.highlightedSource !== tab.content || tab.highlightedPath !== tab.path || tab.highlighted == null) {
+    tab.highlighted = typeof CodezznFileCode !== 'undefined' ? CodezznFileCode.highlight(tab.content || '', tab.path) : esc(tab.content || '');
+    tab.highlightedSource = tab.content; tab.highlightedPath = tab.path;
+  }
+  return `<pre class="file-source-preview" tabindex="0" aria-label="${esc(tab.path)} 文件内容"><code>${tab.highlighted}</code></pre>`;
+}
+
+function downloadFileTab(key) {
+  const tab = ensureFileWorkspace().tabs.find(item => item.key === key); if (!tab) return;
+  if (tab.projectId) return downloadProjectArtifact(tab.projectId, tab.artifactId, tab.path);
+  return downloadArtifactFile({ dataset: { url: tab.downloadUrl, fileName: tab.path } });
+}
+
+function retryFileTab(key) {
+  const tab = ensureFileWorkspace().tabs.find(item => item.key === key);
+  if (tab) return loadFileTab(tab);
+}
+
+async function loadFileTab(tab) {
+  const workspace = ensureFileWorkspace(); const threadId = state.thread;
+  tab.controller?.abort(); const controller = new AbortController(); tab.controller = controller;
+  if (tab.url) URL.revokeObjectURL(tab.url); tab.url = null; tab.status = 'loading'; renderChatFilesPanel();
+  const current = () => state.page === 'chat' && state.thread === threadId && state.fileWorkspace === workspace && workspace.tabs.includes(tab) && tab.controller === controller;
+  try {
+    const image = /\.(png|jpe?g|webp|gif|avif)$/i.test(tab.path);
+    const text = /\.(py|pyi|js|mjs|cjs|ts|tsx|jsx|html?|svg|css|scss|json|jsonl|md|markdown|txt|ya?ml|toml|sh|bash|ps1|sql|xml|csv|log|ini|conf|cfg|c|h|cpp|hpp|cs|java|go|rs|rb|php|vue|svelte|dockerfile)$/i.test(tab.path) || /(^|\/)(\.gitignore|\.env(?:\.example)?|Dockerfile|Makefile|LICENSE)$/i.test(tab.path);
+    if (!image && !text) { tab.kind = 'binary'; tab.status = 'ready'; return; }
+    if (tab.size > (image ? 20 * 1024 * 1024 : 1024 * 1024)) throw new Error('文件过大，请下载后查看');
+    if (image || !tab.projectId) {
+      const response = await fetch(tab.downloadUrl, { headers: headers(false), signal: controller.signal });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || `HTTP ${response.status}`);
+      const blob = await readFilePreviewBlob(response, image ? 20 * 1024 * 1024 : 1024 * 1024);
+      if (!current()) return;
+      if (blob.size > (image ? 20 * 1024 * 1024 : 1024 * 1024)) throw new Error('文件过大，请下载后查看');
+      if (image) { tab.url = URL.createObjectURL(new Blob([blob], {type: `image/${/jpe?g$/i.test(tab.path) ? 'jpeg' : tab.path.split('.').pop().toLowerCase()}`})); tab.kind = 'image'; }
+      else { tab.content = await blob.text(); if (tab.content.includes('\0')) throw new Error('该文件不是可预览的文本文件'); tab.kind = 'text'; }
+    } else {
+      const result = await api(`/api/projects/${encodeURIComponent(tab.projectId)}/artifacts/${encodeURIComponent(tab.artifactId)}/content`, {signal: controller.signal});
+      if (!current()) return;
+      tab.content = String(result.content ?? ''); tab.kind = 'text';
+    }
+    if (current()) tab.status = 'ready';
+  } catch (error) { if (current() && error.name !== 'AbortError') { tab.status = 'error'; tab.error = error.message; } }
+  finally { if (current()) renderChatFilesPanel(); }
+}
+
+function openFileTab(item) {
+  const workspace = ensureFileWorkspace(); const key = `${item.projectId || 'conversation'}:${item.artifactId}`;
+  let tab = workspace.tabs.find(value => value.key === key);
+  if (!tab) {
+    if (workspace.tabs.length >= 20) return toast('最多同时预览 20 个文件，请先关闭部分标签', true);
+    tab = {...item, key, status: 'loading'}; workspace.tabs.push(tab);
+  }
+  activateFileTab(key);
+  if (tab.status === 'loading' && !tab.controller) return loadFileTab(tab);
+}
+
+async function readFilePreviewBlob(response, limit) {
+  if (Number(response.headers?.get('content-length')) > limit) throw new Error('文件过大，请下载后查看');
+  if (!response.body?.getReader) { const blob = await response.blob(); if (blob.size > limit) throw new Error('文件过大，请下载后查看'); return blob; }
+  const reader = response.body.getReader(), chunks = []; let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      size += value.byteLength;
+      if (size > limit) { await reader.cancel(); throw new Error('文件过大，请下载后查看'); }
+      chunks.push(value);
+    }
+    return new Blob(chunks);
+  } finally { reader.releaseLock(); }
 }
 
 function formatFileSize(bytes) {
@@ -1277,25 +1411,65 @@ function renderChatFilesPanel() {
   const studio = $('.chat-studio');
   const panel = $('#chatFilesPanel');
   if (!studio || !panel) return;
-  const hasConversationFiles = (state.currentThread?.messages || []).some(message =>
-    message.role === 'assistant' && Array.isArray(message.project_artifacts) &&
-    message.project_artifacts.some(artifact => artifact.project_id === state.activeProjectId));
+  const workspace = ensureFileWorkspace();
   const visible = state.filesPanelOpen;
   const outputs = state.currentThread?.conversation_artifacts || [];
   const totalFiles = state.chatFiles.length + outputs.length;
   studio.classList.toggle('has-file-panel', visible);
   panel.hidden = !visible;
+  const splitter = $('#chatFilesSplitter'); if (splitter) splitter.hidden = !visible;
+  applyFileSplit(workspace.ratio, false);
   const toggle = $('#filesPanelToggle');
   if (toggle) {
-    toggle.hidden = false;
+    toggle.hidden = !totalFiles && !workspace.tabs.length && !visible;
     toggle.setAttribute('aria-pressed', String(visible));
-    toggle.innerHTML = `<span aria-hidden="true">▤</span> Files <small>${totalFiles}</small>`;
+    toggle.innerHTML = `<span aria-hidden="true">${fileWorkspaceIcon('file-text')}</span> Files <small>${totalFiles}</small>`;
   }
   const projectId = state.activeProjectId;
-  panel.innerHTML = `<header class="chat-files-header"><div><strong>▤ Files <small>${totalFiles}</small></strong></div><button type="button" onclick="toggleChatFiles()" aria-label="关闭文件面板">×</button></header>
-    <div class="chat-files-toolbar"><span>${totalFiles} files</span>${projectId && state.chatFiles.length ? `<button type="button" onclick="downloadProjectArchive('${esc(projectId)}')">↓ Download all</button>` : ''}</div>
-    <div class="chat-files-tree">${!projectId ? '<div class="chat-files-empty"><p>选择一个项目，在这里查看智能体创建的文件。</p><button type="button" onclick="openProjectPicker()">选择项目</button></div>' : state.chatFiles.length ? fileTreeHtml(state.chatFiles, projectId) : '<div class="chat-files-empty"><p>这个项目还没有已保存的文件。</p></div>'}${outputs.length ? `<section class="conversation-file-list"><h3>对话产物</h3>${outputs.map(item => artifactOutputHtml({ ...item, canPreview: item.previewable, previewable: false })).join('')}</section>` : ''}</div>`;
-  hydrateChatAttachmentPreviews();
+  const tab = workspace.tabs.find(item => item.key === workspace.active);
+  const tabsHtml = `<header class="file-workspace-tabs" role="tablist" aria-label="文件标签"><button type="button" role="tab" aria-selected="${!tab}" aria-controls="fileWorkspaceBody" onclick="activateFileTab('files')">${fileWorkspaceIcon('file-text')}<span>Files <small>(${totalFiles})</small></span></button>${workspace.tabs.map(item => `<div class="file-workspace-tab ${item.key === workspace.active ? 'is-active' : ''}"><button type="button" role="tab" aria-selected="${item.key === workspace.active}" aria-controls="fileWorkspaceBody" data-file-key="${esc(item.key)}" title="${esc(item.path)}" onclick="activateFileTab(this.dataset.fileKey)">${fileWorkspaceIcon(item.path)}<span>${esc(item.path.split('/').at(-1))}</span></button><button type="button" data-file-key="${esc(item.key)}" onclick="closeFileTab(this.dataset.fileKey)" aria-label="关闭 ${esc(item.path.split('/').at(-1))}">${fileWorkspaceIcon('close')}</button></div>`).join('')}</header>`;
+  const treeHtml = `<div class="chat-files-toolbar"><span>${totalFiles} files</span>${projectId && state.chatFiles.length ? `<button type="button" data-project-id="${esc(projectId)}" onclick="downloadProjectArchive(this.dataset.projectId)">${fileWorkspaceIcon('download')} Download all</button>` : ''}</div><div class="chat-files-tree" role="tree" aria-label="项目文件树">${!projectId ? '<div class="chat-files-empty"><p>选择一个项目，在这里查看智能体创建的文件。</p><button type="button" onclick="openProjectPicker()">选择项目</button></div>' : state.chatFiles.length ? fileTreeHtml(state.chatFiles, projectId) : '<div class="chat-files-empty"><p>这个项目还没有已保存的文件。</p></div>'}${outputs.length ? `<section class="conversation-file-list"><h3>对话产物</h3>${outputs.map(item => `<div class="chat-file-row"><button type="button" class="chat-file-open" data-artifact-id="${esc(item.id)}" onclick="openConversationFile(this.dataset.artifactId)">${fileWorkspaceIcon(item.name || item.path)}<span>${esc(item.name || item.path)}</span></button><small>${formatFileSize(item.size_bytes)}</small><button type="button" class="chat-file-download" data-url="${esc(item.download_url)}" data-file-name="${esc(item.name || item.path)}" onclick="downloadArtifactFile(this)" aria-label="下载 ${esc(item.name || item.path)}">${fileWorkspaceIcon('download')}</button></div>`).join('')}</section>` : ''}</div>`;
+  const html = tabsHtml + `<div class="file-workspace-body ${tab ? 'is-preview' : ''}" id="fileWorkspaceBody" role="tabpanel">${tab ? filePreviewHtml(tab) : treeHtml}</div>`;
+  if (panel._filesHtml !== html) {
+    const body = $('#fileWorkspaceBody'); const same = panel.dataset.activeFile === (tab?.key || 'files'); const scroll = same ? body?.scrollTop : tab?.scroll || workspace.treeScroll;
+    panel.innerHTML = html; panel._filesHtml = html; panel.dataset.activeFile = tab?.key || 'files';
+    const next = $('#fileWorkspaceBody'); if (next) next.scrollTop = scroll || 0;
+  }
+}
+
+function openConversationFile(artifactId) {
+  const item = (state.currentThread?.conversation_artifacts || []).find(file => file.id === artifactId);
+  if (!item) return toast('文件不存在或不属于当前对话', true);
+  if (!/^\/api\/threads\/thr_[0-9a-f]{16}\/artifacts\/art_[0-9a-f]{16}\/download$/.test(item.download_url || '')) return toast('产物下载地址无效', true);
+  return openFileTab({ artifactId: item.id, path: item.name || item.path, downloadUrl: item.download_url, size: item.size_bytes });
+}
+
+function applyFileSplit(value, persist = true) {
+  const studio = $('.chat-studio'); if (!studio) return;
+  const width = studio.getBoundingClientRect?.().width || 1200;
+  const minimum = Math.max(28, Math.min(48, 320 / width * 100));
+  const maximum = Math.max(minimum, Math.min(96, 100 - Math.min(240, width * .35) / width * 100));
+  const ratio = Math.max(minimum, Math.min(maximum, Number(value) || 55));
+  ensureFileWorkspace().ratio = ratio;
+  studio.style.setProperty('--files-chat-ratio', `${ratio}fr`); studio.style.setProperty('--files-panel-ratio', `${100 - ratio}fr`);
+  const splitter = $('#chatFilesSplitter'); if (splitter) { splitter.setAttribute('aria-valuenow', String(Math.round(ratio))); splitter.setAttribute('aria-valuetext', `${Math.round(ratio)}% chat width`); }
+  if (persist) try { localStorage.setItem('codezzn.files.chatRatio', String(ratio)); } catch (_) { /* private browsing */ }
+}
+
+function resizeFilesKey(event) {
+  const ratio = ensureFileWorkspace().ratio;
+  const next = {ArrowLeft: ratio - 2, ArrowRight: ratio + 2, Home: 28, End: 96}[event.key];
+  if (next != null) { event.preventDefault(); applyFileSplit(next); }
+}
+
+function startFilesResize(event) {
+  if (event.button !== 0) return;
+  event.preventDefault(); const handle = event.currentTarget, workspace = ensureFileWorkspace();
+  workspace.dragCleanup?.(); handle.setPointerCapture?.(event.pointerId); document.body.classList.add('is-resizing-files');
+  const move = pointer => { if (pointer.pointerId !== event.pointerId) return; const rect = $('.chat-studio')?.getBoundingClientRect(); if (rect?.width) applyFileSplit((pointer.clientX - rect.left) / rect.width * 100, false); };
+  const cleanup = () => { handle.removeEventListener('pointermove', move); handle.removeEventListener('pointerup', end); handle.removeEventListener('pointercancel', end); handle.removeEventListener('lostpointercapture', end); document.body.classList.remove('is-resizing-files'); workspace.dragCleanup = null; };
+  const end = pointer => { if (pointer.pointerId !== event.pointerId) return; cleanup(); applyFileSplit(workspace.ratio); };
+  workspace.dragCleanup = cleanup; handle.addEventListener('pointermove', move); handle.addEventListener('pointerup', end); handle.addEventListener('pointercancel', end); handle.addEventListener('lostpointercapture', end);
 }
 
 function toggleChatFiles() {
@@ -1314,21 +1488,26 @@ async function openChatProject(button) {
 }
 
 async function openChatArtifact(button) {
-  await openChatProject(button);
-  if (state.activeProjectId === button.dataset.projectId) {
-    await viewProjectArtifact(button.dataset.projectId, button.dataset.artifactId);
-  }
+  await viewProjectArtifact(button.dataset.projectId, button.dataset.artifactId);
 }
 
 async function refreshChatFiles() {
   const projectId = state.activeProjectId;
-  state.chatFiles = [];
+  const threadId = state.thread;
+  if (state.fileWorkspace?.projectId !== projectId) state.chatFiles = [];
+  ensureFileWorkspace().projectId = projectId;
   renderChatFilesPanel();
   if (!projectId) return;
   try {
     const result = await api(`/api/projects/${encodeURIComponent(projectId)}/artifacts`);
-    if (state.page !== 'chat' || state.activeProjectId !== projectId) return;
+    if (state.page !== 'chat' || state.activeProjectId !== projectId || state.thread !== threadId) return;
     state.chatFiles = Array.isArray(result.data) ? result.data : [];
+    for (const tab of ensureFileWorkspace().tabs) {
+      if (tab.projectId !== projectId) continue;
+      const file = state.chatFiles.find(item => item.id === tab.artifactId);
+      if (!file) { tab.controller?.abort(); if (tab.url) URL.revokeObjectURL(tab.url); tab.url = null; tab.status = 'error'; tab.error = '文件已移除或暂不可用，请刷新后重试'; }
+      else if (tab.version !== (file.sha256 || file.updated_at || file.size_bytes)) { tab.version = file.sha256 || file.updated_at || file.size_bytes; loadFileTab(tab); }
+    }
     renderChatFilesPanel();
   } catch (error) {
     if (state.activeProjectId === projectId) toast(`项目文件加载失败：${error.message}`, true);
@@ -1473,7 +1652,15 @@ async function projectArtifactResponse(projectId, artifactId) {
 }
 
 async function viewProjectArtifact(projectId, artifactId) {
-  const item = (await api(`/api/projects/${encodeURIComponent(projectId)}/artifacts`)).data.find(value => value.id === artifactId);
+  const threadId = state.thread, fromChat = state.page === 'chat';
+  let item;
+  try { item = (await api(`/api/projects/${encodeURIComponent(projectId)}/artifacts`)).data.find(value => value.id === artifactId); }
+  catch (error) { return toast(`读取文件列表失败：${error.message}`, true); }
+  if (fromChat) {
+    if (threadId !== state.thread || state.page !== 'chat') return;
+    if (!item) return toast('文件不存在', true);
+    return openFileTab({ projectId, artifactId, path: item.path, downloadUrl: `/api/projects/${encodeURIComponent(projectId)}/artifacts/${encodeURIComponent(artifactId)}/download`, size: item.size_bytes, version: item.sha256 || item.updated_at || item.size_bytes });
+  }
   if (item && /\.(png|jpe?g|webp)$/i.test(item.path)) return viewArtifactImage({ dataset: { url: `/api/projects/${projectId}/artifacts/${artifactId}/download`, fileName: item.path } });
   if (!item) return toast('文件不存在', true);
   if (!/\.(py|js|ts|tsx|jsx|html|css|json|md|txt|yaml|yml|toml|sh|ps1|sql)$/i.test(item.path)) return downloadProjectArtifact(projectId, artifactId, item.path);
@@ -1533,8 +1720,8 @@ async function chat() {
   clearChatAttachmentPreviews();
   document.body.classList.add('page-chat');
   const archived = state.threadScope === 'archived';
-  const [agents, skills, mcps, threadResult, modelResult] = await Promise.all([
-    load('agents'), load('skills'), load('mcp_servers'), api(`/api/threads?archived=${archived}`), api('/api/chat/models').catch(error => ({ data: [], error: error.message })), refreshProjects(),
+  const [agents, skills, mcps, threadResult, modelResult, runtime] = await Promise.all([
+    load('agents'), load('skills'), load('mcp_servers'), api(`/api/threads?archived=${archived}`), api('/api/chat/models').catch(error => ({ data: [], error: error.message })), api('/api/chat/runtime'), refreshProjects(),
   ]);
   const threads = threadResult.data;
   state.chatThreads = threads;
@@ -1543,7 +1730,8 @@ async function chat() {
   const approvals = state.thread
     ? (await api(`/api/threads/${state.thread}/approvals/inbox`).catch(() => ({ data: [] }))).data
     : [];
-  const selectedAgent = current?.agent_id || agents[0]?.id || '';
+  state.chatRuntime = current ? await api(`/api/chat/runtime?thread_id=${encodeURIComponent(current.id)}`) : runtime;
+  const selectedAgent = current?.agent_id || runtime.default_agent_id || agents[0]?.id || '';
   const selectedAgentConfig = agents.find(item => item.id === selectedAgent) || {};
   const overrides = current?.capability_overrides || {};
   state.chatCapabilities = {
@@ -1584,12 +1772,17 @@ async function chat() {
           <textarea id="chatInput" aria-label="消息" rows="2" placeholder="向智能体发送任务…">${esc(draft.content)}</textarea>
           <div class="prompt-footer"><div class="prompt-tools composer-tools"><button type="button" class="composer-action" id="attachBtn" onclick="document.getElementById('chatAttachmentInput').click()" aria-label="上传附件" title="上传文档、代码或图片">${chatIcon('attach')}</button><input type="file" id="chatAttachmentInput" aria-label="选择对话附件" multiple hidden accept=".txt,.md,.markdown,.pdf,.docx,.json,.csv,.py,.js,.ts,.tsx,.jsx,.html,.css,.yaml,.yml,.xml,.log,.sql,.sh,.png,.jpg,.jpeg,.webp" onchange="uploadChatAttachments(Array.from(this.files));this.value=''">
             <label class="composer-model">${chatIcon('model')}<select id="chatModel" aria-label="选择模型" onchange="changeChatModel(this.value)">${chatModelOptions(selectedAgentConfig)}</select></label>
+            <label class="composer-permission"><select id="chatPermissionMode" aria-label="权限模式" title="权限在执行工具时检查，不能绕过沙箱或拒绝策略" onchange="changeChatPermissionMode(this.value)">${chatPermissionOptions()}</select></label>
+            <button type="button" class="composer-action" onclick="openSkillCommands()" aria-label="按需使用 Skill" title="输入 /技能名 按需使用">/</button>
+            <button type="button" class="composer-action" onclick="openRuntimeSettings()" aria-label="默认配置" title="用户与项目默认配置">⚙</button>
           </div><button class="composer-interrupt" id="interruptBtn" type="button" onclick="sendMessage({interrupt:true})" hidden title="停止当前任务后立即执行输入框中的新指令">立即调整</button><button class="composer-stop" id="stopBtn" type="button" onclick="stopGeneration()" hidden aria-label="停止当前任务" title="停止当前任务，保留待执行队列"><span class="stop-glyph" aria-hidden="true"></span></button><button class="button button-primary composer-send" id="sendBtn" type="button" onclick="sendMessage()" aria-label="发送消息" title="发送消息">${chatIcon('send')}</button></div>
           <div class="composer-context"><div class="project-context-bar"><div id="projectChip">${projectChipHtml()}</div></div><div class="capability-strip" id="capabilityStrip">${capabilityBarHtml(skills, mcps)}</div></div>
           <div class="attachment-error" id="chatComposerError" role="alert">${state.chatModelError ? `模型列表加载失败：${esc(state.chatModelError)}` : ''}</div>
-          <div class="composer-hint" id="chatQueueHint">Enter 发送 · Shift+Enter 换行 · 可拖入附件</div>
+          <div class="composer-hint" id="chatQueueHint">Enter 发送 · /技能名 按需使用 · 写入和命令执行时审批</div>
+          <div id="skillCommands" class="skill-command-menu" hidden></div>
         </footer>
       </section>
+      <div class="chat-files-splitter" id="chatFilesSplitter" role="separator" tabindex="0" aria-label="调整聊天与文件面板宽度" aria-orientation="vertical" aria-valuemin="28" aria-valuemax="96" aria-valuenow="55" onpointerdown="startFilesResize(event)" onkeydown="resizeFilesKey(event)" hidden></div>
       <aside class="chat-files-panel" id="chatFilesPanel" aria-label="项目文件"></aside>
     </div>`;
   renderChatFilesPanel();
@@ -1618,12 +1811,14 @@ async function chat() {
 }
 
 function chatIcon(name) {
+  if (name === 'copy') return '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></svg>';
   if (name === 'edit') return '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 3 5 5-12 12-6 1 1-6zM14 5l5 5M4 15l5 5"/></svg>';
   const paths = { attach: '<path d="m21 11-8.5 8.5a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.5 5.5l-9 9a2 2 0 0 1-2.8-2.8l8.3-8.3"/>', send: '<path d="M12 19V5m-7 7 7-7 7 7"/>', menu: '<path d="M4 6h16M4 12h16M4 18h16"/>', model: '<path d="m12 3 3 6 6 3-6 3-3 6-3-6-6-3 6-3z"/>', file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>', code: '<path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-13-2 20"/>' };
   return `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`;
 }
 
 function chatModelOptions(agent = {}) {
+  if (state.chatRuntime && state.chatRuntime.agent_id === agent?.id) agent = { ...agent, model: state.chatRuntime.model };
   const chosen = state.currentThread?.model_override || {};
   const selected = chosen.provider_id && chosen.model ? encodeURIComponent(JSON.stringify({ provider_id: chosen.provider_id, model: chosen.model })) : '';
   const groups = new Map();
@@ -1686,6 +1881,12 @@ function artifactOutputHtml(item) {
 }
 
 async function viewArtifactImage(button) {
+  if (state.page === 'chat') {
+    const project = /^\/api\/projects\/(prj_[0-9a-f]{16})\/artifacts\/(art_[0-9a-f]{16})\/download$/.exec(button.dataset.url || '');
+    if (project) return viewProjectArtifact(project[1], project[2]);
+    const item = (state.currentThread?.conversation_artifacts || []).find(file => file.download_url === button.dataset.url);
+    return item ? openConversationFile(item.id) : toast('文件不存在或不属于当前对话', true);
+  }
   try {
     const url = URL.createObjectURL(await fetchArtifactFile(button.dataset.url));
     modal(button.dataset.fileName, `<img class="artifact-image-full" src="${url}" alt="${esc(button.dataset.fileName)}">`, null, true);
@@ -1805,8 +2006,8 @@ function capabilityBarHtml(skills = state.cache.skills || [], mcps = state.cache
     <div class="capability-chips">
       ${chips.length ? chips.map(item => `
         <span class="capability-chip"><small>${item.label}</small><strong>${esc(item.name)}</strong>
-          <button type="button" aria-label="从本会话移除 ${esc(item.name)}" onclick="removeChatCapability('${item.kind}','${item.id}')">×</button>
-        </span>`).join('') : '<span class="capability-empty">本会话未启用 Skill 或 MCP</span>'}
+          <button type="button" aria-label="移除显式绑定 ${esc(item.name)}" title="移除显式绑定；自动发现开启时仍可按需使用" onclick="removeChatCapability('${item.kind}','${item.id}')">×</button>
+        </span>`).join('') : `<span class="capability-empty">${state.chatRuntime?.skill_discovery === 'auto' ? 'Skill 自动发现 · 输入 / 按需使用' : '可输入 / 查看技能，或添加扩展'}</span>`}
       <button class="capability-add" type="button" onclick="openCapabilityPicker()" aria-label="添加 Skill 或 MCP"><span aria-hidden="true">+</span> 添加</button>
     </div>`;
 }
@@ -1814,6 +2015,79 @@ function capabilityBarHtml(skills = state.cache.skills || [], mcps = state.cache
 function renderCapabilityBar() {
   const target = $('#capabilityStrip');
   if (target) target.innerHTML = capabilityBarHtml();
+}
+
+function chatPermissionOptions() {
+  const selected = state.currentThread?.capability_overrides?.permission_mode || '';
+  const effective = state.chatRuntime?.permission_mode || 'default';
+  const labels = { default: '逐次审批', acceptEdits: '自动接受文件编辑', plan: '只读计划' };
+  return [['', `继承：${labels[effective] || effective}`], ...Object.entries(labels)].map(([value, label]) =>
+    `<option value="${value}" ${selected === value ? 'selected' : ''}>${esc(label)}</option>`).join('');
+}
+
+async function refreshChatRuntime() {
+  const thread = state.thread;
+  const result = await api(`/api/chat/runtime${thread ? `?thread_id=${encodeURIComponent(thread)}` : ''}`);
+  if (thread !== state.thread) return;
+  state.chatRuntime = result;
+  const control = $('#chatPermissionMode'); if (control) control.innerHTML = chatPermissionOptions();
+  renderCapabilityBar();
+}
+
+async function changeChatPermissionMode(value) {
+  if (state.activeTurn || state.chatSubmitPending) return toast('请先完成或停止当前任务，再切换权限模式', true);
+  try {
+    const thread = await ensureChatThread();
+    const overrides = { ...(state.currentThread?.capability_overrides || {}) };
+    if (value) overrides.permission_mode = value; else delete overrides.permission_mode;
+    const updated = await api(`/api/threads/${encodeURIComponent(thread)}`, { method: 'PATCH', body: JSON.stringify({ capability_overrides: overrides }) });
+    if (state.thread !== thread) return;
+    state.currentThread = { ...state.currentThread, ...updated };
+    await refreshChatRuntime(); toast('权限模式已更新；沙箱和拒绝策略保持生效');
+  } catch (error) { toast(error.message, true); const control = $('#chatPermissionMode'); if (control) control.innerHTML = chatPermissionOptions(); }
+}
+
+function openRuntimeSettings() {
+  const current = state.chatRuntime || {};
+  modal('默认运行配置', `<form id="runtimeSettingsForm" class="form-layout">
+    <p class="control-help control-full">无需先创建智能体。默认 Codezzn 会继承用户配置、项目配置和会话覆盖；自定义智能体保留原权限。修改默认配置只影响之后开始的回合，不批准已暂停的操作。</p>
+    ${selectField('保存范围', 'scope', `<option value="user">我的用户默认配置</option>${state.activeProjectId ? '<option value="project">当前项目配置</option>' : ''}`, true)}
+    ${selectField('默认模型', 'default_model', `<option value="">保持现有默认模型</option>${(state.chatModels || []).map(model => `<option value="${esc(encodeURIComponent(JSON.stringify({provider_id:model.provider_id,model:model.model})))}">${esc(model.provider_name || model.provider_id)} / ${esc(model.model)}</option>`).join('')}`, true, '保存后由新的默认对话继承；当前会话已有的模型覆盖仍优先。')}
+    ${selectField('默认权限', 'permission_mode', [['default','逐次审批：文件写入与命令都需确认'],['acceptEdits','自动接受工作区文件编辑；命令仍需确认'],['plan','只读计划：不执行写入和命令']].map(([v,l]) => `<option value="${v}" ${current.permission_mode === v ? 'selected' : ''}>${l}</option>`).join(''), true)}
+    ${selectField('Skill 发现', 'skill_discovery', `<option value="auto" ${current.skill_discovery === 'auto' ? 'selected' : ''}>自动发现我的已启用技能，按需读取</option><option value="off" ${current.skill_discovery !== 'auto' ? 'selected' : ''}>仅使用显式绑定的技能</option>`, true)}
+    <p class="control-help control-full">自动发现仅限当前账号安装的技能及当前项目范围。脚本依赖不会自动安装；Skill 不能提升工具权限或访问其他用户数据。</p>
+  </form>`, async () => {
+    const form = $('#runtimeSettingsForm');
+    const url = form.elements.scope.value === 'project' ? `/api/projects/${encodeURIComponent(state.activeProjectId)}/runtime-settings` : '/api/chat/runtime/settings';
+    try {
+      const model = form.elements.default_model.value ? JSON.parse(decodeURIComponent(form.elements.default_model.value)) : {};
+      await api(url, { method: 'PATCH', body: JSON.stringify({ ...model, permission_mode: form.elements.permission_mode.value, skill_discovery: form.elements.skill_discovery.value }) });
+      closeModal(); await refreshChatRuntime(); toast('默认配置已保存；现有会话的显式覆盖优先');
+    } catch (error) { toast(error.message, true); }
+  });
+}
+
+function renderSkillCommands(showAll = false) {
+  const menu = $('#skillCommands'), input = $('#chatInput'); if (!menu || !input) return;
+  const text = input.value.trim();
+  if (!showAll && (!text.startsWith('/') || /\s/.test(text))) { menu.hidden = true; return; }
+  const query = showAll || ['/skills', '/skill'].includes(text) ? '' : text.slice(1).toLowerCase();
+  const skills = (state.chatRuntime?.skills || []).filter(skill => skill.user_invocable && (!query || skill.command.toLowerCase().includes(query) || skill.name.toLowerCase().includes(query)));
+  menu.innerHTML = `<div class="skill-command-heading">按需使用 Skill · 不改变执行权限</div>${skills.length ? skills.map(skill => `<button type="button" data-skill-id="${esc(skill.id)}" onclick="chooseSkillCommand(this)"><strong>/${esc(skill.command)}</strong><span>${esc(skill.description || skill.name)}</span>${skill.manual_only ? '<small>仅手动调用</small>' : ''}</button>`).join('') : '<p>暂无可用技能，请在“技能”页导入。当前账号和项目以外的技能不可见。</p>'}`;
+  menu.hidden = false;
+}
+
+async function openSkillCommands() {
+  try { await refreshChatRuntime(); renderSkillCommands(true); } catch (error) { toast(error.message, true); }
+}
+
+function chooseSkillCommand(button) {
+  const skill = state.chatRuntime?.skills?.find(item => item.id === button.dataset.skillId);
+  if (!skill) return;
+  const duplicate = state.chatRuntime.skills.filter(item => item.command === skill.command && item.user_invocable).length > 1;
+  const input = $('#chatInput'); const old = input.value.trim();
+  input.value = `/${duplicate ? skill.id : skill.command} ${old.startsWith('/') ? '' : old}`;
+  $('#skillCommands').hidden = true; input.focus(); saveComposerDraft(); updateComposerControls();
 }
 
 async function ensureChatThread(agentId) {
@@ -1830,10 +2104,11 @@ async function ensureChatThread(agentId) {
 
 async function saveChatCapabilities() {
   const threadId = await ensureChatThread();
-  await api(`/api/threads/${threadId}`, {
+  const updated = await api(`/api/threads/${threadId}`, {
     method: 'PATCH',
-    body: JSON.stringify({ capability_overrides: state.chatCapabilities }),
+    body: JSON.stringify({ capability_overrides: { ...(state.currentThread?.capability_overrides || {}), ...state.chatCapabilities } }),
   });
+  if (state.thread === threadId) state.currentThread = { ...state.currentThread, ...updated };
 }
 
 async function removeChatCapability(kind, id) {
@@ -1857,7 +2132,7 @@ function openCapabilityPicker() {
   const mcps = (state.cache.mcp_servers || []).filter(item => item.enabled !== false);
   modal('添加会话能力', `
     <form id="capabilityForm" class="form-layout">
-      <section class="form-section control-full"><header><h3>Skill 与 MCP</h3><p>本会话选择立即生效，也可以同步为当前智能体的默认能力。</p></header></section>
+      <section class="form-section control-full"><header><h3>可选扩展</h3><p>无需选择即可聊天。自动发现开启时，已启用 Skill 会按需加载；下方用于显式绑定，自动发现可在默认配置中关闭。MCP 仅连接你明确选择的服务。</p></header></section>
       ${choiceGroup('Skills', 'skill_ids', skills, state.chatCapabilities.skill_ids)}
       ${choiceGroup('MCP 服务', 'mcp_server_ids', mcps, state.chatCapabilities.mcp_server_ids)}
       ${toggleField('同时保存为当前智能体的全局默认配置', 'save_global', false, true)}
@@ -1906,7 +2181,81 @@ async function changeChatAgent(agentId) {
     const updated = await api(`/api/threads/${state.thread}`, { method: 'PATCH', body: JSON.stringify({ agent_id: agentId, model_override: {} }) });
     state.currentThread = { ...state.currentThread, ...updated };
     if ($('#chatModel')) $('#chatModel').innerHTML = chatModelOptions(agent);
+    await refreshChatRuntime();
   } catch (error) { toast(error.message, true); }
+}
+
+function userMessageTime(message) {
+  const queued = state.chatQueue.find(item => item.id === message.meta?.queue_message_id);
+  const value = message.meta?.sent_at ?? queued?.created_at ?? message.created_at;
+  if (value == null || value === '') return { label: '时间未知', title: '这条历史消息未记录发送时间', iso: '' };
+  const numeric = typeof value === 'number' || /^\d+(\.\d+)?$/.test(String(value));
+  const date = new Date(numeric ? Number(value) * (Number(value) < 1e12 ? 1000 : 1) : value);
+  if (!Number.isFinite(date.getTime())) return { label: '时间未知', title: '这条历史消息的发送时间不可用', iso: '' };
+  return { label: date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false }), title: `发送于 ${date.toLocaleString('zh-CN', { hour12: false })}`, iso: date.toISOString() };
+}
+
+function findUserMessage(id) { return state.currentThread?.messages?.find(item => item.id === id && item.role === 'user'); }
+
+function refreshUserMessage(id) {
+  const message = findUserMessage(id); const node = document.getElementById(`chatMessage_${id}`);
+  if (!message || !node) return;
+  const html = messageHtml(message); node.innerHTML = html; state.chatMessageSignatures[id] = html;
+}
+
+async function copyUserMessage(button) {
+  const message = findUserMessage(button.dataset.messageId);
+  if (!message || button.disabled) return;
+  button.disabled = true;
+  try { await copyTextToClipboard(String(message.content ?? '')); toast('消息已复制'); }
+  catch (error) { toast(error.message || '复制失败', true); }
+  finally { button.disabled = false; }
+}
+
+function startEditUserMessage(button) {
+  const message = findUserMessage(button.dataset.messageId);
+  if (!message || button.disabled) return;
+  if (state.chatSubmitPending || state.chatUnknownSubmission || state.userMessageEdit?.pending) return toast('请先确认当前消息的提交状态', true);
+  const old = state.userMessageEdit;
+  state.userMessageEdit = { threadId: state.thread, messageId: message.id, content: String(message.content ?? '') };
+  if (old?.messageId !== message.id) refreshUserMessage(old?.messageId);
+  refreshUserMessage(message.id);
+  const input = document.getElementById(`userMessageEdit_${message.id}`); input?.focus();
+  input?.setSelectionRange?.(input.value.length, input.value.length);
+}
+
+function cancelUserMessageEdit() {
+  const edit = state.userMessageEdit;
+  if (!edit || edit.pending) return;
+  state.userMessageEdit = null;
+  if (edit.threadId === state.thread) refreshUserMessage(edit.messageId);
+}
+
+async function submitUserMessageEdit(button) {
+  const edit = state.userMessageEdit;
+  if (!edit || edit.pending || edit.threadId !== state.thread || button.disabled) return;
+  const message = findUserMessage(edit.messageId);
+  const input = document.getElementById(`userMessageEdit_${edit.messageId}`);
+  const content = input?.value.trim();
+  if (!message || !content) return toast('消息内容不能为空', true);
+  if (state.chatSubmitPending || state.chatUnknownSubmission) return toast('请先确认当前消息的提交状态', true);
+  edit.content = content; edit.pending = true;
+  const controls = button.closest?.('.user-message-editor')?.querySelectorAll('button,textarea');
+  controls?.forEach(control => { control.disabled = true; });
+  try {
+    const result = await sendMessage({ content, preserveDraft: true, attachments: (message.meta?.attachments || []).map(item => ({ ...item, status: 'ready' })) });
+    if (result?.id && state.userMessageEdit === edit) state.userMessageEdit = null;
+  } finally {
+    edit.pending = false;
+    if (edit.threadId === state.thread) { controls?.forEach(control => { control.disabled = false; }); refreshUserMessage(edit.messageId); }
+  }
+}
+
+function userMessageBodyHtml(message) {
+  const edit = state.userMessageEdit;
+  if (message.id && edit?.threadId === state.thread && edit.messageId === message.id) return `<section class="user-message-editor" aria-label="编辑已发送消息"><textarea id="userMessageEdit_${esc(message.id)}" aria-label="编辑消息内容" rows="4" ${edit.pending ? 'disabled' : ''} oninput="if(state.userMessageEdit)state.userMessageEdit.content=this.value">${esc(edit.content)}</textarea><p>重新发送将作为新消息提交，原消息和执行记录保留。</p><div><button type="button" ${edit.pending ? 'disabled' : ''} onclick="cancelUserMessageEdit()">取消</button><button type="button" class="user-edit-send" ${edit.pending ? 'disabled' : ''} onclick="submitUserMessageEdit(this)">${edit.pending ? '正在提交…' : '重新发送'}</button></div></section>`;
+  const time = userMessageTime(message);
+  return `<div class="user-message-bubble"><div class="message-copy">${richText(message.content, [])}</div>${message.id ? `<div class="user-message-actions" role="group" aria-label="消息操作"><time ${time.iso ? `datetime="${esc(time.iso)}"` : ''} title="${esc(time.title)}">${esc(time.label)}</time><button type="button" data-message-id="${esc(message.id)}" onclick="copyUserMessage(this)" aria-label="复制消息" title="复制消息">${chatIcon('copy')}</button><button type="button" data-message-id="${esc(message.id)}" onclick="startEditUserMessage(this)" aria-label="编辑消息" title="编辑消息">${chatIcon('edit')}</button></div>` : ''}</div>`;
 }
 
 function messageHtml(message) {
@@ -1933,7 +2282,7 @@ function messageHtml(message) {
         <header><strong>${assistant ? 'Codezzn' : '你'}</strong>${model ? `<span>${esc(model)}</span>` : ''}</header>
         ${decision}
         ${workTrace}
-        <div class="message-copy">${richText(message.content, artifacts)}</div>
+        ${assistant ? `<div class="message-copy">${richText(message.content, artifacts)}</div>` : userMessageBodyHtml(message)}
         ${message.meta?.attachments?.length ? `<div class="message-attachments">${message.meta.attachments.map(item => attachmentHtml(item)).join('')}</div>` : ''}
         ${missingFile}
         ${artifactCards}
@@ -2132,12 +2481,14 @@ function bindComposer() {
   scrollMessages(true);
   if (!input) return;
   input.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { const menu = $('#skillCommands'); if (menu) menu.hidden = true; }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); sendMessage(); }
   });
   input.addEventListener('input', () => {
     input.style.height = '64px';
     input.style.height = `${Math.min(input.scrollHeight, 180)}px`;
     saveComposerDraft(); updateComposerControls();
+    renderSkillCommands();
   });
   const dock = $('.prompt-dock');
   dock?.addEventListener('dragover', event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); dock.classList.add('is-dragging'); } });
@@ -2154,8 +2505,7 @@ async function newThread() {
   try {
     saveComposerDraft();
     state.threadScope = 'active';
-    const agent = $('#chatAgent')?.value || state.cache.agents?.[0]?.id;
-    const result = await api('/api/threads', { method: 'POST', body: JSON.stringify({ name: '新对话', agent_id: agent }) });
+    const result = await api('/api/threads', { method: 'POST', body: JSON.stringify({ name: '新对话' }) });
     state.thread = result.id;
     if (state.page !== 'chat') go('chat'); else await loadPage();
   } catch (error) { toast(error.message, true); }
@@ -2414,8 +2764,10 @@ function queueMessageActive(message) {
 
 function clearConfirmedChatDraft(unknown) {
   const input = $('#chatInput');
-  if (input?.value.trim() === unknown.payload?.content) input.value = '';
-  state.chatAttachments = state.chatAttachments.filter(item => !(unknown.payload?.attachment_ids || []).includes(item.id));
+  if (!unknown.preserveDraft) {
+    if (input?.value.trim() === unknown.payload?.content) input.value = '';
+    state.chatAttachments = state.chatAttachments.filter(item => !(unknown.payload?.attachment_ids || []).includes(item.id));
+  }
   renderChatAttachments(); rememberUnknownChatSubmission(null);
 }
 
@@ -2558,8 +2910,10 @@ async function refreshPersistentChat(threadId = state.thread, epoch = state.chat
     const stream = $('#messages');
     const followLatest = stream && stream.scrollHeight - stream.scrollTop - stream.clientHeight < 90;
     const priorArtifacts = JSON.stringify((state.currentThread?.messages || []).map(item => [item.id, item.project_artifacts, item.meta?.artifacts]));
+    const runtimeChanged = state.activeProjectId !== (thread.active_project_id || null) || state.currentThread?.agent_id !== thread.agent_id;
     state.currentThread = thread; state.chatQueue = queue.data || thread.queue_messages || []; state.chatInteractions = interactions.data || thread.interactions || []; state.chatPollError = '';
     state.activeProjectId = thread.active_project_id || null; syncActiveChatTurn();
+    if (runtimeChanged) refreshChatRuntime().catch(() => {});
     if (state.chatUnknownSubmission) {
       const found = state.chatQueue.find(item => item.submission_id === state.chatUnknownSubmission.submission_id);
       if (found) clearConfirmedChatDraft(state.chatUnknownSubmission);
@@ -2587,6 +2941,7 @@ function applyPersistentChatMessages(messages) {
   if (messages.length || state.chatInteractions.length || state.chatQueue.length) stream.querySelector?.('.conversation-empty')?.remove();
   messages.forEach((message, index) => {
     const key = message.id || `${message.turn_id || 'history'}_${message.role}_${index}`;
+    if (state.userMessageEdit?.threadId === state.thread && state.userMessageEdit.messageId === message.id && document.getElementById(`chatMessage_${key}`)) return;
     const html = messageHtml(message); if (state.chatMessageSignatures[key] === html) return;
     const existing = document.getElementById(`chatMessage_${key}`);
     if (existing) existing.innerHTML = html;
@@ -2646,6 +3001,8 @@ async function refreshChatEvents(threadId, turnId, epoch) {
 }
 
 async function sendMessage(options = null) {
+  if (!options?.content && ['/skills', '/skill'].includes($('#chatInput')?.value.trim())) { openSkillCommands(); return; }
+  if (!options?.content && $('#chatInput')?.value.trim() === '/permissions') { openRuntimeSettings(); return; }
   const input = $('#chatInput'); const agent = options?.agent || $('#chatAgent')?.value;
   if (!input || state.chatSubmitPending || state.modelSaving) return;
   if (state.chatUnknownSubmission) return toast('上次提交结果尚未确认，请先刷新提交状态', true);
@@ -2669,19 +3026,22 @@ async function sendMessage(options = null) {
       const found = confirmed?.data?.find(item => item.submission_id === payload.submission_id);
       if (found) result = { message: found };
       else if (confirmed && [400,401,403,404,409,422].includes(error.status)) throw error;
-      else { rememberUnknownChatSubmission({ submission_id: payload.submission_id, payload, error: error.message }); renderChatQueue(); toast('提交结果尚未确认，已锁定发送；请刷新提交状态，避免重复执行', true); return; }
+      else { rememberUnknownChatSubmission({ submission_id: payload.submission_id, payload, preserveDraft: options?.preserveDraft === true, error: error.message }); renderChatQueue(); toast('提交结果尚未确认，已锁定发送；请刷新提交状态，避免重复执行', true); return; }
     }
     const message = result?.message;
-    if (!message?.id) { rememberUnknownChatSubmission({ submission_id: payload.submission_id, payload }); renderChatQueue(); return; }
+    if (!message?.id) { rememberUnknownChatSubmission({ submission_id: payload.submission_id, payload, preserveDraft: options?.preserveDraft === true }); renderChatQueue(); return; }
     state.chatLastMutationAt = Date.now();
     acceptQueuedChatMessage(message);
     if (result.interaction && !state.chatInteractions.some(item => item.id === result.interaction.id)) state.chatInteractions.push(result.interaction);
-    if (input.value.trim() === content || (!input.value.trim() && attachments.length)) input.value = '';
-    input.style.height = '64px';
-    state.chatAttachments = state.chatAttachments.filter(item => !attachments.some(sent => sent.id === item.id));
+    if (!options?.preserveDraft) {
+      if (input.value.trim() === content || (!input.value.trim() && attachments.length)) input.value = '';
+      input.style.height = '64px';
+      state.chatAttachments = state.chatAttachments.filter(item => !attachments.some(sent => sent.id === item.id));
+    }
     renderChatAttachments(); syncActiveChatTurn(); renderChatQueue();
     startChatPolling();
     toast(payload.interrupt ? '调整指令已提交，停止当前任务后执行' : message.status === 'pending' ? '已加入待执行队列' : '任务已提交');
+    return message;
   } catch (error) { toast(`提交失败：${error.message}`, true); }
   finally { state.chatSubmitPending = false; updateComposerControls(); saveComposerDraft(); }
 }
@@ -2876,6 +3236,9 @@ document.addEventListener('keydown', event => {
 document.addEventListener('click', closeSessionMenus);
 window.addEventListener('resize', closeSessionMenus);
 window.addEventListener('resize', syncRailAccessibility);
+window.addEventListener('resize', () => {
+  if (state.page === 'chat' && state.fileWorkspace && state.filesPanelOpen) applyFileSplit(state.fileWorkspace.ratio, false);
+});
 
 window.addEventListener('hashchange', () => {
   const page = location.hash.slice(1);

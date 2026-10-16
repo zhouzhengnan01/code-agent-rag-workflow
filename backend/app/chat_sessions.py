@@ -5,6 +5,7 @@ from fastapi import APIRouter, Body, HTTPException
 from . import chat_inputs, conversation_control as control
 from .db import connect, new_id, now, resource_get
 from .projects import create_project, get_project, list_projects
+from . import runtime_config
 
 router=APIRouter()
 handlers={}
@@ -20,7 +21,8 @@ def thread_row(thread_id):
     return row
 
 def current_agent(thread,agent_id=None,model_override=None):
-    agent=resource_get('agents',agent_id or thread['agent_id'])
+    selected=agent_id or thread['agent_id']
+    agent=resource_get('agents',selected) if selected else runtime_config.ensure_default_agent()
     if not agent or agent.get('enabled') is False: raise HTTPException(400,'请选择有效的智能体')
     scoped=handlers['_agent_for_thread'](agent,thread)
     if model_override is not None: scoped=chat_inputs.apply_override(scoped,model_override)
@@ -65,6 +67,8 @@ async def execute_message(item):
         thread=thread_row(thread_id)
         payload=item.get('payload') or {}
         agent=current_agent(thread,item['agent_id'],payload.get('model_override'))
+        if payload.get('skill_invocation'):
+            agent['_skill_invocation']=payload['skill_invocation']
         if payload.get('_recovering'): agent['_recovering']=True
         attachments=chat_inputs.resolve_ids(payload.get('attachment_ids',[]))
         with connect() as db:
@@ -77,7 +81,7 @@ async def execute_message(item):
             db.execute("UPDATE chat_queue_messages SET status='consumed',turn_id=?,updated_at=? WHERE id=?",(turn_id,now(),item['id']))
             db.execute('UPDATE threads SET agent_id=?,updated_at=? WHERE id=?',(item['agent_id'],now(),thread_id))
             exists=db.execute("SELECT 1 FROM messages WHERE thread_id=? AND turn_id=? AND role='user'",(thread_id,turn_id)).fetchone()
-            if not exists: db.execute('INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)',(new_id('msg'),thread_id,turn_id,'user',item['content'],control.encode({'attachments':[chat_inputs.public(value) for value in attachments],'queue_message_id':item['id']}),now()))
+            if not exists: db.execute('INSERT INTO messages(id,thread_id,turn_id,role,content,meta,created_at) VALUES(?,?,?,?,?,?,?)',(new_id('msg'),thread_id,turn_id,'user',item['content'],control.encode({'attachments':[chat_inputs.public(value) for value in attachments],'queue_message_id':item['id'],'sent_at':item['created_at']}),now()))
         message_event(thread_id,turn_id,{'id':new_id('evt'),'type':'turn_accepted','queue_message_id':item['id']})
         try:
             directive=None if payload.get('destination_confirmed') else handlers['parse_project_directive'](item['content'],list_projects())
@@ -119,6 +123,12 @@ async def execute_message(item):
             project_id=payload.get('project_id') or thread['active_project_id']
             if project_id:
                 if not get_project(project_id): raise ValueError('目标项目不存在')
+                # A directive may change destination after current_agent resolved
+                # the old project. Re-layer the target configuration before running.
+                agent=handlers['_agent_for_thread'](resource_get('agents',item['agent_id']),{**dict(thread),'active_project_id':project_id})
+                if payload.get('model_override') is not None: agent=chat_inputs.apply_override(agent,payload['model_override'])
+                if payload.get('skill_invocation'): agent['_skill_invocation']=payload['skill_invocation']
+                if payload.get('_recovering'): agent['_recovering']=True
                 save=payload.get('save_to_project',True)
                 with connect() as db:
                     db.execute('INSERT OR REPLACE INTO turn_projects(turn_id,thread_id,project_id,save_to_project,created_at) VALUES(?,?,?,?,?)',(turn_id,thread_id,project_id,int(save),now()))
@@ -277,8 +287,12 @@ async def submit_message(thread_id:str,payload:dict=Body(...)):
     interrupt=payload.get('interrupt',False)
     if type(interrupt) is not bool: raise HTTPException(400,'interrupt 必须为布尔值')
     agent=current_agent(thread,payload.get('agent_id'))
+    # Reject invalid/ambiguous manual invocations before accepting a durable task.
+    invocation=runtime_config.resolve_invocation(agent,content)
     chat_inputs.validate_model_inputs(agent,content,attachments,[])
     saved={'attachment_ids':[item['id'] for item in attachments],'model_override':json.loads(thread['model_override'] or '{}')}
+    if invocation:
+        saved['skill_invocation']=invocation
     if 'retry_of' in payload:
         if not isinstance(payload['retry_of'], str) or not 1 <= len(payload['retry_of']) <= 100:
             raise HTTPException(400, 'retry_of 必须为有效的原任务 ID')
